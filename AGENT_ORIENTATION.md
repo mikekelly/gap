@@ -58,7 +58,9 @@ cargo run --bin acp-server  # Run server
 - **Bidirectional streaming**: tokio::io::copy with tokio::select! for full-duplex proxying
 - **HTTP parsing & transforms**: `http_utils` module parses raw HTTP, `plugin_matcher` finds matching plugins, `proxy_transforms` executes transforms
 - **Transform pipeline**: Parse HTTP → Match host → Load credentials → Execute plugin → Serialize → Forward
+- **Credential storage pattern**: Management API stores credentials as `credential:{plugin}:{field_name}` (e.g., `credential:exa:api_key`). ProxyServer loads ALL fields for a plugin by listing keys with prefix `credential:{plugin}:` and builds an ACPCredentials object.
 - **Token caching**: ProxyServer and Management API share `Arc<TokenCache>` which implements invalidate-on-write caching over SecretStore, enabling dynamic token updates without server restart
+- **SecretStore sharing**: ProxyServer receives `Arc<dyn SecretStore>` from main.rs (same instance as Management API) to ensure consistent credential access
 
 ## Management API (Phase 6)
 - **Authentication**: Client sends `password_hash` (SHA512 of password) in request body; server verifies Argon2(SHA512(password))
@@ -131,3 +133,4 @@ cargo run --bin acp-server  # Run server
 - **portpicker for test isolation**: Use `portpicker` crate to get dynamic ports for test servers, avoiding port conflicts in parallel test execution.
 - **PluginRuntime is not Send**: PluginRuntime contains Boa engine with `Rc` types, making it not `Send`. In async Axum handlers, scope PluginRuntime operations in a block to ensure the runtime is dropped before any `.await` points. Enable `axum = { version = "0.7", features = ["macros"] }` and use `#[axum::debug_handler]` to see detailed Send/Sync errors during development.
 - **git2 callbacks are not Send**: `RepoBuilder` with `RemoteCallbacks` closures is not `Send`. In async handlers, scope the entire git clone operation (callbacks, fetch options, builder) in a block to ensure all non-Send types are dropped before any `.await` points.
+- **SecretStore trait with ?Sized**: When working with trait objects (`&dyn SecretStore`), functions accepting generic `S: SecretStore` parameters need `+ ?Sized` bound to support unsized types. This applies to `parse_and_transform()`, `load_plugin_credentials()`, and `find_matching_plugin()`.
