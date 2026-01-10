@@ -7,6 +7,8 @@
 //! - Management API for configuration
 //! - Secure credential storage
 
+pub mod api;
+
 use acp_lib::Config;
 use clap::Parser;
 

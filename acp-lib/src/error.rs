@@ -31,6 +31,14 @@ pub enum AcpError {
     #[error("Proxy error: {0}")]
     Proxy(String),
 
+    /// Network errors (connection, timeout)
+    #[error("Network error: {0}")]
+    Network(String),
+
+    /// Protocol errors (HTTP, TLS handshake)
+    #[error("Protocol error: {0}")]
+    Protocol(String),
+
     /// Plugin errors (loading, execution, sandbox violations)
     #[error("Plugin error: {0}")]
     Plugin(String),
@@ -70,6 +78,16 @@ impl AcpError {
     /// Create a proxy error with context
     pub fn proxy(msg: impl Into<String>) -> Self {
         Self::Proxy(msg.into())
+    }
+
+    /// Create a network error with context
+    pub fn network(msg: impl Into<String>) -> Self {
+        Self::Network(msg.into())
+    }
+
+    /// Create a protocol error with context
+    pub fn protocol(msg: impl Into<String>) -> Self {
+        Self::Protocol(msg.into())
     }
 
     /// Create a plugin error with context

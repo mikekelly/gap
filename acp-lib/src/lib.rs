@@ -4,12 +4,14 @@
 /// used by both the `acp` CLI and `acp-server` daemon.
 pub mod error;
 pub mod plugin_runtime;
+pub mod proxy;
 pub mod storage;
 pub mod tls;
 pub mod types;
 
 pub use error::{AcpError, Result};
 pub use plugin_runtime::PluginRuntime;
+pub use proxy::ProxyServer;
 pub use storage::{create_store, FileStore, SecretStore};
 #[cfg(target_os = "macos")]
 pub use storage::KeychainStore;
