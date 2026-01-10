@@ -545,6 +545,29 @@ impl PluginRuntime {
         Ok(())
     }
 
+    /// Load a plugin from JavaScript code string
+    ///
+    /// Executes the plugin code and extracts/caches the plugin metadata.
+    ///
+    /// # Arguments
+    /// * `name` - Expected plugin name
+    /// * `code` - JavaScript code to execute
+    ///
+    /// # Returns
+    /// The loaded ACPPlugin with metadata
+    pub fn load_plugin_from_code(&mut self, name: &str, code: &str) -> Result<ACPPlugin> {
+        // Execute the plugin code
+        self.execute(code)?;
+
+        // Extract metadata
+        let plugin = self.extract_plugin_metadata(name)?;
+
+        // Cache the plugin
+        self.plugins.insert(name.to_string(), plugin.clone());
+
+        Ok(plugin)
+    }
+
     /// Load a plugin from the SecretStore and execute it
     ///
     /// Loads the plugin JavaScript code from the store (key: `plugin:{name}`),
@@ -565,16 +588,8 @@ impl PluginRuntime {
         let code_str = String::from_utf8(code)
             .map_err(|e| AcpError::plugin(format!("Plugin code is not valid UTF-8: {}", e)))?;
 
-        // Execute the plugin code
-        self.execute(&code_str)?;
-
-        // Extract metadata
-        let plugin = self.extract_plugin_metadata(name)?;
-
-        // Cache the plugin
-        self.plugins.insert(name.to_string(), plugin.clone());
-
-        Ok(plugin)
+        // Use the common code loading logic
+        self.load_plugin_from_code(name, &code_str)
     }
 
     /// Extract plugin metadata from the JavaScript context
