@@ -83,6 +83,12 @@ cargo run --bin acp-server  # Run server
 - **Platform differences**: Some E2E tests ignored on macOS due to Keychain requiring user interaction. Run with `--ignored` for manual testing.
 - **Smoke tests**: Located in `smoke-tests/` directory for installation verification (`test-install.sh`, `test-docker.sh`)
 
+## Plugin Management
+- **Plugin installation**: Uses git2 (0.19) to clone GitHub repos instead of HTTP fetch
+- **Installation flow**: `Repository::clone()` → read `plugin.js` → validate → store → cleanup (automatic via tempfile Drop)
+- **Temp directory cleanup**: `tempfile::tempdir()` automatically cleans up when it goes out of scope (RAII)
+- **Error mapping**: Clone failures return BAD_GATEWAY (502), missing plugin.js returns BAD_REQUEST (400)
+
 ## Installation (Phase 8.3)
 - **install.sh**: Cross-platform installation script (macOS/Linux, x86_64/aarch64) with build-from-source and binary download support
 - **Dockerfile**: Multi-stage build with dependency caching layer; runtime uses non-root user `acp` on Debian Bookworm
