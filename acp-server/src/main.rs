@@ -53,14 +53,24 @@ async fn main() -> anyhow::Result<()> {
         config
     };
 
-    tracing::info!(
-        "Starting ACP Server (placeholder - Phase 4+ will implement actual server)"
-    );
+    tracing::info!("Starting ACP Server");
     tracing::info!("Proxy port: {}", config.proxy_port);
     tracing::info!("API port: {}", config.api_port);
 
-    // Placeholder - actual server implementation in later phases
-    println!("ACP Server started (foundation only - see Phase 4+)");
+    // Create API state
+    let api_state = api::ApiState::new(config.proxy_port, config.api_port);
+
+    // Build the API router
+    let app = api::create_router(api_state);
+
+    // Bind to the API port
+    let listener = tokio::net::TcpListener::bind(format!("0.0.0.0:{}", config.api_port))
+        .await?;
+
+    tracing::info!("Management API listening on 0.0.0.0:{}", config.api_port);
+
+    // Start serving
+    axum::serve(listener, app).await?;
 
     Ok(())
 }
