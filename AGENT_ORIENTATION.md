@@ -81,6 +81,16 @@ cargo run --bin acp-server  # Run server
 - **Test suite**: 120 tests across all workspace crates (117 passing, 3 ignored on macOS)
 - **Test organization**: Unit tests inline with source, integration tests in `tests/` directory
 - **Platform differences**: Some E2E tests ignored on macOS due to Keychain requiring user interaction. Run with `--ignored` for manual testing.
+- **Smoke tests**: Located in `smoke-tests/` directory for installation verification (`test-install.sh`, `test-docker.sh`)
+
+## Installation (Phase 8.3)
+- **install.sh**: Cross-platform installation script (macOS/Linux, x86_64/aarch64) with build-from-source and binary download support
+- **Dockerfile**: Multi-stage build with dependency caching layer; runtime uses non-root user `acp` on Debian Bookworm
+- **docker-compose.yml**: Complete test environment with ACP server, mock API (httpbin), and persistent volumes
+- **Binaries**: Release binaries at `target/release/acp` and `target/release/acp-server` (5-6MB each)
+- **Default ports**: 9443 (proxy), 9080 (management API)
+- **Data directory**: `/var/lib/acp` in Docker, `~/.config/acp/` or `$XDG_CONFIG_HOME/acp/` on host systems
+- **Health check**: Management API `/status` endpoint used for Docker health checks
 
 ## Gotchas
 - **Wildcard matching is single-level only**: The pattern `*.s3.amazonaws.com` matches `bucket.s3.amazonaws.com` but rejects both `s3.amazonaws.com` (no subdomain) and `evil.com.s3.amazonaws.com` (multiple levels)
