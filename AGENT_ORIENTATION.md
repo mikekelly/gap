@@ -33,6 +33,9 @@ cargo run --bin acp-server  # Run server
 - `KeychainStore` - macOS Keychain integration (conditional compilation)
 - `create_store()` - Factory for platform-appropriate storage
 - `TokenCache` - Invalidate-on-write cache over SecretStore for agent tokens (read from cache/disk, write to disk + invalidate)
+- `Registry` - Centralized metadata storage for tokens, plugins, and credentials (stored at key "_registry")
+- `RegistryData` - JSON structure containing TokenEntry, PluginEntry, and CredentialEntry lists
+- `TokenEntry`, `PluginEntry`, `CredentialEntry` - Registry metadata types
 - `CertificateAuthority` - TLS CA for dynamic certificate generation (Phase 3)
 - `ProxyServer` - MITM HTTPS proxy with agent authentication and bidirectional streaming (Phase 4)
 
@@ -41,6 +44,7 @@ cargo run --bin acp-server  # Run server
 - **Builder pattern**: All types use `.with_*()` methods for fluent construction
 - **Error context**: Use `AcpError::storage("msg")` rather than `AcpError::Storage("msg".to_string())`
 - **TLS certificate caching**: Generated certificates cached by hostname with expiry; auto-cleanup on access
+- **Registry pattern**: Centralized metadata storage at key "_registry" solves listing issues on platforms like macOS Keychain. Registry tracks what exists (metadata), while actual values remain at individual keys. Registry.load() returns empty RegistryData if not found (not an error).
 
 ## TLS Infrastructure (rcgen 0.13)
 - **CA generation**: `CertificateAuthority::generate()` creates self-signed CA valid for 10 years
