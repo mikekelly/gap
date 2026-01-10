@@ -460,7 +460,7 @@ async fn install_plugin(
 ) -> std::result::Result<Json<InstallResponse>, (StatusCode, String)> {
     use acp_lib::storage::create_store;
     use acp_lib::plugin_runtime::PluginRuntime;
-    use git2::Repository;
+    use git2::{build::RepoBuilder, Cred, FetchOptions, RemoteCallbacks};
     use tempfile::tempdir;
 
     let req: InstallRequest = verify_auth(&state, &body).await?;
@@ -482,27 +482,43 @@ async fn install_plugin(
 
     let repo_url = format!("https://github.com/{}/{}.git", owner, repo);
 
-    Repository::clone(&repo_url, temp_dir.path())
-        .map_err(|e| (StatusCode::BAD_GATEWAY, format!("Failed to clone repository: {}", e)))?;
-
-    // Read plugin.js from the cloned repository
-    let plugin_path = temp_dir.path().join("plugin.js");
-    let plugin_code = std::fs::read_to_string(&plugin_path)
-        .map_err(|e| (StatusCode::BAD_REQUEST, format!("No plugin.js found in repository: {}", e)))?;
-
-    // Transform ES6 export to var declaration
-    let transformed_code = transform_es6_export(&plugin_code);
-
-    // Validate plugin by loading it in a temporary runtime
-    // IMPORTANT: PluginRuntime is not Send, so we must complete all operations before any await
+    // Clone and read plugin.js - scoped to ensure non-Send types are dropped before await
     let plugin_name = format!("{}/{}", owner, repo);
-    let plugin = {
+    let (transformed_code, plugin) = {
+        // Configure credentials callback for public repositories
+        let mut callbacks = RemoteCallbacks::new();
+        callbacks.credentials(|_url, _username_from_url, _allowed_types| {
+            // For public repos, just use default credentials (none)
+            Cred::default()
+        });
+
+        let mut fetch_options = FetchOptions::new();
+        fetch_options.remote_callbacks(callbacks);
+
+        let mut builder = RepoBuilder::new();
+        builder.fetch_options(fetch_options);
+
+        builder.clone(&repo_url, temp_dir.path())
+            .map_err(|e| (StatusCode::BAD_GATEWAY, format!("Failed to clone repository: {}", e)))?;
+
+        // Read plugin.js from the cloned repository
+        let plugin_path = temp_dir.path().join("plugin.js");
+        let plugin_code = std::fs::read_to_string(&plugin_path)
+            .map_err(|e| (StatusCode::BAD_REQUEST, format!("No plugin.js found in repository: {}", e)))?;
+
+        // Transform ES6 export to var declaration
+        let transformed_code = transform_es6_export(&plugin_code);
+
+        // Validate plugin by loading it in a temporary runtime
+        // IMPORTANT: PluginRuntime is not Send, so we must complete all operations before any await
         let mut runtime = PluginRuntime::new()
             .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to create runtime: {}", e)))?;
 
-        runtime.load_plugin_from_code(&plugin_name, &transformed_code)
-            .map_err(|e| (StatusCode::BAD_REQUEST, format!("Invalid plugin code: {}", e)))?
-    }; // runtime dropped here, before the await below
+        let plugin = runtime.load_plugin_from_code(&plugin_name, &transformed_code)
+            .map_err(|e| (StatusCode::BAD_REQUEST, format!("Invalid plugin code: {}", e)))?;
+
+        (transformed_code, plugin)
+    }; // All non-Send types dropped here, before the await below
 
     // Store plugin in SecretStore
     let store = create_store(None)

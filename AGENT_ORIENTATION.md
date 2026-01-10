@@ -85,7 +85,8 @@ cargo run --bin acp-server  # Run server
 
 ## Plugin Management
 - **Plugin installation**: Uses git2 (0.19) to clone GitHub repos instead of HTTP fetch
-- **Installation flow**: `Repository::clone()` → read `plugin.js` → validate → store → cleanup (automatic via tempfile Drop)
+- **Installation flow**: `RepoBuilder` with credentials callback → clone → read `plugin.js` → validate → store → cleanup (automatic via tempfile Drop)
+- **git2 credentials**: Must use `RepoBuilder` with `FetchOptions` and credentials callback even for public repos. Direct `Repository::clone()` fails with auth error.
 - **Temp directory cleanup**: `tempfile::tempdir()` automatically cleans up when it goes out of scope (RAII)
 - **Error mapping**: Clone failures return BAD_GATEWAY (502), missing plugin.js returns BAD_REQUEST (400)
 
@@ -119,3 +120,4 @@ cargo run --bin acp-server  # Run server
 - **E2E test keychain isolation (macOS)**: Tests using server init will trigger Keychain prompts on macOS. Mark with `#[cfg_attr(target_os = "macos", ignore = "reason")]` or set `HOME` env var to temp dir (doesn't fully prevent Keychain access).
 - **portpicker for test isolation**: Use `portpicker` crate to get dynamic ports for test servers, avoiding port conflicts in parallel test execution.
 - **PluginRuntime is not Send**: PluginRuntime contains Boa engine with `Rc` types, making it not `Send`. In async Axum handlers, scope PluginRuntime operations in a block to ensure the runtime is dropped before any `.await` points. Enable `axum = { version = "0.7", features = ["macros"] }` and use `#[axum::debug_handler]` to see detailed Send/Sync errors during development.
+- **git2 callbacks are not Send**: `RepoBuilder` with `RemoteCallbacks` closures is not `Send`. In async handlers, scope the entire git clone operation (callbacks, fetch options, builder) in a block to ensure all non-Send types are dropped before any `.await` points.
