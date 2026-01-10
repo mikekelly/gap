@@ -1,0 +1,6 @@
+{
+  "enabledPlugins": {
+    "promode@promode": true,
+    "ralph-loop@claude-plugins-official": true
+  }
+}
