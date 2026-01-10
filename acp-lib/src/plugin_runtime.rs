@@ -644,25 +644,60 @@ impl PluginRuntime {
             match_patterns.push(pattern);
         }
 
-        // Extract credentialSchema (array of strings)
+        // Extract credentialSchema (supports two formats)
+        // 1. Simple format: ["api_key", "secret"]
+        // 2. Rich format: { fields: [{ name: "apiKey", ... }, ...] }
         let schema_value = plugin_obj.get(JsString::from("credentialSchema"), &mut self.context)
             .map_err(|e| AcpError::plugin(format!("Failed to get plugin.credentialSchema: {}", e)))?;
         let schema_obj = schema_value.as_object()
-            .ok_or_else(|| AcpError::plugin("plugin.credentialSchema is not an array"))?;
+            .ok_or_else(|| AcpError::plugin("plugin.credentialSchema is not an object or array"))?;
 
         let mut credential_schema = Vec::new();
-        let schema_length_value = schema_obj.get(JsString::from("length"), &mut self.context)
-            .map_err(|e| AcpError::plugin(format!("Failed to get credentialSchema.length: {}", e)))?;
-        let schema_length = schema_length_value.as_number()
-            .ok_or_else(|| AcpError::plugin("credentialSchema.length is not a number"))? as usize;
 
-        for i in 0..schema_length {
-            let elem = schema_obj.get(i, &mut self.context)
-                .map_err(|e| AcpError::plugin(format!("Failed to get credentialSchema[{}]: {}", i, e)))?;
-            let key = elem.as_string()
-                .ok_or_else(|| AcpError::plugin(format!("credentialSchema[{}] is not a string", i)))?
-                .to_std_string_escaped();
-            credential_schema.push(key);
+        // Check if this is the rich format (object with fields property)
+        let fields_value = schema_obj.get(JsString::from("fields"), &mut self.context);
+        let is_rich_format = fields_value.is_ok() && fields_value.as_ref().unwrap().is_object();
+
+        if is_rich_format {
+            // Rich format: { fields: [{ name: "apiKey", ... }, ...] }
+            let fields_value = fields_value.unwrap();
+            let fields_obj = fields_value.as_object()
+                .ok_or_else(|| AcpError::plugin("credentialSchema.fields is not an array"))?;
+
+            let fields_length_value = fields_obj.get(JsString::from("length"), &mut self.context)
+                .map_err(|e| AcpError::plugin(format!("Failed to get credentialSchema.fields.length: {}", e)))?;
+            let fields_length = fields_length_value.as_number()
+                .ok_or_else(|| AcpError::plugin("credentialSchema.fields.length is not a number"))? as usize;
+
+            for i in 0..fields_length {
+                let field_obj = fields_obj.get(i, &mut self.context)
+                    .map_err(|e| AcpError::plugin(format!("Failed to get credentialSchema.fields[{}]: {}", i, e)))?;
+                let field_obj = field_obj.as_object()
+                    .ok_or_else(|| AcpError::plugin(format!("credentialSchema.fields[{}] is not an object", i)))?;
+
+                // Extract the "name" field
+                let name_value = field_obj.get(JsString::from("name"), &mut self.context)
+                    .map_err(|e| AcpError::plugin(format!("Failed to get credentialSchema.fields[{}].name: {}", i, e)))?;
+                let name = name_value.as_string()
+                    .ok_or_else(|| AcpError::plugin(format!("credentialSchema.fields[{}].name is not a string", i)))?
+                    .to_std_string_escaped();
+                credential_schema.push(name);
+            }
+        } else {
+            // Simple format: ["api_key", "secret"]
+            let schema_length_value = schema_obj.get(JsString::from("length"), &mut self.context)
+                .map_err(|e| AcpError::plugin(format!("Failed to get credentialSchema.length: {}", e)))?;
+            let schema_length = schema_length_value.as_number()
+                .ok_or_else(|| AcpError::plugin("credentialSchema.length is not a number"))? as usize;
+
+            for i in 0..schema_length {
+                let elem = schema_obj.get(i, &mut self.context)
+                    .map_err(|e| AcpError::plugin(format!("Failed to get credentialSchema[{}]: {}", i, e)))?;
+                let key = elem.as_string()
+                    .ok_or_else(|| AcpError::plugin(format!("credentialSchema[{}] is not a string", i)))?
+                    .to_std_string_escaped();
+                credential_schema.push(key);
+            }
         }
 
         // Verify transform function exists
@@ -1160,6 +1195,62 @@ mod tests {
         let plugin = result.unwrap();
         // The plugin name should be the GitHub path, not the internal name
         assert_eq!(plugin.name, "mikekelly/exa-acp");
+    }
+
+    #[test]
+    fn test_extract_plugin_metadata_rich_credential_schema() {
+        // Test extraction of rich credential schema format with fields array
+        let mut runtime = PluginRuntime::new().unwrap();
+
+        let plugin_code = r#"
+        var plugin = {
+            name: "exa-acp",
+            matchPatterns: ["api.exa.ai"],
+            credentialSchema: {
+                fields: [
+                    { name: "apiKey", label: "API Key", type: "password", required: true }
+                ]
+            },
+            transform: function(request, credentials) {
+                request.headers["Authorization"] = "Bearer " + credentials.apiKey;
+                return request;
+            }
+        };
+        "#;
+
+        runtime.execute(plugin_code).unwrap();
+        let plugin = runtime.extract_plugin_metadata("mikekelly/exa-acp").unwrap();
+
+        assert_eq!(plugin.name, "mikekelly/exa-acp");
+        assert_eq!(plugin.match_patterns, vec!["api.exa.ai"]);
+        // Should extract just the "name" field from each object in the fields array
+        assert_eq!(plugin.credential_schema, vec!["apiKey"]);
+    }
+
+    #[test]
+    fn test_extract_plugin_metadata_rich_credential_schema_multiple_fields() {
+        // Test extraction with multiple fields
+        let mut runtime = PluginRuntime::new().unwrap();
+
+        let plugin_code = r#"
+        var plugin = {
+            name: "test-plugin",
+            matchPatterns: ["api.example.com"],
+            credentialSchema: {
+                fields: [
+                    { name: "accessKey", label: "Access Key", type: "text", required: true },
+                    { name: "secretKey", label: "Secret Key", type: "password", required: true },
+                    { name: "region", label: "Region", type: "text", required: false }
+                ]
+            },
+            transform: function(request, credentials) { return request; }
+        };
+        "#;
+
+        runtime.execute(plugin_code).unwrap();
+        let plugin = runtime.extract_plugin_metadata("test-plugin").unwrap();
+
+        assert_eq!(plugin.credential_schema, vec!["accessKey", "secretKey", "region"]);
     }
 
     #[test]
