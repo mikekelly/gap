@@ -13,7 +13,7 @@ pub mod api;
 pub mod launchd;
 
 use acp_lib::{storage, tls::CertificateAuthority, TokenCache, Registry, Config, ProxyServer};
-use clap::Parser;
+use clap::{Parser, Subcommand};
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -21,27 +21,65 @@ use std::sync::Arc;
 #[command(name = "acp-server")]
 #[command(author, version, about = "Agent Credential Proxy Server", long_about = None)]
 struct Args {
+    #[command(subcommand)]
+    command: Option<Command>,
+
     /// Proxy port
-    #[arg(long, default_value = "9443")]
+    #[arg(long, default_value = "9443", global = true)]
     proxy_port: u16,
 
     /// Management API port
-    #[arg(long, default_value = "9080")]
+    #[arg(long, default_value = "9080", global = true)]
     api_port: u16,
 
     /// Data directory (for container/Linux mode)
-    #[arg(long)]
+    #[arg(long, global = true)]
     data_dir: Option<String>,
 
     /// Log level
-    #[arg(long, default_value = "info")]
+    #[arg(long, default_value = "info", global = true)]
     log_level: String,
+}
+
+#[derive(Subcommand)]
+enum Command {
+    /// Check if the acp-server service is running (macOS only)
+    #[cfg(target_os = "macos")]
+    Status,
+
+    /// Install the acp-server as a LaunchAgent (macOS only)
+    #[cfg(target_os = "macos")]
+    Install,
+
+    /// Uninstall the acp-server LaunchAgent (macOS only)
+    #[cfg(target_os = "macos")]
+    Uninstall {
+        /// Remove all data including ~/.acp/ directory
+        #[arg(long)]
+        purge: bool,
+    },
 }
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let args = Args::parse();
 
+    // Handle subcommands
+    if let Some(command) = args.command {
+        return match command {
+            #[cfg(target_os = "macos")]
+            Command::Status => {
+                launchd::status();
+                Ok(())
+            }
+            #[cfg(target_os = "macos")]
+            Command::Install => launchd::install(),
+            #[cfg(target_os = "macos")]
+            Command::Uninstall { purge } => launchd::uninstall(purge),
+        };
+    }
+
+    // Default: run the server
     // Initialize tracing with configured log level
     tracing_subscriber::fmt()
         .with_env_filter(args.log_level.clone())
@@ -239,5 +277,33 @@ mod tests {
     fn test_args_data_dir() {
         let args = Args::parse_from(["acp-server", "--data-dir", "/var/lib/acp"]);
         assert_eq!(args.data_dir, Some("/var/lib/acp".to_string()));
+    }
+
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn test_status_subcommand_parses() {
+        let args = Args::parse_from(["acp-server", "status"]);
+        assert!(matches!(args.command, Some(Command::Status)));
+    }
+
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn test_install_subcommand_parses() {
+        let args = Args::parse_from(["acp-server", "install"]);
+        assert!(matches!(args.command, Some(Command::Install)));
+    }
+
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn test_uninstall_subcommand_parses() {
+        let args = Args::parse_from(["acp-server", "uninstall"]);
+        assert!(matches!(args.command, Some(Command::Uninstall { purge: false })));
+    }
+
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn test_uninstall_subcommand_with_purge_flag() {
+        let args = Args::parse_from(["acp-server", "uninstall", "--purge"]);
+        assert!(matches!(args.command, Some(Command::Uninstall { purge: true })));
     }
 }

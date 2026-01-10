@@ -73,6 +73,193 @@ pub fn get_log_dir() -> PathBuf {
     home_dir.join(".acp").join("logs")
 }
 
+#[cfg(target_os = "macos")]
+/// Get the ACP data directory path
+///
+/// Returns ~/.acp/
+pub fn get_acp_dir() -> PathBuf {
+    let home_dir = dirs::home_dir().expect("Could not determine home directory");
+    home_dir.join(".acp")
+}
+
+#[cfg(target_os = "macos")]
+/// Install the acp-server as a LaunchAgent
+///
+/// This function:
+/// - Gets the current executable path
+/// - Creates the LaunchAgents directory if it doesn't exist
+/// - Creates the log directory (~/.acp/logs/)
+/// - Generates the plist file
+/// - Loads the service with launchctl
+/// - Starts the service immediately
+///
+/// # Returns
+/// Ok(()) on success, or an error if installation fails
+pub fn install() -> anyhow::Result<()> {
+    use std::fs;
+    use std::process::Command;
+
+    // Get the binary path (current executable)
+    let binary_path = std::env::current_exe()?
+        .to_str()
+        .ok_or_else(|| anyhow::anyhow!("Could not determine binary path"))?
+        .to_string();
+
+    // Get plist path
+    let plist_path = get_plist_path();
+
+    // Check if plist already exists
+    if plist_path.exists() {
+        anyhow::bail!(
+            "Service already installed at {}.\nRun 'acp-server uninstall' first.",
+            plist_path.display()
+        );
+    }
+
+    // Create LaunchAgents directory if it doesn't exist
+    if let Some(parent) = plist_path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+
+    // Create log directory
+    let log_dir = get_log_dir();
+    fs::create_dir_all(&log_dir)?;
+
+    // Generate plist content
+    let plist_content = generate_plist(&binary_path);
+
+    // Write plist file
+    fs::write(&plist_path, plist_content)?;
+    println!("Created plist at {}", plist_path.display());
+
+    // Load the service with launchctl
+    let output = Command::new("launchctl")
+        .arg("load")
+        .arg(&plist_path)
+        .output()?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        anyhow::bail!("Failed to load service: {}", stderr);
+    }
+
+    println!("Loaded service with launchctl");
+
+    // Start the service immediately
+    let output = Command::new("launchctl")
+        .arg("start")
+        .arg("com.acp.server")
+        .output()?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        anyhow::bail!("Failed to start service: {}", stderr);
+    }
+
+    println!("Started service com.acp.server");
+    println!("\nService installed successfully!");
+    println!("Logs will be written to:");
+    println!("  stdout: {}/acp-server.log", log_dir.display());
+    println!("  stderr: {}/acp-server.err", log_dir.display());
+
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+/// Check the status of the acp-server service
+///
+/// This function checks if:
+/// - The plist file exists
+/// - The service is currently running
+pub fn status() {
+    use std::process::Command;
+
+    let plist_path = get_plist_path();
+
+    // Check if plist exists
+    if !plist_path.exists() {
+        println!("Service is not installed");
+        return;
+    }
+
+    // Run launchctl list to check if the service is running
+    let output = Command::new("launchctl")
+        .args(["list", "com.acp.server"])
+        .output();
+
+    match output {
+        Ok(output) => {
+            if output.status.success() {
+                println!("Service is running");
+                println!("{}", String::from_utf8_lossy(&output.stdout));
+            } else {
+                println!("Service is not running");
+            }
+        }
+        Err(e) => {
+            eprintln!("Error checking status: {}", e);
+        }
+    }
+}
+
+#[cfg(target_os = "macos")]
+/// Uninstall the acp-server LaunchAgent
+///
+/// This function:
+/// - Stops the service (ignoring errors if not running)
+/// - Unloads the LaunchAgent (ignoring errors if not loaded)
+/// - Removes the plist file
+/// - Optionally removes ~/.acp/ directory if purge is true
+///
+/// # Arguments
+/// * `purge` - If true, also remove the ~/.acp/ directory
+///
+/// # Returns
+/// Ok(()) on success, or an error if critical operations fail
+pub fn uninstall(purge: bool) -> anyhow::Result<()> {
+    use std::process::Command;
+
+    let plist_path = get_plist_path();
+
+    // Check if installed
+    if !plist_path.exists() {
+        println!("acp-server is not installed");
+        return Ok(());
+    }
+
+    // Stop the service (ignore errors if not running)
+    let _ = Command::new("launchctl")
+        .args(["stop", "com.acp.server"])
+        .output();
+
+    // Unload the service (ignore errors if not loaded)
+    let _ = Command::new("launchctl")
+        .args(["unload", plist_path.to_str().unwrap()])
+        .output();
+
+    // Remove plist file
+    if let Err(e) = std::fs::remove_file(&plist_path) {
+        eprintln!("Warning: Failed to remove plist file: {}", e);
+    } else {
+        println!("Removed {}", plist_path.display());
+    }
+
+    // If --purge flag is set, remove ~/.acp/ directory
+    if purge {
+        let acp_dir = get_acp_dir();
+        if acp_dir.exists() {
+            if let Err(e) = std::fs::remove_dir_all(&acp_dir) {
+                eprintln!("Warning: Failed to remove data directory: {}", e);
+            } else {
+                println!("Removed {}", acp_dir.display());
+            }
+        }
+    }
+
+    println!("acp-server uninstalled successfully");
+    Ok(())
+}
+
 #[cfg(test)]
 #[cfg(target_os = "macos")]
 mod tests {
