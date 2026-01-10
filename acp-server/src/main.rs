@@ -87,11 +87,12 @@ async fn main() -> anyhow::Result<()> {
         }
     });
 
-    // Create API state with token cache
+    // Create API state with token cache and storage backend
     let api_state = api::ApiState::new(
         config.proxy_port,
         config.api_port,
         token_cache,
+        Arc::clone(&store),
     );
 
     // Build the API router

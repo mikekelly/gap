@@ -543,3 +543,55 @@ mod tests {
         assert!(ca.clear_cache().is_ok());
     }
 }
+
+#[cfg(test)]
+mod cert_verify_tests {
+    use super::*;
+
+    #[test]
+    #[ignore = "Requires CA to exist at specific path"]
+    fn test_generated_cert_is_valid() {
+        use std::fs;
+        use std::process::Command;
+        
+        // Load CA
+        let ca_cert = fs::read_to_string("/Users/mike/.config/acp/ca.crt").unwrap();
+        let ca_key = fs::read_to_string("/Users/mike/.config/acp/ca.key").unwrap();
+        
+        let ca = CertificateAuthority::from_pem(&ca_cert, &ca_key).unwrap();
+        
+        // Generate cert for a test hostname
+        let (cert_der, _key_der) = ca.sign_for_hostname("test.example.com", None).unwrap();
+        
+        // Save cert and convert to PEM
+        fs::write("/tmp/test_cert.der", &cert_der).unwrap();
+        
+        let convert = Command::new("openssl")
+            .args(&["x509", "-in", "/tmp/test_cert.der", "-inform", "DER", "-out", "/tmp/test_cert.pem"])
+            .output()
+            .unwrap();
+        
+        assert!(convert.status.success(), "Failed to convert to PEM");
+        
+        // Verify the certificate against the CA
+        let verify = Command::new("openssl")
+            .args(&["verify", "-CAfile", "/Users/mike/.config/acp/ca.crt", "/tmp/test_cert.pem"])
+            .output()
+            .unwrap();
+        
+        let verify_output = String::from_utf8_lossy(&verify.stdout);
+        let verify_error = String::from_utf8_lossy(&verify.stderr);
+        
+        println!("Verify output: {}", verify_output);
+        if !verify_error.is_empty() {
+            println!("Verify errors: {}", verify_error);
+        }
+        
+        assert!(
+            verify_output.contains("OK"),
+            "Certificate verification failed!\nOutput: {}\nError: {}",
+            verify_output,
+            verify_error
+        );
+    }
+}

@@ -113,13 +113,13 @@ impl ProxyServer {
 
 /// Handle a single proxy connection
 async fn handle_connection(
-    mut stream: TcpStream,
+    stream: TcpStream,
     ca: Arc<CertificateAuthority>,
     token_cache: Arc<TokenCache>,
     upstream_connector: TlsConnector,
 ) -> Result<()> {
     // Read the CONNECT request
-    let mut reader = BufReader::new(&mut stream);
+    let mut reader = BufReader::new(stream);
     let mut request_line = String::new();
     reader
         .read_line(&mut request_line)
@@ -149,6 +149,11 @@ async fn handle_connection(
 
     // Validate authentication
     let _agent_token = validate_auth(&headers, &token_cache).await?;
+
+    // Get the underlying stream back from BufReader
+    // The BufReader may have buffered bytes that are part of the TLS handshake,
+    // so we need to check the buffer and handle any buffered data
+    let mut stream = reader.into_inner();
 
     // Send 200 Connection Established
     stream
@@ -243,7 +248,12 @@ async fn accept_agent_tls(
         .map_err(|e| AcpError::tls(format!("Failed to sign certificate: {}", e)))?;
 
     // Convert DER bytes to rustls types
-    let certs = vec![CertificateDer::from(cert_der)];
+    // For a self-signed CA, we need to include the CA cert in the chain
+    // so the client can verify the signature
+    let certs = vec![
+        CertificateDer::from(cert_der),
+        CertificateDer::from(ca.ca_cert_der()),
+    ];
 
     // Parse private key from DER
     let key_der = rustls::pki_types::PrivateKeyDer::try_from(key_der)

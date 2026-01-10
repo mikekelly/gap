@@ -7,7 +7,7 @@
 //! - Token management
 //! - Activity monitoring
 
-use acp_lib::{AgentToken, TokenCache};
+use acp_lib::{AgentToken, TokenCache, storage::SecretStore};
 use argon2::{Argon2, PasswordHash, PasswordVerifier};
 use axum::{
     async_trait,
@@ -38,11 +38,13 @@ pub struct ApiState {
     pub token_cache: Arc<TokenCache>,
     /// Recent activity log
     pub activity: Arc<RwLock<Vec<ActivityEntry>>>,
+    /// Shared storage backend
+    pub store: Arc<dyn SecretStore>,
 }
 
 impl ApiState {
-    /// Create ApiState with token cache
-    pub fn new(proxy_port: u16, api_port: u16, token_cache: Arc<TokenCache>) -> Self {
+    /// Create ApiState with token cache and storage backend
+    pub fn new(proxy_port: u16, api_port: u16, token_cache: Arc<TokenCache>, store: Arc<dyn SecretStore>) -> Self {
         Self {
             start_time: std::time::Instant::now(),
             proxy_port,
@@ -50,6 +52,7 @@ impl ApiState {
             password_hash: Arc::new(RwLock::new(None)),
             token_cache,
             activity: Arc::new(RwLock::new(Vec::new())),
+            store,
         }
     }
 
@@ -283,7 +286,6 @@ async fn init(
     State(state): State<ApiState>,
     body: Bytes,
 ) -> Result<Json<InitResponse>, (StatusCode, String)> {
-    use acp_lib::storage::create_store;
     use acp_lib::tls::CertificateAuthority;
     use argon2::password_hash::{rand_core::OsRng, SaltString};
     use argon2::{Argon2, PasswordHasher};
@@ -311,19 +313,27 @@ async fn init(
     // Store password hash
     state.set_password_hash(password_hash).await;
 
-    // Generate CA
-    let ca = CertificateAuthority::generate()
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to generate CA: {}", e)))?;
-
-    // Store CA private key in SecretStore
-    let store = create_store(None)
+    // Load the existing CA from storage (it was already generated at server startup)
+    let ca_cert_pem = state.store
+        .get("ca:cert")
         .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to create store: {}", e)))?;
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to load CA cert: {}", e)))?
+        .ok_or_else(|| (StatusCode::INTERNAL_SERVER_ERROR, "CA not found in storage".to_string()))?;
 
-    store
-        .set("ca:private_key", ca.ca_key_pem().as_bytes())
+    let ca_key_pem = state.store
+        .get("ca:key")
         .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to store CA key: {}", e)))?;
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to load CA key: {}", e)))?
+        .ok_or_else(|| (StatusCode::INTERNAL_SERVER_ERROR, "CA key not found in storage".to_string()))?;
+
+    let ca_cert_str = String::from_utf8(ca_cert_pem)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Invalid CA cert encoding: {}", e)))?;
+
+    let ca_key_str = String::from_utf8(ca_key_pem)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Invalid CA key encoding: {}", e)))?;
+
+    let ca = CertificateAuthority::from_pem(&ca_cert_str, &ca_key_str)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to load CA: {}", e)))?;
 
     // Determine CA certificate path
     let ca_path = if let Some(path) = req.data.ca_path {
@@ -354,17 +364,12 @@ async fn get_plugins(
     State(state): State<ApiState>,
     body: Bytes,
 ) -> Result<Json<PluginsResponse>, (StatusCode, String)> {
-    use acp_lib::storage::create_store;
     use acp_lib::plugin_runtime::PluginRuntime;
 
     verify_auth::<serde_json::Value>(&state, &body).await?;
 
-    let store = create_store(None)
-        .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to create store: {}", e)))?;
-
     // List all keys starting with "plugin:"
-    let all_keys = store.list("plugin:").await
+    let all_keys = state.store.list("plugin:").await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to list plugins: {}", e)))?;
 
     let mut plugins = Vec::new();
@@ -375,7 +380,7 @@ async fn get_plugins(
         let plugin_name = key.strip_prefix("plugin:").unwrap();
 
         // Fetch plugin code and load it
-        match store.get(&key).await {
+        match state.store.get(&key).await {
             Ok(Some(code_bytes)) => {
                 match String::from_utf8(code_bytes) {
                     Ok(code) => {
@@ -414,17 +419,12 @@ async fn post_plugins(
     State(state): State<ApiState>,
     body: Bytes,
 ) -> Result<Json<PluginsResponse>, (StatusCode, String)> {
-    use acp_lib::storage::create_store;
     use acp_lib::plugin_runtime::PluginRuntime;
 
     verify_auth::<serde_json::Value>(&state, &body).await?;
 
-    let store = create_store(None)
-        .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to create store: {}", e)))?;
-
     // List all keys starting with "plugin:"
-    let all_keys = store.list("plugin:").await
+    let all_keys = state.store.list("plugin:").await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to list plugins: {}", e)))?;
 
     let mut plugins = Vec::new();
@@ -435,7 +435,7 @@ async fn post_plugins(
         let plugin_name = key.strip_prefix("plugin:").unwrap();
 
         // Fetch plugin code and load it
-        if let Ok(Some(code_bytes)) = store.get(&key).await {
+        if let Ok(Some(code_bytes)) = state.store.get(&key).await {
             if let Ok(code) = String::from_utf8(code_bytes) {
                 if let Ok(plugin) = runtime.load_plugin_from_code(plugin_name, &code) {
                     plugins.push(PluginInfo {
@@ -458,7 +458,6 @@ async fn install_plugin(
     State(state): State<ApiState>,
     body: Bytes,
 ) -> std::result::Result<Json<InstallResponse>, (StatusCode, String)> {
-    use acp_lib::storage::create_store;
     use acp_lib::plugin_runtime::PluginRuntime;
     use git2::{build::RepoBuilder, Cred, FetchOptions, RemoteCallbacks};
     use tempfile::tempdir;
@@ -521,12 +520,8 @@ async fn install_plugin(
     }; // All non-Send types dropped here, before the await below
 
     // Store plugin in SecretStore
-    let store = create_store(None)
-        .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to create store: {}", e)))?;
-
     let store_key = format!("plugin:{}", plugin_name);
-    (&*store)
+    state.store
         .set(&store_key, transformed_code.as_bytes())
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to store plugin: {}", e)))?;
@@ -631,17 +626,11 @@ async fn set_credential(
     Path((plugin, key)): Path<(String, String)>,
     body: Bytes,
 ) -> Result<StatusCode, (StatusCode, String)> {
-    use acp_lib::storage::create_store;
-
     let req: SetCredentialRequest = verify_auth(&state, &body).await?;
 
     // Store credential in SecretStore
-    let store = create_store(None)
-        .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to create store: {}", e)))?;
-
     let store_key = format!("credential:{}:{}", plugin, key);
-    store.set(&store_key, req.value.as_bytes())
+    state.store.set(&store_key, req.value.as_bytes())
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to store credential: {}", e)))?;
 
@@ -655,17 +644,11 @@ async fn delete_credential(
     Path((plugin, key)): Path<(String, String)>,
     body: Bytes,
 ) -> Result<StatusCode, (StatusCode, String)> {
-    use acp_lib::storage::create_store;
-
     verify_auth::<serde_json::Value>(&state, &body).await?;
 
     // Delete credential from SecretStore
-    let store = create_store(None)
-        .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to create store: {}", e)))?;
-
     let store_key = format!("credential:{}:{}", plugin, key);
-    store.delete(&store_key)
+    state.store.delete(&store_key)
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to delete credential: {}", e)))?;
 
@@ -703,23 +686,23 @@ mod tests {
     use serial_test::serial;
     use tower::ServiceExt; // for `oneshot`
 
-    /// Helper to create a TokenCache for testing
-    /// Returns (TokenCache, TempDir) - keep the TempDir alive to prevent cleanup
-    async fn create_test_token_cache() -> (Arc<TokenCache>, tempfile::TempDir) {
+    /// Helper to create a TokenCache and store for testing
+    /// Returns (TokenCache, Store, TempDir) - keep the TempDir alive to prevent cleanup
+    async fn create_test_token_cache() -> (Arc<TokenCache>, Arc<dyn SecretStore>, tempfile::TempDir) {
         let temp_dir = tempfile::tempdir().expect("create temp dir");
         let store = Arc::new(
             FileStore::new(temp_dir.path().to_path_buf())
                 .await
                 .expect("create FileStore"),
-        );
-        let cache = Arc::new(TokenCache::new(store as Arc<dyn SecretStore>));
-        (cache, temp_dir)
+        ) as Arc<dyn SecretStore>;
+        let cache = Arc::new(TokenCache::new(Arc::clone(&store)));
+        (cache, store, temp_dir)
     }
 
     #[tokio::test]
     async fn test_get_status_without_auth() {
-        let (token_cache, _temp_dir) = create_test_token_cache().await;
-        let state = ApiState::new(9443, 9080, token_cache);
+        let (token_cache, store, _temp_dir) = create_test_token_cache().await;
+        let state = ApiState::new(9443, 9080, token_cache, store);
         let app = create_router(state);
 
         let response = app
@@ -766,8 +749,8 @@ mod tests {
         use argon2::password_hash::{rand_core::OsRng, SaltString};
         use argon2::{Argon2, PasswordHasher};
 
-        let (token_cache, _temp_dir) = create_test_token_cache().await;
-        let state = ApiState::new(9443, 9080, token_cache);
+        let (token_cache, store, _temp_dir) = create_test_token_cache().await;
+        let state = ApiState::new(9443, 9080, token_cache, store);
 
         // Set up password hash
         let password = "testpass123";
@@ -803,8 +786,8 @@ mod tests {
         use argon2::password_hash::{rand_core::OsRng, SaltString};
         use argon2::{Argon2, PasswordHasher};
 
-        let (token_cache, _temp_dir) = create_test_token_cache().await;
-        let state = ApiState::new(9443, 9080, token_cache);
+        let (token_cache, store, _temp_dir) = create_test_token_cache().await;
+        let state = ApiState::new(9443, 9080, token_cache, store);
 
         // Set up password hash
         let password = "testpass123";
@@ -847,8 +830,8 @@ mod tests {
         use argon2::password_hash::{rand_core::OsRng, SaltString};
         use argon2::{Argon2, PasswordHasher};
 
-        let (token_cache, _temp_dir) = create_test_token_cache().await;
-        let state = ApiState::new(9443, 9080, token_cache);
+        let (token_cache, store, _temp_dir) = create_test_token_cache().await;
+        let state = ApiState::new(9443, 9080, token_cache, store);
 
         // Set up password hash
         let password = "testpass123";
@@ -893,8 +876,8 @@ mod tests {
         use argon2::password_hash::{rand_core::OsRng, SaltString};
         use argon2::{Argon2, PasswordHasher};
 
-        let (token_cache, _temp_dir) = create_test_token_cache().await;
-        let state = ApiState::new(9443, 9080, token_cache);
+        let (token_cache, store, _temp_dir) = create_test_token_cache().await;
+        let state = ApiState::new(9443, 9080, token_cache, store);
 
         // Set up password hash
         let password = "testpass123";
@@ -928,12 +911,20 @@ mod tests {
     #[tokio::test]
     #[serial]
     async fn test_init_endpoint() {
+        use acp_lib::tls::CertificateAuthority;
+
         // Use temp directory to avoid test isolation issues with macOS Keychain
         let temp_dir = tempfile::tempdir().expect("create temp dir");
         std::env::set_var("ACP_DATA_DIR", temp_dir.path());
 
-        let (token_cache, _temp_dir) = create_test_token_cache().await;
-        let state = ApiState::new(9443, 9080, token_cache);
+        let (token_cache, store, _temp_dir) = create_test_token_cache().await;
+
+        // Pre-create CA in storage (as server does at startup)
+        let ca = CertificateAuthority::generate().expect("generate CA");
+        store.set("ca:cert", ca.ca_cert_pem().as_bytes()).await.expect("store CA cert");
+        store.set("ca:key", ca.ca_key_pem().as_bytes()).await.expect("store CA key");
+
+        let state = ApiState::new(9443, 9080, token_cache, store);
         let app = create_router(state.clone());
 
         let password = "testpass123";
@@ -980,8 +971,8 @@ mod tests {
         let temp_dir = tempfile::tempdir().expect("create temp dir");
         std::env::set_var("ACP_DATA_DIR", temp_dir.path());
 
-        let (token_cache, _temp_dir) = create_test_token_cache().await;
-        let state = ApiState::new(9443, 9080, token_cache);
+        let (token_cache, store, _temp_dir) = create_test_token_cache().await;
+        let state = ApiState::new(9443, 9080, token_cache, store);
 
         // Set up password hash
         let password = "testpass123";
@@ -1025,8 +1016,8 @@ mod tests {
         let temp_dir = tempfile::tempdir().expect("create temp dir");
         std::env::set_var("ACP_DATA_DIR", temp_dir.path());
 
-        let (token_cache, _temp_dir) = create_test_token_cache().await;
-        let state = ApiState::new(9443, 9080, token_cache);
+        let (token_cache, store, _temp_dir) = create_test_token_cache().await;
+        let state = ApiState::new(9443, 9080, token_cache, store);
 
         // Set up password hash
         let password = "testpass123";
@@ -1068,8 +1059,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_install_plugin_requires_auth() {
-        let (token_cache, _temp_dir) = create_test_token_cache().await;
-        let state = ApiState::new(9443, 9080, token_cache);
+        let (token_cache, store, _temp_dir) = create_test_token_cache().await;
+        let state = ApiState::new(9443, 9080, token_cache, store);
         let app = create_router(state);
 
         // Try to install without password
@@ -1102,8 +1093,8 @@ mod tests {
         let temp_dir = tempfile::tempdir().expect("create temp dir");
         std::env::set_var("ACP_DATA_DIR", temp_dir.path());
 
-        let (token_cache, _temp_dir) = create_test_token_cache().await;
-        let state = ApiState::new(9443, 9080, token_cache);
+        let (token_cache, store, _temp_dir) = create_test_token_cache().await;
+        let state = ApiState::new(9443, 9080, token_cache, store);
 
         // Set up password hash
         let password = "testpass123";
@@ -1146,8 +1137,8 @@ mod tests {
         let temp_dir = tempfile::tempdir().expect("create temp dir");
         std::env::set_var("ACP_DATA_DIR", temp_dir.path());
 
-        let (token_cache, _temp_dir) = create_test_token_cache().await;
-        let state = ApiState::new(9443, 9080, token_cache);
+        let (token_cache, store, _temp_dir) = create_test_token_cache().await;
+        let state = ApiState::new(9443, 9080, token_cache, store);
 
         // Set up password hash
         let password = "testpass123";
@@ -1177,5 +1168,66 @@ mod tests {
 
         // Verify the API accepts the request and returns 200
         assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn test_api_uses_shared_store() {
+        use acp_lib::storage::FileStore;
+        use argon2::password_hash::{rand_core::OsRng, SaltString};
+        use argon2::{Argon2, PasswordHasher};
+
+        // Create temp directory for shared storage
+        let temp_dir = tempfile::tempdir().expect("create temp dir");
+        let store = Arc::new(
+            FileStore::new(temp_dir.path().to_path_buf())
+                .await
+                .expect("create FileStore"),
+        ) as Arc<dyn SecretStore>;
+
+        // Create token cache with shared store
+        let token_cache = Arc::new(TokenCache::new(Arc::clone(&store)));
+        let state = ApiState::new(9443, 9080, token_cache, Arc::clone(&store));
+
+        // Set up password hash
+        let password = "testpass123";
+        let salt = SaltString::generate(&mut OsRng);
+        let argon2 = Argon2::default();
+        let password_hash = argon2.hash_password(password.as_bytes(), &salt).unwrap().to_string();
+        state.set_password_hash(password_hash).await;
+
+        // Write a test credential directly to the shared store
+        let test_key = "credential:test-plugin:api_key";
+        store.set(test_key, b"direct_write_value").await.expect("write to store");
+
+        // Now set a credential via the API
+        let app = create_router(state);
+        let body = serde_json::json!({
+            "password_hash": password,
+            "value": "api_write_value"
+        });
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/credentials/test-plugin/api_key")
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+
+        // Verify the credential was written to the SAME store
+        // If the endpoint used create_store(None), it would have written to a different store
+        let stored_value = store.get(test_key).await.expect("read from store");
+        assert_eq!(
+            stored_value,
+            Some(b"api_write_value".to_vec()),
+            "API endpoint should write to the same store that was passed to ApiState"
+        );
     }
 }
