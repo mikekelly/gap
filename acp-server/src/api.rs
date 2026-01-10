@@ -373,52 +373,23 @@ async fn get_plugins(
     State(state): State<ApiState>,
     body: Bytes,
 ) -> Result<Json<PluginsResponse>, (StatusCode, String)> {
-    use acp_lib::plugin_runtime::PluginRuntime;
-
     verify_auth::<serde_json::Value>(&state, &body).await?;
 
-    // List all keys starting with "plugin:"
-    let all_keys = state.store.list("plugin:").await
+    // Get plugins from registry
+    let plugin_entries = state.registry.list_plugins().await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to list plugins: {}", e)))?;
 
-    let mut plugins = Vec::new();
-    let mut runtime = PluginRuntime::new()
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to create runtime: {}", e)))?;
-
-    for key in all_keys {
-        let plugin_name = key.strip_prefix("plugin:").unwrap();
-
-        // Fetch plugin code and load it
-        match state.store.get(&key).await {
-            Ok(Some(code_bytes)) => {
-                match String::from_utf8(code_bytes) {
-                    Ok(code) => {
-                        match runtime.load_plugin_from_code(plugin_name, &code) {
-                            Ok(plugin) => {
-                                plugins.push(PluginInfo {
-                                    name: plugin.name,
-                                    match_patterns: plugin.match_patterns,
-                                    credential_schema: plugin.credential_schema,
-                                });
-                            }
-                            Err(e) => {
-                                tracing::warn!("Failed to load plugin {}: {}", plugin_name, e);
-                            }
-                        }
-                    }
-                    Err(e) => {
-                        tracing::warn!("Plugin {} has invalid UTF-8: {}", plugin_name, e);
-                    }
-                }
-            }
-            Ok(None) => {
-                tracing::warn!("Plugin {} not found in store", plugin_name);
-            }
-            Err(e) => {
-                tracing::warn!("Failed to fetch plugin {}: {}", plugin_name, e);
-            }
-        }
-    }
+    // Convert PluginEntry to PluginInfo
+    // PluginEntry has: name, hosts, credential_schema
+    // PluginInfo has: name, match_patterns, credential_schema
+    let plugins = plugin_entries
+        .into_iter()
+        .map(|entry| PluginInfo {
+            name: entry.name,
+            match_patterns: entry.hosts,  // hosts maps to match_patterns
+            credential_schema: entry.credential_schema,
+        })
+        .collect();
 
     Ok(Json(PluginsResponse { plugins }))
 }
@@ -428,34 +399,23 @@ async fn post_plugins(
     State(state): State<ApiState>,
     body: Bytes,
 ) -> Result<Json<PluginsResponse>, (StatusCode, String)> {
-    use acp_lib::plugin_runtime::PluginRuntime;
-
     verify_auth::<serde_json::Value>(&state, &body).await?;
 
-    // List all keys starting with "plugin:"
-    let all_keys = state.store.list("plugin:").await
+    // Get plugins from registry
+    let plugin_entries = state.registry.list_plugins().await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to list plugins: {}", e)))?;
 
-    let mut plugins = Vec::new();
-    let mut runtime = PluginRuntime::new()
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to create runtime: {}", e)))?;
-
-    for key in all_keys {
-        let plugin_name = key.strip_prefix("plugin:").unwrap();
-
-        // Fetch plugin code and load it
-        if let Ok(Some(code_bytes)) = state.store.get(&key).await {
-            if let Ok(code) = String::from_utf8(code_bytes) {
-                if let Ok(plugin) = runtime.load_plugin_from_code(plugin_name, &code) {
-                    plugins.push(PluginInfo {
-                        name: plugin.name,
-                        match_patterns: plugin.match_patterns,
-                        credential_schema: plugin.credential_schema,
-                    });
-                }
-            }
-        }
-    }
+    // Convert PluginEntry to PluginInfo
+    // PluginEntry has: name, hosts, credential_schema
+    // PluginInfo has: name, match_patterns, credential_schema
+    let plugins = plugin_entries
+        .into_iter()
+        .map(|entry| PluginInfo {
+            name: entry.name,
+            match_patterns: entry.hosts,  // hosts maps to match_patterns
+            credential_schema: entry.credential_schema,
+        })
+        .collect();
 
     Ok(Json(PluginsResponse { plugins }))
 }
@@ -537,6 +497,16 @@ async fn install_plugin(
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to store plugin: {}", e)))?;
 
+    // Add plugin to registry
+    use acp_lib::PluginEntry;
+    let plugin_entry = PluginEntry {
+        name: plugin.name.clone(),
+        hosts: plugin.match_patterns.clone(),
+        credential_schema: plugin.credential_schema.clone(),
+    };
+    state.registry.add_plugin(&plugin_entry).await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to add plugin to registry: {}", e)))?;
+
     tracing::info!("Installed plugin: {} (matches: {:?})", plugin.name, plugin.match_patterns);
 
     // Temp directory is automatically cleaned up when temp_dir goes out of scope
@@ -573,10 +543,21 @@ async fn list_tokens(
 ) -> Result<Json<TokensResponse>, (StatusCode, String)> {
     verify_auth::<serde_json::Value>(&state, &body).await?;
 
-    let tokens = state.token_cache.list().await
+    // Use registry to list tokens
+    let token_entries = state.registry.list_tokens().await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to list tokens: {}", e)))?;
 
-    let token_list: Vec<TokenResponse> = tokens.into_iter().map(|t| t.into()).collect();
+    // Convert TokenEntry to TokenResponse
+    let token_list: Vec<TokenResponse> = token_entries
+        .into_iter()
+        .map(|entry| TokenResponse {
+            id: entry.id,
+            name: entry.name,
+            prefix: entry.prefix,
+            token: None, // Never expose full token in list
+            created_at: entry.created_at,
+        })
+        .collect();
 
     Ok(Json(TokensResponse { tokens: token_list }))
 }
@@ -594,6 +575,8 @@ async fn create_token(
     State(state): State<ApiState>,
     body: Bytes,
 ) -> Result<Json<TokenResponse>, (StatusCode, String)> {
+    use acp_lib::registry::TokenEntry;
+
     let req: CreateTokenRequest = verify_auth(&state, &body).await?;
 
     let token = state.token_cache.create(&req.name)
@@ -601,6 +584,16 @@ async fn create_token(
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to create token: {}", e)))?;
 
     let token_value = token.token.clone();
+
+    // Add token to registry
+    let token_entry = TokenEntry {
+        id: token.id.clone(),
+        name: token.name.clone(),
+        created_at: token.created_at,
+        prefix: token.prefix.clone(),
+    };
+    state.registry.add_token(&token_entry).await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to add token to registry: {}", e)))?;
 
     // Return with full token (only time it's revealed)
     Ok(Json(TokenResponse {
@@ -625,6 +618,9 @@ async fn delete_token(
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to delete token: {}", e)))?;
 
     if existed {
+        // Remove token from registry
+        state.registry.remove_token(&id).await
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to remove token from registry: {}", e)))?;
         Ok(StatusCode::OK)
     } else {
         Ok(StatusCode::NOT_FOUND)
