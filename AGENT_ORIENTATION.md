@@ -84,7 +84,7 @@ cargo run --bin acp-server  # Run server
   - `integration_test.rs` - Plugin pipeline tests (FileStore → PluginRuntime → Transform)
   - `e2e_integration_test.rs` - Full system E2E tests (server → API → storage)
 - **E2E test infrastructure**: `TestServer` helper spawns `acp-server` in subprocess with dynamic ports and temp directories
-- **Bundled plugins**: Production-ready plugins in `plugins/` directory (`exa.js`, `aws-s3.js`)
+- **Test plugin**: `plugins/test-api.js` for integration testing (production plugins installed from GitHub)
 - **Plugin testing**: Use `PluginRuntime::load_plugin_from_code()` to load plugins from files for testing (avoids SecretStore dependency)
 - **Test suite**: 120 tests across all workspace crates (117 passing, 3 ignored on macOS)
 - **Test organization**: Unit tests inline with source, integration tests in `tests/` directory
