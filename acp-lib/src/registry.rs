@@ -101,6 +101,91 @@ impl Registry {
             .map_err(|e| AcpError::storage(format!("Failed to serialize registry: {}", e)))?;
         self.store.set(Self::KEY, &bytes).await
     }
+
+    // Token CRUD operations
+
+    /// Add a token to the registry
+    ///
+    /// Loads the registry, adds the token to the tokens vec, and saves.
+    pub async fn add_token(&self, token: &TokenEntry) -> Result<()> {
+        let mut data = self.load().await?;
+        data.tokens.push(token.clone());
+        self.save(&data).await
+    }
+
+    /// Remove a token from the registry by id
+    ///
+    /// Loads the registry, removes the token with matching id, and saves.
+    pub async fn remove_token(&self, id: &str) -> Result<()> {
+        let mut data = self.load().await?;
+        data.tokens.retain(|t| t.id != id);
+        self.save(&data).await
+    }
+
+    /// List all tokens in the registry
+    ///
+    /// Returns the tokens vec from the loaded registry.
+    pub async fn list_tokens(&self) -> Result<Vec<TokenEntry>> {
+        let data = self.load().await?;
+        Ok(data.tokens)
+    }
+
+    // Plugin CRUD operations
+
+    /// Add a plugin to the registry
+    ///
+    /// Loads the registry, adds the plugin to the plugins vec, and saves.
+    pub async fn add_plugin(&self, plugin: &PluginEntry) -> Result<()> {
+        let mut data = self.load().await?;
+        data.plugins.push(plugin.clone());
+        self.save(&data).await
+    }
+
+    /// Remove a plugin from the registry by name
+    ///
+    /// Loads the registry, removes the plugin with matching name, and saves.
+    pub async fn remove_plugin(&self, name: &str) -> Result<()> {
+        let mut data = self.load().await?;
+        data.plugins.retain(|p| p.name != name);
+        self.save(&data).await
+    }
+
+    /// List all plugins in the registry
+    ///
+    /// Returns the plugins vec from the loaded registry.
+    pub async fn list_plugins(&self) -> Result<Vec<PluginEntry>> {
+        let data = self.load().await?;
+        Ok(data.plugins)
+    }
+
+    // Credential CRUD operations
+
+    /// Add a credential to the registry
+    ///
+    /// Loads the registry, adds the credential to the credentials vec, and saves.
+    pub async fn add_credential(&self, credential: &CredentialEntry) -> Result<()> {
+        let mut data = self.load().await?;
+        data.credentials.push(credential.clone());
+        self.save(&data).await
+    }
+
+    /// Remove a credential from the registry by plugin and field
+    ///
+    /// Loads the registry, removes the credential with matching plugin and field, and saves.
+    pub async fn remove_credential(&self, plugin: &str, field: &str) -> Result<()> {
+        let mut data = self.load().await?;
+        data.credentials
+            .retain(|c| !(c.plugin == plugin && c.field == field));
+        self.save(&data).await
+    }
+
+    /// List all credentials in the registry
+    ///
+    /// Returns the credentials vec from the loaded registry.
+    pub async fn list_credentials(&self) -> Result<Vec<CredentialEntry>> {
+        let data = self.load().await?;
+        Ok(data.credentials)
+    }
 }
 
 #[cfg(test)]
@@ -350,5 +435,356 @@ mod tests {
         let parsed: RegistryData =
             serde_json::from_slice(&raw_value).expect("should deserialize");
         assert_eq!(parsed.version, 1);
+    }
+
+    // RED: Tests for token CRUD operations
+    #[tokio::test]
+    async fn test_add_token() {
+        use crate::storage::FileStore;
+        use std::sync::Arc;
+
+        let temp_dir = tempfile::tempdir().expect("create temp dir");
+        let store = FileStore::new(temp_dir.path().to_path_buf())
+            .await
+            .expect("create FileStore");
+        let registry = Registry::new(Arc::new(store));
+
+        let token = TokenEntry {
+            id: "abc123".to_string(),
+            name: "test-token".to_string(),
+            created_at: Utc::now(),
+            prefix: "acp_abc123".to_string(),
+        };
+
+        // Add token should succeed
+        registry.add_token(&token).await.expect("add should succeed");
+
+        // Verify token is in registry
+        let tokens = registry.list_tokens().await.expect("list should succeed");
+        assert_eq!(tokens.len(), 1);
+        assert_eq!(tokens[0].id, "abc123");
+        assert_eq!(tokens[0].name, "test-token");
+    }
+
+    #[tokio::test]
+    async fn test_remove_token() {
+        use crate::storage::FileStore;
+        use std::sync::Arc;
+
+        let temp_dir = tempfile::tempdir().expect("create temp dir");
+        let store = FileStore::new(temp_dir.path().to_path_buf())
+            .await
+            .expect("create FileStore");
+        let registry = Registry::new(Arc::new(store));
+
+        // Add two tokens
+        let token1 = TokenEntry {
+            id: "abc123".to_string(),
+            name: "token1".to_string(),
+            created_at: Utc::now(),
+            prefix: "acp_abc123".to_string(),
+        };
+        let token2 = TokenEntry {
+            id: "def456".to_string(),
+            name: "token2".to_string(),
+            created_at: Utc::now(),
+            prefix: "acp_def456".to_string(),
+        };
+        registry.add_token(&token1).await.expect("add should succeed");
+        registry.add_token(&token2).await.expect("add should succeed");
+
+        // Remove first token
+        registry
+            .remove_token("abc123")
+            .await
+            .expect("remove should succeed");
+
+        // Verify only second token remains
+        let tokens = registry.list_tokens().await.expect("list should succeed");
+        assert_eq!(tokens.len(), 1);
+        assert_eq!(tokens[0].id, "def456");
+    }
+
+    #[tokio::test]
+    async fn test_list_tokens() {
+        use crate::storage::FileStore;
+        use std::sync::Arc;
+
+        let temp_dir = tempfile::tempdir().expect("create temp dir");
+        let store = FileStore::new(temp_dir.path().to_path_buf())
+            .await
+            .expect("create FileStore");
+        let registry = Registry::new(Arc::new(store));
+
+        // List should return empty on fresh registry
+        let tokens = registry.list_tokens().await.expect("list should succeed");
+        assert_eq!(tokens.len(), 0);
+
+        // Add tokens
+        let token1 = TokenEntry {
+            id: "abc123".to_string(),
+            name: "token1".to_string(),
+            created_at: Utc::now(),
+            prefix: "acp_abc123".to_string(),
+        };
+        let token2 = TokenEntry {
+            id: "def456".to_string(),
+            name: "token2".to_string(),
+            created_at: Utc::now(),
+            prefix: "acp_def456".to_string(),
+        };
+        registry.add_token(&token1).await.expect("add should succeed");
+        registry.add_token(&token2).await.expect("add should succeed");
+
+        // List should return both
+        let tokens = registry.list_tokens().await.expect("list should succeed");
+        assert_eq!(tokens.len(), 2);
+    }
+
+    // RED: Tests for plugin CRUD operations
+    #[tokio::test]
+    async fn test_add_plugin() {
+        use crate::storage::FileStore;
+        use std::sync::Arc;
+
+        let temp_dir = tempfile::tempdir().expect("create temp dir");
+        let store = FileStore::new(temp_dir.path().to_path_buf())
+            .await
+            .expect("create FileStore");
+        let registry = Registry::new(Arc::new(store));
+
+        let plugin = PluginEntry {
+            name: "exa".to_string(),
+            hosts: vec!["api.exa.ai".to_string()],
+            credential_schema: vec!["api_key".to_string()],
+        };
+
+        // Add plugin should succeed
+        registry
+            .add_plugin(&plugin)
+            .await
+            .expect("add should succeed");
+
+        // Verify plugin is in registry
+        let plugins = registry.list_plugins().await.expect("list should succeed");
+        assert_eq!(plugins.len(), 1);
+        assert_eq!(plugins[0].name, "exa");
+        assert_eq!(plugins[0].hosts, vec!["api.exa.ai"]);
+    }
+
+    #[tokio::test]
+    async fn test_remove_plugin() {
+        use crate::storage::FileStore;
+        use std::sync::Arc;
+
+        let temp_dir = tempfile::tempdir().expect("create temp dir");
+        let store = FileStore::new(temp_dir.path().to_path_buf())
+            .await
+            .expect("create FileStore");
+        let registry = Registry::new(Arc::new(store));
+
+        // Add two plugins
+        let plugin1 = PluginEntry {
+            name: "exa".to_string(),
+            hosts: vec!["api.exa.ai".to_string()],
+            credential_schema: vec!["api_key".to_string()],
+        };
+        let plugin2 = PluginEntry {
+            name: "github".to_string(),
+            hosts: vec!["api.github.com".to_string()],
+            credential_schema: vec!["token".to_string()],
+        };
+        registry
+            .add_plugin(&plugin1)
+            .await
+            .expect("add should succeed");
+        registry
+            .add_plugin(&plugin2)
+            .await
+            .expect("add should succeed");
+
+        // Remove first plugin
+        registry
+            .remove_plugin("exa")
+            .await
+            .expect("remove should succeed");
+
+        // Verify only second plugin remains
+        let plugins = registry.list_plugins().await.expect("list should succeed");
+        assert_eq!(plugins.len(), 1);
+        assert_eq!(plugins[0].name, "github");
+    }
+
+    #[tokio::test]
+    async fn test_list_plugins() {
+        use crate::storage::FileStore;
+        use std::sync::Arc;
+
+        let temp_dir = tempfile::tempdir().expect("create temp dir");
+        let store = FileStore::new(temp_dir.path().to_path_buf())
+            .await
+            .expect("create FileStore");
+        let registry = Registry::new(Arc::new(store));
+
+        // List should return empty on fresh registry
+        let plugins = registry.list_plugins().await.expect("list should succeed");
+        assert_eq!(plugins.len(), 0);
+
+        // Add plugins
+        let plugin1 = PluginEntry {
+            name: "exa".to_string(),
+            hosts: vec!["api.exa.ai".to_string()],
+            credential_schema: vec!["api_key".to_string()],
+        };
+        let plugin2 = PluginEntry {
+            name: "github".to_string(),
+            hosts: vec!["api.github.com".to_string()],
+            credential_schema: vec!["token".to_string()],
+        };
+        registry
+            .add_plugin(&plugin1)
+            .await
+            .expect("add should succeed");
+        registry
+            .add_plugin(&plugin2)
+            .await
+            .expect("add should succeed");
+
+        // List should return both
+        let plugins = registry.list_plugins().await.expect("list should succeed");
+        assert_eq!(plugins.len(), 2);
+    }
+
+    // RED: Tests for credential CRUD operations
+    #[tokio::test]
+    async fn test_add_credential() {
+        use crate::storage::FileStore;
+        use std::sync::Arc;
+
+        let temp_dir = tempfile::tempdir().expect("create temp dir");
+        let store = FileStore::new(temp_dir.path().to_path_buf())
+            .await
+            .expect("create FileStore");
+        let registry = Registry::new(Arc::new(store));
+
+        let cred = CredentialEntry {
+            plugin: "exa".to_string(),
+            field: "api_key".to_string(),
+        };
+
+        // Add credential should succeed
+        registry
+            .add_credential(&cred)
+            .await
+            .expect("add should succeed");
+
+        // Verify credential is in registry
+        let creds = registry
+            .list_credentials()
+            .await
+            .expect("list should succeed");
+        assert_eq!(creds.len(), 1);
+        assert_eq!(creds[0].plugin, "exa");
+        assert_eq!(creds[0].field, "api_key");
+    }
+
+    #[tokio::test]
+    async fn test_remove_credential() {
+        use crate::storage::FileStore;
+        use std::sync::Arc;
+
+        let temp_dir = tempfile::tempdir().expect("create temp dir");
+        let store = FileStore::new(temp_dir.path().to_path_buf())
+            .await
+            .expect("create FileStore");
+        let registry = Registry::new(Arc::new(store));
+
+        // Add two credentials
+        let cred1 = CredentialEntry {
+            plugin: "exa".to_string(),
+            field: "api_key".to_string(),
+        };
+        let cred2 = CredentialEntry {
+            plugin: "exa".to_string(),
+            field: "secret".to_string(),
+        };
+        let cred3 = CredentialEntry {
+            plugin: "github".to_string(),
+            field: "token".to_string(),
+        };
+        registry
+            .add_credential(&cred1)
+            .await
+            .expect("add should succeed");
+        registry
+            .add_credential(&cred2)
+            .await
+            .expect("add should succeed");
+        registry
+            .add_credential(&cred3)
+            .await
+            .expect("add should succeed");
+
+        // Remove exa api_key credential
+        registry
+            .remove_credential("exa", "api_key")
+            .await
+            .expect("remove should succeed");
+
+        // Verify only exa/secret and github/token remain
+        let creds = registry
+            .list_credentials()
+            .await
+            .expect("list should succeed");
+        assert_eq!(creds.len(), 2);
+        assert!(creds.iter().any(|c| c.plugin == "exa" && c.field == "secret"));
+        assert!(creds.iter().any(|c| c.plugin == "github" && c.field == "token"));
+        assert!(!creds
+            .iter()
+            .any(|c| c.plugin == "exa" && c.field == "api_key"));
+    }
+
+    #[tokio::test]
+    async fn test_list_credentials() {
+        use crate::storage::FileStore;
+        use std::sync::Arc;
+
+        let temp_dir = tempfile::tempdir().expect("create temp dir");
+        let store = FileStore::new(temp_dir.path().to_path_buf())
+            .await
+            .expect("create FileStore");
+        let registry = Registry::new(Arc::new(store));
+
+        // List should return empty on fresh registry
+        let creds = registry
+            .list_credentials()
+            .await
+            .expect("list should succeed");
+        assert_eq!(creds.len(), 0);
+
+        // Add credentials
+        let cred1 = CredentialEntry {
+            plugin: "exa".to_string(),
+            field: "api_key".to_string(),
+        };
+        let cred2 = CredentialEntry {
+            plugin: "github".to_string(),
+            field: "token".to_string(),
+        };
+        registry
+            .add_credential(&cred1)
+            .await
+            .expect("add should succeed");
+        registry
+            .add_credential(&cred2)
+            .await
+            .expect("add should succeed");
+
+        // List should return both
+        let creds = registry
+            .list_credentials()
+            .await
+            .expect("list should succeed");
+        assert_eq!(creds.len(), 2);
     }
 }
