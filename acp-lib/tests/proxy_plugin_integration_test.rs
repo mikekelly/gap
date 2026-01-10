@@ -197,3 +197,64 @@ async fn test_proxy_plugin_execution_flow() {
 
 // Use the actual implementations from acp_lib
 use acp_lib::{parse_http_request, serialize_http_request, find_matching_plugin};
+use acp_lib::proxy_transforms::parse_and_transform;
+
+/// Test the complete proxy transform pipeline
+#[tokio::test]
+async fn test_complete_proxy_transform_pipeline() {
+    let temp_dir = std::env::temp_dir().join(format!(
+        "acp_proxy_complete_test_{}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+
+    let store = FileStore::new(temp_dir.clone()).await.unwrap();
+
+    // Install a simple plugin
+    let plugin_code = r#"
+    var plugin = {
+        name: "test-transform",
+        matchPatterns: ["api.test.com"],
+        credentialSchema: ["secret"],
+        transform: function(request, credentials) {
+            request.headers["X-Transformed"] = "true";
+            request.headers["X-Secret"] = credentials.secret;
+            return request;
+        }
+    };
+    "#;
+
+    store.set("plugin:test-transform", plugin_code.as_bytes()).await.unwrap();
+
+    // Store credentials
+    let mut creds = ACPCredentials::new();
+    creds.set("secret", "my-secret-value");
+    store.set(
+        "credential:test-transform:default",
+        serde_json::to_string(&creds).unwrap().as_bytes()
+    ).await.unwrap();
+
+    // Simulate an incoming HTTP request (as raw bytes)
+    let raw_http = b"GET /api/data HTTP/1.1\r\nHost: api.test.com\r\nUser-Agent: TestAgent/1.0\r\n\r\n";
+
+    // Transform the request using the proxy pipeline
+    let transformed_bytes = parse_and_transform(raw_http, "api.test.com", &store)
+        .await
+        .unwrap();
+
+    // Parse the result to verify transformation
+    let transformed_request = parse_http_request(&transformed_bytes).unwrap();
+
+    // Verify the plugin transformation was applied
+    assert_eq!(transformed_request.method, "GET");
+    assert_eq!(transformed_request.url, "https://api.test.com/api/data");
+    assert_eq!(transformed_request.get_header("Host"), Some(&"api.test.com".to_string()));
+    assert_eq!(transformed_request.get_header("User-Agent"), Some(&"TestAgent/1.0".to_string()));
+    assert_eq!(transformed_request.get_header("X-Transformed"), Some(&"true".to_string()));
+    assert_eq!(transformed_request.get_header("X-Secret"), Some(&"my-secret-value".to_string()));
+
+    // Cleanup
+    tokio::fs::remove_dir_all(temp_dir).await.ok();
+}

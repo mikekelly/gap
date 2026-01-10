@@ -55,11 +55,18 @@ pub async fn parse_and_transform<S: SecretStore>(
         }
     };
 
+    // Load plugin code from storage
+    let plugin_key = format!("plugin:{}", plugin.name);
+    let plugin_code_bytes = store.get(&plugin_key).await?
+        .ok_or_else(|| AcpError::plugin(format!("Plugin code not found for {}", plugin.name)))?;
+    let plugin_code = String::from_utf8(plugin_code_bytes)
+        .map_err(|e| AcpError::plugin(format!("Invalid UTF-8 in plugin code: {}", e)))?;
+
     // Execute transform
     // CRITICAL: Scope the PluginRuntime to ensure it's dropped before any await
     let transformed_request = {
         let mut runtime = PluginRuntime::new()?;
-        runtime.load_plugin_from_code(&plugin.name, &plugin.transform)?;
+        runtime.load_plugin_from_code(&plugin.name, &plugin_code)?;
         runtime.execute_transform(&plugin.name, request, &credentials)?
     };
 

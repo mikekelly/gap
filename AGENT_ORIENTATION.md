@@ -55,6 +55,8 @@ cargo run --bin acp-server  # Run server
 - **Dynamic cert generation**: Uses CertificateAuthority to generate host-specific certs on-demand
 - **Upstream TLS**: Uses webpki-roots for system CA trust (TLS_SERVER_ROOTS)
 - **Bidirectional streaming**: tokio::io::copy with tokio::select! for full-duplex proxying
+- **HTTP parsing & transforms**: `http_utils` module parses raw HTTP, `plugin_matcher` finds matching plugins, `proxy_transforms` executes transforms
+- **Transform pipeline**: Parse HTTP → Match host → Load credentials → Execute plugin → Serialize → Forward
 
 ## Management API (Phase 6)
 - **Authentication**: Client sends `password_hash` (SHA512 of password) in request body; server verifies Argon2(SHA512(password))

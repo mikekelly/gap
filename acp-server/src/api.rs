@@ -1060,9 +1060,14 @@ mod tests {
 
     #[tokio::test]
     async fn test_set_credential_stores_value() {
-        use acp_lib::storage::create_store;
+        use acp_lib::storage::{create_store, FileStore};
         use argon2::password_hash::{rand_core::OsRng, SaltString};
         use argon2::{Argon2, PasswordHasher};
+        use tempfile::tempdir;
+
+        // Use temp directory to avoid test isolation issues
+        let temp_dir = tempdir().expect("create temp dir");
+        std::env::set_var("HOME", temp_dir.path());
 
         let state = ApiState::new(9443, 9080);
 
@@ -1107,9 +1112,14 @@ mod tests {
 
     #[tokio::test]
     async fn test_delete_credential_removes_value() {
-        use acp_lib::storage::create_store;
+        use acp_lib::storage::{create_store, FileStore};
         use argon2::password_hash::{rand_core::OsRng, SaltString};
         use argon2::{Argon2, PasswordHasher};
+        use tempfile::tempdir;
+
+        // Use temp directory to avoid test isolation issues
+        let temp_dir = tempdir().expect("create temp dir");
+        std::env::set_var("HOME", temp_dir.path());
 
         let state = ApiState::new(9443, 9080);
 
