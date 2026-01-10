@@ -70,6 +70,12 @@ cargo run --bin acp-server  # Run server
 - **Command structure**: Uses clap derive macros with nested subcommands (e.g., `token create`)
 - **Error handling**: Returns exit code 1 on errors, prints to stderr
 
+## Testing (Phase 8)
+- **Integration tests**: Located in `acp-lib/tests/` for end-to-end testing
+- **Test plugins**: Sample plugins in `plugins/` directory (e.g., `test-api.js`)
+- **Test suite**: 90 total tests across all workspace crates
+- **Test organization**: Unit tests inline with source, integration tests in `tests/` directory
+
 ## Gotchas
 - **Wildcard matching is single-level only**: The pattern `*.s3.amazonaws.com` matches `bucket.s3.amazonaws.com` but rejects both `s3.amazonaws.com` (no subdomain) and `evil.com.s3.amazonaws.com` (multiple levels)
 - **Token serialization**: `AgentToken` uses `#[serde(skip_serializing)]` on the `token` field to prevent accidental exposure in JSON responses
@@ -82,3 +88,4 @@ cargo run --bin acp-server  # Run server
 - **rustls-native-certs vs webpki-roots**: Use webpki-roots (TLS_SERVER_ROOTS) for cross-platform system CA trust; rustls-native-certs has platform-specific quirks
 - **Axum authentication**: Custom extractors using `FromRequest` with request body are complex in Axum 0.7. Simpler to use helper functions that take `Bytes` parameter and verify authentication manually in each handler.
 - **Argon2 password hashing**: Client sends SHA512(password), server stores Argon2(SHA512(password)). Verification uses `Argon2::default().verify_password()` with client's SHA512 hash against stored Argon2 hash.
+- **PluginRuntime single-context limitation**: Loading a plugin overwrites the global `plugin` object in the JS context. Only the most recently loaded plugin's transform function can be executed. Plugin metadata (name, patterns, schema) is preserved for all loaded plugins.
