@@ -160,10 +160,71 @@ else
     log_fail "Failed to set credential (HTTP $CRED_STATUS)"
 fi
 
-# Test 9: Delete token (cleanup test)
+# Test 9: Install a plugin
 echo ""
-echo "Test 9: Delete token"
-echo "===================="
+echo "Test 9: Install plugin"
+echo "======================"
+
+# Note: Plugin installation requires network access to GitHub
+INSTALL_RESPONSE=$(curl -s -X POST "$ACP_SERVER_URL/plugins/install" \
+    -H "Content-Type: application/json" \
+    -d "{
+        \"password_hash\": \"$(echo -n "$TEST_PASSWORD" | sha512sum | cut -d' ' -f1)\",
+        \"url\": \"mikekelly/exa-acp\"
+    }")
+
+if echo "$INSTALL_RESPONSE" | grep -q '"name"'; then
+    PLUGIN_NAME=$(echo "$INSTALL_RESPONSE" | jq -r '.name')
+    log_pass "Plugin installed: $PLUGIN_NAME"
+else
+    log_fail "Failed to install plugin: $INSTALL_RESPONSE"
+fi
+
+# Test 10: List plugins
+echo ""
+echo "Test 10: List plugins"
+echo "====================="
+
+PLUGINS_RESPONSE=$(curl -s -X POST "$ACP_SERVER_URL/plugins" \
+    -H "Content-Type: application/json" \
+    -d "{
+        \"password_hash\": \"$(echo -n "$TEST_PASSWORD" | sha512sum | cut -d' ' -f1)\"
+    }")
+
+if echo "$PLUGINS_RESPONSE" | grep -q '"plugins"'; then
+    PLUGIN_COUNT=$(echo "$PLUGINS_RESPONSE" | jq '.plugins | length')
+    log_pass "Plugin listing works (found $PLUGIN_COUNT plugins)"
+
+    # Verify the installed plugin appears in the list
+    if echo "$PLUGINS_RESPONSE" | jq -e ".plugins[] | select(.name == \"$PLUGIN_NAME\")" > /dev/null 2>&1; then
+        log_pass "Installed plugin appears in plugin list"
+    else
+        log_fail "Installed plugin does not appear in plugin list"
+    fi
+
+    # Verify plugin metadata is present (hosts and credential_schema)
+    PLUGIN_DATA=$(echo "$PLUGINS_RESPONSE" | jq -r ".plugins[] | select(.name == \"$PLUGIN_NAME\")")
+    if echo "$PLUGIN_DATA" | jq -e '.hosts' > /dev/null 2>&1; then
+        HOSTS=$(echo "$PLUGIN_DATA" | jq -r '.hosts | join(", ")')
+        log_pass "Plugin metadata includes hosts: $HOSTS"
+    else
+        log_fail "Plugin metadata missing hosts field"
+    fi
+
+    if echo "$PLUGIN_DATA" | jq -e '.credential_schema' > /dev/null 2>&1; then
+        SCHEMA=$(echo "$PLUGIN_DATA" | jq -r '.credential_schema | join(", ")')
+        log_pass "Plugin metadata includes credential_schema: $SCHEMA"
+    else
+        log_fail "Plugin metadata missing credential_schema field"
+    fi
+else
+    log_fail "Failed to list plugins: $PLUGINS_RESPONSE"
+fi
+
+# Test 11: Delete token (cleanup test)
+echo ""
+echo "Test 11: Delete token"
+echo "====================="
 
 if [ -n "$AGENT_TOKEN" ]; then
     # Extract token ID from TOKEN_RESPONSE

@@ -85,6 +85,78 @@ if command -v cargo &> /dev/null; then
         log_fail "acp-server --version failed"
     fi
 
+    # Test CLI plugin commands (requires server to be running)
+    echo ""
+    echo "Test: CLI plugin commands"
+    echo "========================="
+
+    # Start server in background for CLI testing
+    export HOME="$TEMP_PREFIX"
+    export ACP_PASSWORD="test-password-$(date +%s)"
+
+    # Create data directory
+    mkdir -p "$TEMP_PREFIX/.config/acp"
+
+    # Start server in background with temp data dir
+    "$TEMP_PREFIX/bin/acp-server" --data-dir "$TEMP_PREFIX/.config/acp" --proxy-port 19443 --api-port 19080 > "$TEMP_PREFIX/server.log" 2>&1 &
+    SERVER_PID=$!
+
+    # Wait for server to start
+    sleep 2
+
+    # Check if server is running
+    if ! kill -0 $SERVER_PID 2>/dev/null; then
+        log_fail "Server failed to start. Log: $(cat "$TEMP_PREFIX/server.log")"
+    fi
+
+    log_pass "Test server started (PID $SERVER_PID)"
+
+    # Initialize ACP
+    PASSWORD_HASH=$(echo -n "$ACP_PASSWORD" | sha512sum | cut -d' ' -f1)
+    INIT_RESULT=$(curl -s -X POST http://localhost:19080/init \
+        -H "Content-Type: application/json" \
+        -d "{\"password_hash\": \"$PASSWORD_HASH\"}")
+
+    if echo "$INIT_RESULT" | grep -q '"ca_path"'; then
+        log_pass "ACP initialized via API"
+    else
+        log_fail "Failed to initialize ACP: $INIT_RESULT"
+    fi
+
+    # Test plugin installation via CLI (requires network access)
+    # Note: This will fail if GitHub is unreachable, but that's expected
+    if "$TEMP_PREFIX/bin/acp" --server http://localhost:19080 install mikekelly/exa-acp 2>&1 | tee "$TEMP_PREFIX/install.log"; then
+        log_pass "acp install command executed"
+
+        # Test plugin listing via CLI
+        PLUGINS_OUTPUT=$("$TEMP_PREFIX/bin/acp" --server http://localhost:19080 plugins 2>&1)
+        if echo "$PLUGINS_OUTPUT" | grep -q "exa"; then
+            log_pass "acp plugins command shows installed plugin"
+
+            # Verify metadata is shown (hosts and credentials)
+            if echo "$PLUGINS_OUTPUT" | grep -q -i "host"; then
+                log_pass "Plugin listing shows host information"
+            else
+                log_warn "Plugin listing may not show host information"
+            fi
+
+            if echo "$PLUGINS_OUTPUT" | grep -q -i "credential"; then
+                log_pass "Plugin listing shows credential schema"
+            else
+                log_warn "Plugin listing may not show credential schema"
+            fi
+        else
+            log_warn "Plugin may not be installed (check network connectivity)"
+        fi
+    else
+        log_warn "Plugin installation failed (may require network access): $(cat "$TEMP_PREFIX/install.log")"
+    fi
+
+    # Clean up server
+    kill $SERVER_PID 2>/dev/null || true
+    wait $SERVER_PID 2>/dev/null || true
+    log_pass "Test server stopped"
+
     echo ""
     echo -e "${GREEN}All tests passed!${NC}"
 else
