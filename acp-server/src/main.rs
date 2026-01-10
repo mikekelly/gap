@@ -9,7 +9,7 @@
 
 pub mod api;
 
-use acp_lib::{storage, tls::CertificateAuthority, TokenCache, Config, ProxyServer};
+use acp_lib::{storage, tls::CertificateAuthority, TokenCache, Registry, Config, ProxyServer};
 use clap::Parser;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -75,6 +75,10 @@ async fn main() -> anyhow::Result<()> {
     let initial_tokens = token_cache.list().await?;
     tracing::info!("Loaded {} agent tokens from storage", initial_tokens.len());
 
+    // Create registry for centralized metadata storage
+    let registry = Arc::new(Registry::new(Arc::clone(&store)));
+    tracing::info!("Registry initialized");
+
     // Create ProxyServer with token cache and store
     let proxy = ProxyServer::new(config.proxy_port, ca, Arc::clone(&token_cache), Arc::clone(&store))?;
 
@@ -87,12 +91,13 @@ async fn main() -> anyhow::Result<()> {
         }
     });
 
-    // Create API state with token cache and storage backend
+    // Create API state with token cache, storage backend, and registry
     let api_state = api::ApiState::new(
         config.proxy_port,
         config.api_port,
         token_cache,
         Arc::clone(&store),
+        registry,
     );
 
     // Build the API router
