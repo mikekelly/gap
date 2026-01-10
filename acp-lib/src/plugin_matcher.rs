@@ -18,7 +18,7 @@ use crate::types::ACPPlugin;
 ///
 /// # Returns
 /// Option containing the matching plugin, or None
-pub async fn find_matching_plugin<S: SecretStore>(
+pub async fn find_matching_plugin<S: SecretStore + ?Sized>(
     host: &str,
     store: &S,
 ) -> Result<Option<ACPPlugin>> {

@@ -8,6 +8,7 @@
 //! - Bearer token authentication
 
 use crate::error::{AcpError, Result};
+use crate::storage::SecretStore;
 use crate::tls::CertificateAuthority;
 use crate::token_cache::TokenCache;
 use crate::types::AgentToken;
@@ -27,16 +28,19 @@ pub struct ProxyServer {
     ca: Arc<CertificateAuthority>,
     /// Token cache for authentication
     token_cache: Arc<TokenCache>,
+    /// Secret store for loading plugins and credentials
+    store: Arc<dyn SecretStore>,
     /// TLS connector for upstream connections
     upstream_connector: TlsConnector,
 }
 
 impl ProxyServer {
-    /// Create a new ProxyServer instance with token cache
+    /// Create a new ProxyServer instance with token cache and secret store
     pub fn new(
         port: u16,
         ca: CertificateAuthority,
         token_cache: Arc<TokenCache>,
+        store: Arc<dyn SecretStore>,
     ) -> Result<Self> {
         // Configure upstream TLS connector with system CA trust
         let root_store = rustls::RootCertStore {
@@ -53,6 +57,7 @@ impl ProxyServer {
             port,
             ca: Arc::new(ca),
             token_cache,
+            store,
             upstream_connector,
         })
     }
@@ -60,7 +65,7 @@ impl ProxyServer {
     /// Create a new ProxyServer instance from a Vec of tokens (for backward compatibility in tests)
     #[cfg(test)]
     pub async fn new_from_vec_async(port: u16, ca: CertificateAuthority, tokens: Vec<AgentToken>) -> Result<Self> {
-        use crate::storage::{FileStore, SecretStore};
+        use crate::storage::FileStore;
 
         // Create a temporary FileStore for testing
         let temp_dir = tempfile::tempdir().expect("create temp dir");
@@ -68,7 +73,7 @@ impl ProxyServer {
             FileStore::new(temp_dir.path().to_path_buf())
                 .await
                 .expect("create FileStore"),
-        );
+        ) as Arc<dyn SecretStore>;
 
         // Pre-populate storage with tokens
         for token in &tokens {
@@ -77,9 +82,9 @@ impl ProxyServer {
             store.set(&store_key, &token_json).await.expect("store token");
         }
 
-        let token_cache = Arc::new(TokenCache::new(store as Arc<dyn SecretStore>));
+        let token_cache = Arc::new(TokenCache::new(Arc::clone(&store)));
 
-        Self::new(port, ca, token_cache)
+        Self::new(port, ca, token_cache, store)
     }
 
     /// Start the proxy server
@@ -100,10 +105,11 @@ impl ProxyServer {
 
             let ca = Arc::clone(&self.ca);
             let token_cache = Arc::clone(&self.token_cache);
+            let store = Arc::clone(&self.store);
             let upstream_connector = self.upstream_connector.clone();
 
             tokio::spawn(async move {
-                if let Err(e) = handle_connection(stream, ca, token_cache, upstream_connector).await {
+                if let Err(e) = handle_connection(stream, ca, token_cache, store, upstream_connector).await {
                     error!("Connection error: {}", e);
                 }
             });
@@ -116,6 +122,7 @@ async fn handle_connection(
     stream: TcpStream,
     ca: Arc<CertificateAuthority>,
     token_cache: Arc<TokenCache>,
+    store: Arc<dyn SecretStore>,
     upstream_connector: TlsConnector,
 ) -> Result<()> {
     // Read the CONNECT request
@@ -174,8 +181,8 @@ async fn handle_connection(
     let upstream_stream = connect_upstream(&hostname, port, upstream_connector).await?;
     debug!("Upstream TLS established");
 
-    // Bidirectional proxy
-    proxy_streams(agent_stream, upstream_stream).await?;
+    // Bidirectional proxy with HTTP transformation
+    proxy_streams_with_transform(agent_stream, upstream_stream, &hostname, &*store).await?;
 
     Ok(())
 }
@@ -299,7 +306,87 @@ async fn connect_upstream(
     Ok(tls_stream)
 }
 
+/// Proxy data bidirectionally with HTTP request transformation
+async fn proxy_streams_with_transform<A, U>(
+    mut agent: A,
+    mut upstream: U,
+    hostname: &str,
+    store: &dyn SecretStore,
+) -> Result<()>
+where
+    A: AsyncReadExt + AsyncWriteExt + Unpin,
+    U: AsyncReadExt + AsyncWriteExt + Unpin,
+{
+    use crate::proxy_transforms::parse_and_transform;
+
+    // Read the first HTTP request from agent
+    let mut buffer = Vec::new();
+    let mut temp_buf = [0u8; 8192];
+
+    // Read until we have a complete HTTP request (ends with \r\n\r\n or \n\n)
+    loop {
+        let n = agent.read(&mut temp_buf).await
+            .map_err(|e| AcpError::network(format!("Failed to read from agent: {}", e)))?;
+
+        if n == 0 {
+            // Connection closed
+            return Ok(());
+        }
+
+        buffer.extend_from_slice(&temp_buf[..n]);
+
+        // Check if we have a complete request
+        if buffer.windows(4).any(|w| w == b"\r\n\r\n") || buffer.windows(2).any(|w| w == b"\n\n") {
+            break;
+        }
+
+        // Safety: don't read forever
+        if buffer.len() > 1024 * 1024 {
+            return Err(AcpError::protocol("HTTP request too large"));
+        }
+    }
+
+    // Transform the request
+    let transformed_bytes = parse_and_transform(&buffer, hostname, store).await?;
+
+    // Forward transformed request to upstream
+    upstream.write_all(&transformed_bytes).await
+        .map_err(|e| AcpError::network(format!("Failed to write to upstream: {}", e)))?;
+
+    debug!("Forwarded transformed request to upstream");
+
+    // Now do standard bidirectional proxying for the rest of the connection
+    let (mut agent_read, mut agent_write) = tokio::io::split(agent);
+    let (mut upstream_read, mut upstream_write) = tokio::io::split(upstream);
+
+    let agent_to_upstream = async {
+        tokio::io::copy(&mut agent_read, &mut upstream_write)
+            .await
+            .map_err(|e| AcpError::network(format!("Agent to upstream copy failed: {}", e)))
+    };
+
+    let upstream_to_agent = async {
+        tokio::io::copy(&mut upstream_read, &mut agent_write)
+            .await
+            .map_err(|e| AcpError::network(format!("Upstream to agent copy failed: {}", e)))
+    };
+
+    tokio::select! {
+        result = agent_to_upstream => {
+            debug!("Agent to upstream finished: {:?}", result);
+            result?;
+        }
+        result = upstream_to_agent => {
+            debug!("Upstream to agent finished: {:?}", result);
+            result?;
+        }
+    }
+
+    Ok(())
+}
+
 /// Proxy data bidirectionally between agent and upstream
+#[allow(dead_code)]
 async fn proxy_streams<A, U>(agent: A, upstream: U) -> Result<()>
 where
     A: AsyncReadExt + AsyncWriteExt + Unpin,

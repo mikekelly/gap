@@ -75,8 +75,8 @@ async fn main() -> anyhow::Result<()> {
     let initial_tokens = token_cache.list().await?;
     tracing::info!("Loaded {} agent tokens from storage", initial_tokens.len());
 
-    // Create ProxyServer with token cache
-    let proxy = ProxyServer::new(config.proxy_port, ca, Arc::clone(&token_cache))?;
+    // Create ProxyServer with token cache and store
+    let proxy = ProxyServer::new(config.proxy_port, ca, Arc::clone(&token_cache), Arc::clone(&store))?;
 
     // Spawn proxy server in background
     let proxy_port = config.proxy_port;

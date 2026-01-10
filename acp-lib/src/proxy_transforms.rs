@@ -10,11 +10,38 @@ use crate::storage::SecretStore;
 use crate::types::ACPCredentials;
 use tracing::{debug, warn};
 
+/// Load all credential fields for a plugin from storage
+///
+/// Credentials are stored as credential:{plugin}:{field_name}
+/// This function lists all keys and filters by the plugin name prefix
+async fn load_plugin_credentials<S: SecretStore + ?Sized>(
+    plugin_name: &str,
+    store: &S,
+) -> Result<ACPCredentials> {
+    let prefix = format!("credential:{}:", plugin_name);
+    let mut credentials = ACPCredentials::new();
+
+    // List all keys with the plugin prefix
+    let matching_keys = store.list(&prefix).await?;
+    for key in matching_keys {
+        if let Some(field_name) = key.strip_prefix(&prefix) {
+            // Load the credential value
+            if let Some(value_bytes) = store.get(&key).await? {
+                let value = String::from_utf8(value_bytes)
+                    .map_err(|e| AcpError::storage(format!("Invalid UTF-8 in credential {}: {}", key, e)))?;
+                credentials.set(field_name, &value);
+            }
+        }
+    }
+
+    Ok(credentials)
+}
+
 /// Parse HTTP request and apply plugin transforms
 ///
 /// CRITICAL: PluginRuntime is not Send - this function is scoped to ensure
 /// the runtime is dropped before any `.await` points.
-pub async fn parse_and_transform<S: SecretStore>(
+pub async fn parse_and_transform<S: SecretStore + ?Sized>(
     request_bytes: &[u8],
     hostname: &str,
     store: &S,
@@ -36,24 +63,21 @@ pub async fn parse_and_transform<S: SecretStore>(
         }
     };
 
-    // Load credentials for the plugin (key pattern: credential:{plugin_name}:default)
-    let creds_key = format!("credential:{}:default", plugin.name);
-    let credentials = match store.get(&creds_key).await? {
-        Some(creds_bytes) => {
-            let creds: ACPCredentials = serde_json::from_slice(&creds_bytes)
-                .map_err(|e| AcpError::storage(format!("Failed to parse credentials: {}", e)))?;
-            debug!("Loaded credentials for plugin {}", plugin.name);
-            creds
-        }
-        None => {
-            warn!(
-                "No credentials found for plugin {}, passing through",
-                plugin.name
-            );
-            // No credentials, return original bytes
-            return Ok(request_bytes.to_vec());
-        }
-    };
+    // Load credentials for the plugin
+    // The API stores credentials as credential:{plugin}:{field_name}
+    // We need to load all fields and build a credentials object
+    let credentials = load_plugin_credentials(&plugin.name, store).await?;
+
+    if credentials.credentials.is_empty() {
+        warn!(
+            "No credentials found for plugin {}, passing through",
+            plugin.name
+        );
+        // No credentials, return original bytes
+        return Ok(request_bytes.to_vec());
+    }
+
+    debug!("Loaded {} credential fields for plugin {}", credentials.credentials.len(), plugin.name);
 
     // Load plugin code from storage
     let plugin_key = format!("plugin:{}", plugin.name);

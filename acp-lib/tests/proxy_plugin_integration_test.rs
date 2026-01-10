@@ -228,13 +228,8 @@ async fn test_complete_proxy_transform_pipeline() {
 
     store.set("plugin:test-transform", plugin_code.as_bytes()).await.unwrap();
 
-    // Store credentials
-    let mut creds = ACPCredentials::new();
-    creds.set("secret", "my-secret-value");
-    store.set(
-        "credential:test-transform:default",
-        serde_json::to_string(&creds).unwrap().as_bytes()
-    ).await.unwrap();
+    // Store credentials using the new pattern: credential:{plugin}:{field_name}
+    store.set("credential:test-transform:secret", b"my-secret-value").await.unwrap();
 
     // Simulate an incoming HTTP request (as raw bytes)
     let raw_http = b"GET /api/data HTTP/1.1\r\nHost: api.test.com\r\nUser-Agent: TestAgent/1.0\r\n\r\n";
