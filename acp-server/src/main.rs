@@ -9,8 +9,12 @@
 
 pub mod api;
 
-use acp_lib::Config;
+use acp_lib::{storage, tls::CertificateAuthority, AgentToken, Config, ProxyServer};
 use clap::Parser;
+use std::collections::HashMap;
+use std::path::PathBuf;
+use std::sync::Arc;
+use tokio::sync::RwLock;
 
 #[derive(Parser)]
 #[command(name = "acp-server")]
@@ -57,8 +61,44 @@ async fn main() -> anyhow::Result<()> {
     tracing::info!("Proxy port: {}", config.proxy_port);
     tracing::info!("API port: {}", config.api_port);
 
-    // Create API state
-    let api_state = api::ApiState::new(config.proxy_port, config.api_port);
+    // Create storage
+    let data_dir_path = config.data_dir.as_ref().map(PathBuf::from);
+    let store = storage::create_store(data_dir_path).await?;
+
+    // Load or generate CA certificate
+    let ca = load_or_generate_ca(&*store).await?;
+    tracing::info!("CA certificate loaded/generated");
+
+    // Load tokens from storage
+    let tokens_vec = load_tokens_from_storage(&*store).await?;
+    let token_count = tokens_vec.len();
+    tracing::info!("Loaded {} agent tokens from storage", token_count);
+
+    // Create token map for API (needs RwLock for updates)
+    let tokens_map: HashMap<String, AgentToken> = tokens_vec
+        .iter()
+        .map(|t| (t.token.clone(), t.clone()))
+        .collect();
+    let api_tokens = Arc::new(RwLock::new(tokens_map));
+
+    // Create ProxyServer (uses immutable token list)
+    let proxy = ProxyServer::new(config.proxy_port, ca, tokens_vec)?;
+
+    // Spawn proxy server in background
+    let proxy_port = config.proxy_port;
+    let _proxy_handle = tokio::spawn(async move {
+        tracing::info!("Proxy server starting on 127.0.0.1:{}", proxy_port);
+        if let Err(e) = proxy.start().await {
+            tracing::error!("Proxy server error: {}", e);
+        }
+    });
+
+    // Create API state with tokens
+    let api_state = api::ApiState::new_with_tokens(
+        config.proxy_port,
+        config.api_port,
+        api_tokens,
+    );
 
     // Build the API router
     let app = api::create_router(api_state);
@@ -69,10 +109,63 @@ async fn main() -> anyhow::Result<()> {
 
     tracing::info!("Management API listening on 0.0.0.0:{}", config.api_port);
 
-    // Start serving
+    // Start API server (main task)
     axum::serve(listener, app).await?;
 
     Ok(())
+}
+
+/// Load CA from storage or generate a new one
+async fn load_or_generate_ca(store: &dyn storage::SecretStore) -> anyhow::Result<CertificateAuthority> {
+    const CA_CERT_KEY: &str = "ca:cert";
+    const CA_KEY_KEY: &str = "ca:key";
+
+    // Try to load from storage
+    match (store.get(CA_CERT_KEY).await?, store.get(CA_KEY_KEY).await?) {
+        (Some(cert_pem), Some(key_pem)) => {
+            let cert_pem_str = String::from_utf8(cert_pem)?;
+            let key_pem_str = String::from_utf8(key_pem)?;
+            tracing::info!("Loaded CA from storage");
+            Ok(CertificateAuthority::from_pem(&cert_pem_str, &key_pem_str)?)
+        }
+        _ => {
+            // Generate new CA
+            tracing::info!("Generating new CA certificate");
+            let ca = CertificateAuthority::generate()?;
+
+            // Save to storage for next time
+            store.set(CA_CERT_KEY, ca.ca_cert_pem().as_bytes()).await?;
+            store.set(CA_KEY_KEY, ca.ca_key_pem().as_bytes()).await?;
+            tracing::info!("CA certificate saved to storage");
+
+            Ok(ca)
+        }
+    }
+}
+
+/// Load tokens from storage
+async fn load_tokens_from_storage(
+    store: &dyn storage::SecretStore,
+) -> anyhow::Result<Vec<AgentToken>> {
+    const TOKEN_PREFIX: &str = "token:";
+
+    let mut tokens = Vec::new();
+    let keys = store.list(TOKEN_PREFIX).await?;
+
+    for key in keys {
+        if let Some(token_json) = store.get(&key).await? {
+            match serde_json::from_slice::<AgentToken>(&token_json) {
+                Ok(token) => {
+                    tokens.push(token);
+                }
+                Err(e) => {
+                    tracing::warn!("Failed to deserialize token {}: {}", key, e);
+                }
+            }
+        }
+    }
+
+    Ok(tokens)
 }
 
 #[cfg(test)]

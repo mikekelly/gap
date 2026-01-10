@@ -53,6 +53,22 @@ impl ApiState {
         }
     }
 
+    /// Create ApiState with shared tokens (for use with ProxyServer)
+    pub fn new_with_tokens(
+        proxy_port: u16,
+        api_port: u16,
+        tokens: Arc<RwLock<HashMap<String, AgentToken>>>,
+    ) -> Self {
+        Self {
+            start_time: std::time::Instant::now(),
+            proxy_port,
+            api_port,
+            password_hash: Arc::new(RwLock::new(None)),
+            tokens,
+            activity: Arc::new(RwLock::new(Vec::new())),
+        }
+    }
+
     pub async fn set_password_hash(&self, hash: String) {
         *self.password_hash.write().await = Some(hash);
     }
@@ -627,9 +643,20 @@ async fn set_credential(
     Path((plugin, key)): Path<(String, String)>,
     body: Bytes,
 ) -> Result<StatusCode, (StatusCode, String)> {
-    let _req: SetCredentialRequest = verify_auth(&state, &body).await?;
+    use acp_lib::storage::create_store;
 
-    // TODO: Store in SecretStore in future implementation
+    let req: SetCredentialRequest = verify_auth(&state, &body).await?;
+
+    // Store credential in SecretStore
+    let store = create_store(None)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to create store: {}", e)))?;
+
+    let store_key = format!("credential:{}:{}", plugin, key);
+    store.set(&store_key, req.value.as_bytes())
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to store credential: {}", e)))?;
+
     tracing::info!("Setting credential {}:{}", plugin, key);
     Ok(StatusCode::OK)
 }
@@ -640,9 +667,20 @@ async fn delete_credential(
     Path((plugin, key)): Path<(String, String)>,
     body: Bytes,
 ) -> Result<StatusCode, (StatusCode, String)> {
+    use acp_lib::storage::create_store;
+
     verify_auth::<serde_json::Value>(&state, &body).await?;
 
-    // TODO: Delete from SecretStore in future implementation
+    // Delete credential from SecretStore
+    let store = create_store(None)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to create store: {}", e)))?;
+
+    let store_key = format!("credential:{}:{}", plugin, key);
+    store.delete(&store_key)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to delete credential: {}", e)))?;
+
     tracing::info!("Deleting credential {}:{}", plugin, key);
     Ok(StatusCode::OK)
 }
@@ -1018,5 +1056,97 @@ mod tests {
             .unwrap();
 
         assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn test_set_credential_stores_value() {
+        use acp_lib::storage::create_store;
+        use argon2::password_hash::{rand_core::OsRng, SaltString};
+        use argon2::{Argon2, PasswordHasher};
+
+        let state = ApiState::new(9443, 9080);
+
+        // Set up password hash
+        let password = "testpass123";
+        let salt = SaltString::generate(&mut OsRng);
+        let argon2 = Argon2::default();
+        let password_hash = argon2.hash_password(password.as_bytes(), &salt).unwrap().to_string();
+        state.set_password_hash(password_hash).await;
+
+        let app = create_router(state);
+
+        // Create auth request body with credential value
+        let body = serde_json::json!({
+            "password_hash": password,
+            "value": "secret_api_key_12345"
+        });
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/credentials/test-plugin/api_key")
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+
+        // Verify the credential was actually stored
+        let store = create_store(None).await.unwrap();
+        let stored_value = store.get("credential:test-plugin:api_key").await.unwrap();
+        assert!(stored_value.is_some());
+        assert_eq!(
+            String::from_utf8(stored_value.unwrap()).unwrap(),
+            "secret_api_key_12345"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_delete_credential_removes_value() {
+        use acp_lib::storage::create_store;
+        use argon2::password_hash::{rand_core::OsRng, SaltString};
+        use argon2::{Argon2, PasswordHasher};
+
+        let state = ApiState::new(9443, 9080);
+
+        // Set up password hash
+        let password = "testpass123";
+        let salt = SaltString::generate(&mut OsRng);
+        let argon2 = Argon2::default();
+        let password_hash = argon2.hash_password(password.as_bytes(), &salt).unwrap().to_string();
+        state.set_password_hash(password_hash).await;
+
+        // Pre-populate a credential in storage
+        let store = create_store(None).await.unwrap();
+        store.set("credential:test-plugin:api_key", b"secret_value").await.unwrap();
+
+        let app = create_router(state);
+
+        // Create auth request body
+        let body = serde_json::json!({
+            "password_hash": password
+        });
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("DELETE")
+                    .uri("/credentials/test-plugin/api_key")
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+
+        // Verify the credential was actually deleted
+        let stored_value = store.get("credential:test-plugin:api_key").await.unwrap();
+        assert!(stored_value.is_none());
     }
 }
