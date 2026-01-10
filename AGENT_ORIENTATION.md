@@ -73,10 +73,14 @@ cargo run --bin acp-server  # Run server
 
 ## Testing (Phase 8)
 - **Integration tests**: Located in `acp-lib/tests/` for end-to-end testing
+  - `integration_test.rs` - Plugin pipeline tests (FileStore → PluginRuntime → Transform)
+  - `e2e_integration_test.rs` - Full system E2E tests (server → API → storage)
+- **E2E test infrastructure**: `TestServer` helper spawns `acp-server` in subprocess with dynamic ports and temp directories
 - **Bundled plugins**: Production-ready plugins in `plugins/` directory (`exa.js`, `aws-s3.js`)
 - **Plugin testing**: Use `PluginRuntime::load_plugin_from_code()` to load plugins from files for testing (avoids SecretStore dependency)
-- **Test suite**: 90+ tests across all workspace crates
+- **Test suite**: 120 tests across all workspace crates (117 passing, 3 ignored on macOS)
 - **Test organization**: Unit tests inline with source, integration tests in `tests/` directory
+- **Platform differences**: Some E2E tests ignored on macOS due to Keychain requiring user interaction. Run with `--ignored` for manual testing.
 
 ## Gotchas
 - **Wildcard matching is single-level only**: The pattern `*.s3.amazonaws.com` matches `bucket.s3.amazonaws.com` but rejects both `s3.amazonaws.com` (no subdomain) and `evil.com.s3.amazonaws.com` (multiple levels)
@@ -95,3 +99,6 @@ cargo run --bin acp-server  # Run server
 - **PluginRuntime loading methods**: Use `load_plugin(name, store)` to load from SecretStore (async), or `load_plugin_from_code(name, code)` to load from string (sync). Both cache the plugin for `execute_transform()`. Using `execute()` + `extract_plugin_metadata()` alone does NOT cache the plugin.
 - **PluginRuntime timeout limitation**: `execute_transform_with_timeout()` cannot interrupt tight infinite loops in JavaScript (Boa limitation). It measures elapsed time after execution completes, so only catches slow operations that eventually finish.
 - **Environment variable test isolation**: Tests modifying environment variables must use a static Mutex to serialize execution and an RAII guard to ensure cleanup, as env vars are process-global and tests run in parallel.
+- **E2E test binary resolution**: Use `std::env::var("CARGO_BIN_EXE_acp-server")` with fallback to workspace-relative path for finding test binaries. The env var is only set when using `cargo test`, not `cargo build`.
+- **E2E test keychain isolation (macOS)**: Tests using server init will trigger Keychain prompts on macOS. Mark with `#[cfg_attr(target_os = "macos", ignore = "reason")]` or set `HOME` env var to temp dir (doesn't fully prevent Keychain access).
+- **portpicker for test isolation**: Use `portpicker` crate to get dynamic ports for test servers, avoiding port conflicts in parallel test execution.

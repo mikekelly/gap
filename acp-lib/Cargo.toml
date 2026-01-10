@@ -35,3 +35,5 @@ security-framework.workspace = true
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util"] }
 tempfile = "3.13"
+reqwest = { version = "0.12", features = ["json"] }
+portpicker = "0.1"

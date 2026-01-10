@@ -1,0 +1,17 @@
+#!/usr/bin/expect -f
+
+set timeout 10
+set bin [lindex $argv 0]
+set password [lindex $argv 1]
+
+spawn $bin init
+
+expect "Enter password:" {
+    send "$password\r"
+}
+
+expect "Confirm password:" {
+    send "$password\r"
+}
+
+expect eof
