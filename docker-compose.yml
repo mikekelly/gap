@@ -1,0 +1,69 @@
+version: '3.8'
+
+# Docker Compose configuration for ACP testing and development
+# This sets up a complete test environment with ACP server and optional test services
+
+services:
+  # Main ACP server
+  acp-server:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: acp-server
+    ports:
+      # Proxy port
+      - "9443:9443"
+      # Management API port
+      - "9080:9080"
+    volumes:
+      # Persist ACP data between container restarts
+      - acp-data:/var/lib/acp
+      # Optional: mount CA certificate for host access
+      - ./ca-cert.pem:/var/lib/acp/ca-cert.pem:ro
+    environment:
+      # Logging level (trace, debug, info, warn, error)
+      - RUST_LOG=acp_server=info,acp_lib=info
+      # Optional: Set password hash for testing (insecure, do not use in production!)
+      # This is the SHA512 hash of "test-password" followed by Argon2 hashing
+      # - ACP_PASSWORD_HASH=...
+    # healthcheck is defined in Dockerfile
+    restart: unless-stopped
+    networks:
+      - acp-network
+
+  # Test client container for smoke tests
+  # Uncomment to run automated tests
+  # test-client:
+  #   build:
+  #     context: .
+  #     dockerfile: Dockerfile
+  #   container_name: acp-test-client
+  #   depends_on:
+  #     - acp-server
+  #   volumes:
+  #     - ./smoke-tests:/tests:ro
+  #   command: ["/bin/bash", "/tests/run-all.sh"]
+  #   networks:
+  #     - acp-network
+
+  # Mock upstream API for testing
+  # Provides a simple echo/mirror service to test proxy behavior
+  mock-api:
+    image: kennethreitz/httpbin
+    container_name: acp-mock-api
+    ports:
+      - "8080:80"
+    networks:
+      - acp-network
+    restart: unless-stopped
+
+volumes:
+  # Persistent storage for ACP data
+  # Contains: secrets, plugins, tokens, CA key
+  acp-data:
+    driver: local
+
+networks:
+  # Isolated network for ACP services
+  acp-network:
+    driver: bridge

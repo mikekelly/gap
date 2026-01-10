@@ -1,0 +1,41 @@
+# Git metadata
+.git
+.gitignore
+
+# Build artifacts
+target/
+**/*.rs.bk
+*.pdb
+
+# IDE files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Documentation
+*.md
+!README.md
+docs/
+
+# Test files
+smoke-tests/
+.mcp.json
+
+# CI/CD
+.github/
+
+# MacOS
+.DS_Store
+
+# Project management
+KANBAN_BOARD.md
+IDEAS.md
+DONE.md
+.claude/
+
+# Local development
+ca-cert.pem
+*.pem
+*.key
