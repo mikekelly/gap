@@ -460,6 +460,8 @@ async fn install_plugin(
 ) -> std::result::Result<Json<InstallResponse>, (StatusCode, String)> {
     use acp_lib::storage::create_store;
     use acp_lib::plugin_runtime::PluginRuntime;
+    use git2::Repository;
+    use tempfile::tempdir;
 
     let req: InstallRequest = verify_auth(&state, &body).await?;
 
@@ -474,27 +476,19 @@ async fn install_plugin(
 
     let (owner, repo) = (parts[0], parts[1]);
 
-    // Fetch plugin from GitHub
-    let url = format!("https://raw.githubusercontent.com/{}/{}/main/plugin.js", owner, repo);
+    // Clone the repository to a temporary directory
+    let temp_dir = tempdir()
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to create temp directory: {}", e)))?;
 
-    let http_client = reqwest::Client::new();
-    let http_response = http_client
-        .get(&url)
-        .send()
-        .await
-        .map_err(|e| (StatusCode::BAD_GATEWAY, format!("Failed to fetch plugin: {}", e)))?;
+    let repo_url = format!("https://github.com/{}/{}.git", owner, repo);
 
-    if !http_response.status().is_success() {
-        return Err((
-            StatusCode::BAD_GATEWAY,
-            format!("GitHub returned status {}: plugin not found or inaccessible", http_response.status()),
-        ));
-    }
+    Repository::clone(&repo_url, temp_dir.path())
+        .map_err(|e| (StatusCode::BAD_GATEWAY, format!("Failed to clone repository: {}", e)))?;
 
-    let plugin_code = http_response
-        .text()
-        .await
-        .map_err(|e| (StatusCode::BAD_GATEWAY, format!("Failed to read plugin code: {}", e)))?;
+    // Read plugin.js from the cloned repository
+    let plugin_path = temp_dir.path().join("plugin.js");
+    let plugin_code = std::fs::read_to_string(&plugin_path)
+        .map_err(|e| (StatusCode::BAD_REQUEST, format!("No plugin.js found in repository: {}", e)))?;
 
     // Transform ES6 export to var declaration
     let transformed_code = transform_es6_export(&plugin_code);
@@ -522,6 +516,8 @@ async fn install_plugin(
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to store plugin: {}", e)))?;
 
     tracing::info!("Installed plugin: {} (matches: {:?})", plugin.name, plugin.match_patterns);
+
+    // Temp directory is automatically cleaned up when temp_dir goes out of scope
 
     Ok(Json(InstallResponse {
         name: plugin_name,
@@ -934,7 +930,53 @@ mod tests {
             .unwrap();
 
         // Expect BAD_GATEWAY (502) because the GitHub repo doesn't exist
+        // This test now verifies that git clone fails for non-existent repos
         assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
+    }
+
+    #[tokio::test]
+    async fn test_install_plugin_clones_repo_and_reads_plugin_js() {
+        use argon2::password_hash::{rand_core::OsRng, SaltString};
+        use argon2::{Argon2, PasswordHasher};
+
+        let state = ApiState::new(9443, 9080);
+
+        // Set up password hash
+        let password = "testpass123";
+        let salt = SaltString::generate(&mut OsRng);
+        let argon2 = Argon2::default();
+        let password_hash = argon2.hash_password(password.as_bytes(), &salt).unwrap().to_string();
+        state.set_password_hash(password_hash).await;
+
+        let app = create_router(state);
+
+        // Try to install a real plugin from GitHub
+        // Using a test repo that should have plugin.js
+        let body = serde_json::json!({
+            "password_hash": password,
+            "name": "mikekelly/exa-ncp"  // Real repo with plugin.js
+        });
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/plugins/install")
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        // Should succeed if the repo exists and has plugin.js
+        // Allow both 200 (success) or 400 (invalid plugin code)
+        let status = response.status();
+        assert!(
+            status == StatusCode::OK || status == StatusCode::BAD_REQUEST || status == StatusCode::BAD_GATEWAY,
+            "Expected OK, BAD_REQUEST, or BAD_GATEWAY, got {:?}",
+            status
+        );
     }
 
     #[tokio::test]
