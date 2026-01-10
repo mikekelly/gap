@@ -65,7 +65,8 @@ cargo run --bin acp-server  # Run server
 - **Endpoints**: `/status` (no auth), `/plugins`, `/tokens`, `/credentials/:plugin/:key`, `/activity` (all require auth)
 - **Token management**: Full token value only returned on creation (via `token` field); list endpoint shows prefix only
 - **Token persistence**: Tokens are stored in SecretStore with key `token:{id}` via TokenCache create/delete methods
-- **State management**: `ApiState` holds server start time, ports, password hash, TokenCache, and activity log
+- **State management**: `ApiState` holds server start time, ports, password hash, TokenCache, activity log, AND shared SecretStore
+- **Shared storage**: `ApiState` receives `Arc<dyn SecretStore>` from main.rs to ensure all endpoints use the same storage backend (respects --data-dir)
 
 ## CLI (Phase 7)
 - **Password input**: Uses `rpassword` crate for hidden password input (no echo)
