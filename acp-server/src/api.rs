@@ -91,64 +91,64 @@ pub struct AuthenticatedRequest<T> {
 pub struct Authenticated<T>(pub T);
 
 #[async_trait]
-impl<S, T> FromRequest<S> for Authenticated<T>
+impl<T> FromRequestParts<ApiState> for Authenticated<T>
 where
-    S: Send + Sync,
-    ApiState: FromRequestParts<S>,
-    T: for<'de> Deserialize<'de>,
+    T: for<'de> Deserialize<'de> + Send,
 {
     type Rejection = (StatusCode, String);
 
-    async fn from_request(req: Request, state: &S) -> Result<Self, Self::Rejection> {
-        let (mut parts, body) = req.into_parts();
+    async fn from_request_parts(
+        parts: &mut Parts,
+        state: &ApiState,
+    ) -> Result<Self, Self::Rejection> {
+        // For now, this is a placeholder - actual auth will be done in handlers
+        // that have access to the request body
+        Err((
+            StatusCode::UNAUTHORIZED,
+            "Use request body for authentication".to_string(),
+        ))
+    }
+}
 
-        // Extract state
-        let state = ApiState::from_request_parts(&mut parts, state)
-            .await
-            .map_err(|_| {
-                (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    "Failed to extract state".to_string(),
-                )
-            })?;
+/// Helper function to verify authentication from request body
+async fn verify_auth<T>(
+    state: &ApiState,
+    body: &[u8],
+) -> Result<T, (StatusCode, String)>
+where
+    T: for<'de> Deserialize<'de>,
+{
+    // Parse as authenticated request
+    let auth_req: AuthenticatedRequest<T> =
+        serde_json::from_slice(body).map_err(|e| {
+            (
+                StatusCode::BAD_REQUEST,
+                format!("Invalid JSON: {}", e),
+            )
+        })?;
 
-        // Read body
-        let bytes = Bytes::from_request(Request::from_parts(parts, body), state)
-            .await
-            .map_err(|e| (StatusCode::BAD_REQUEST, format!("Invalid request body: {}", e)))?;
+    // Verify password hash
+    let stored_hash = state.password_hash.read().await;
+    if let Some(ref hash_str) = *stored_hash {
+        // Hash the provided SHA512 hash with Argon2 (stored hash is Argon2 of SHA512)
+        let parsed_hash = PasswordHash::new(hash_str).map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Invalid stored hash: {}", e),
+            )
+        })?;
 
-        // Parse as authenticated request
-        let auth_req: AuthenticatedRequest<T> =
-            serde_json::from_slice(&bytes).map_err(|e| {
-                (
-                    StatusCode::BAD_REQUEST,
-                    format!("Invalid JSON: {}", e),
-                )
-            })?;
+        // The client sends SHA512(password), we verify Argon2(SHA512(password))
+        Argon2::default()
+            .verify_password(auth_req.password_hash.as_bytes(), &parsed_hash)
+            .map_err(|_| (StatusCode::UNAUTHORIZED, "Invalid credentials".to_string()))?;
 
-        // Verify password hash
-        let stored_hash = state.password_hash.read().await;
-        if let Some(ref hash_str) = *stored_hash {
-            // Hash the provided SHA512 hash with Argon2 (stored hash is Argon2 of SHA512)
-            let parsed_hash = PasswordHash::new(hash_str).map_err(|e| {
-                (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    format!("Invalid stored hash: {}", e),
-                )
-            })?;
-
-            // The client sends SHA512(password), we verify Argon2(SHA512(password))
-            Argon2::default()
-                .verify_password(auth_req.password_hash.as_bytes(), &parsed_hash)
-                .map_err(|_| (StatusCode::UNAUTHORIZED, "Invalid credentials".to_string()))?;
-
-            Ok(Authenticated(auth_req.data))
-        } else {
-            Err((
-                StatusCode::UNAUTHORIZED,
-                "Server not initialized".to_string(),
-            ))
-        }
+        Ok(auth_req.data)
+    } else {
+        Err((
+            StatusCode::UNAUTHORIZED,
+            "Server not initialized".to_string(),
+        ))
     }
 }
 
@@ -245,31 +245,37 @@ async fn get_status(State(state): State<ApiState>) -> Json<StatusResponse> {
 
 /// GET /plugins - List installed plugins (requires auth)
 async fn get_plugins(
-    State(_state): State<ApiState>,
-    Authenticated(_): Authenticated<serde_json::Value>,
-) -> Json<PluginsResponse> {
+    State(state): State<ApiState>,
+    body: Bytes,
+) -> Result<Json<PluginsResponse>, (StatusCode, String)> {
+    verify_auth::<serde_json::Value>(&state, &body).await?;
+
     // TODO: Load from storage in future implementation
-    Json(PluginsResponse {
+    Ok(Json(PluginsResponse {
         plugins: vec![],
-    })
+    }))
 }
 
 /// GET /tokens - List agent tokens (requires auth)
 async fn get_tokens(
     State(state): State<ApiState>,
-    Authenticated(_): Authenticated<serde_json::Value>,
-) -> Json<TokensResponse> {
+    body: Bytes,
+) -> Result<Json<TokensResponse>, (StatusCode, String)> {
+    verify_auth::<serde_json::Value>(&state, &body).await?;
+
     let tokens = state.tokens.read().await;
     let token_list: Vec<TokenResponse> = tokens.values().map(|t| t.clone().into()).collect();
 
-    Json(TokensResponse { tokens: token_list })
+    Ok(Json(TokensResponse { tokens: token_list }))
 }
 
 /// POST /tokens - Create new agent token (requires auth)
 async fn create_token(
     State(state): State<ApiState>,
-    Authenticated(req): Authenticated<CreateTokenRequest>,
-) -> Json<TokenResponse> {
+    body: Bytes,
+) -> Result<Json<TokenResponse>, (StatusCode, String)> {
+    let req: CreateTokenRequest = verify_auth(&state, &body).await?;
+
     let token = AgentToken::new(&req.name);
     let token_value = token.token.clone();
 
@@ -278,60 +284,68 @@ async fn create_token(
     tokens.insert(token.id.clone(), token.clone());
 
     // Return with full token (only time it's revealed)
-    Json(TokenResponse {
+    Ok(Json(TokenResponse {
         id: token.id,
         name: token.name,
         prefix: token.prefix,
         token: Some(token_value),
         created_at: token.created_at,
-    })
+    }))
 }
 
 /// DELETE /tokens/:id - Revoke agent token (requires auth)
 async fn delete_token(
     State(state): State<ApiState>,
     Path(id): Path<String>,
-    Authenticated(_): Authenticated<serde_json::Value>,
-) -> StatusCode {
+    body: Bytes,
+) -> Result<StatusCode, (StatusCode, String)> {
+    verify_auth::<serde_json::Value>(&state, &body).await?;
+
     let mut tokens = state.tokens.write().await;
     if tokens.remove(&id).is_some() {
-        StatusCode::OK
+        Ok(StatusCode::OK)
     } else {
-        StatusCode::NOT_FOUND
+        Ok(StatusCode::NOT_FOUND)
     }
 }
 
 /// POST /credentials/:plugin/:key - Set credential (requires auth)
 async fn set_credential(
-    State(_state): State<ApiState>,
+    State(state): State<ApiState>,
     Path((plugin, key)): Path<(String, String)>,
-    Authenticated(_req): Authenticated<SetCredentialRequest>,
-) -> StatusCode {
+    body: Bytes,
+) -> Result<StatusCode, (StatusCode, String)> {
+    let _req: SetCredentialRequest = verify_auth(&state, &body).await?;
+
     // TODO: Store in SecretStore in future implementation
     tracing::info!("Setting credential {}:{}", plugin, key);
-    StatusCode::OK
+    Ok(StatusCode::OK)
 }
 
 /// DELETE /credentials/:plugin/:key - Delete credential (requires auth)
 async fn delete_credential(
-    State(_state): State<ApiState>,
+    State(state): State<ApiState>,
     Path((plugin, key)): Path<(String, String)>,
-    Authenticated(_): Authenticated<serde_json::Value>,
-) -> StatusCode {
+    body: Bytes,
+) -> Result<StatusCode, (StatusCode, String)> {
+    verify_auth::<serde_json::Value>(&state, &body).await?;
+
     // TODO: Delete from SecretStore in future implementation
     tracing::info!("Deleting credential {}:{}", plugin, key);
-    StatusCode::OK
+    Ok(StatusCode::OK)
 }
 
 /// GET /activity - Get recent activity (requires auth)
 async fn get_activity(
     State(state): State<ApiState>,
-    Authenticated(_): Authenticated<serde_json::Value>,
-) -> Json<ActivityResponse> {
+    body: Bytes,
+) -> Result<Json<ActivityResponse>, (StatusCode, String)> {
+    verify_auth::<serde_json::Value>(&state, &body).await?;
+
     let activity = state.activity.read().await;
-    Json(ActivityResponse {
+    Ok(Json(ActivityResponse {
         entries: activity.clone(),
-    })
+    }))
 }
 
 #[cfg(test)]
