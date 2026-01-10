@@ -206,7 +206,7 @@ impl From<AgentToken> for TokenResponse {
 }
 
 /// Tokens list response
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct TokensResponse {
     pub tokens: Vec<TokenResponse>,
 }
@@ -637,6 +637,8 @@ async fn set_credential(
     Path((plugin, key)): Path<(String, String)>,
     body: Bytes,
 ) -> Result<StatusCode, (StatusCode, String)> {
+    use acp_lib::registry::CredentialEntry;
+
     let req: SetCredentialRequest = verify_auth(&state, &body).await?;
 
     // Store credential in SecretStore
@@ -644,6 +646,19 @@ async fn set_credential(
     state.store.set(&store_key, req.value.as_bytes())
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to store credential: {}", e)))?;
+
+    // Remove existing credential entry from registry (if it exists) to avoid duplicates
+    // Ignore errors since the credential might not exist yet
+    let _ = state.registry.remove_credential(&plugin, &key).await;
+
+    // Add credential to registry
+    let cred_entry = CredentialEntry {
+        plugin: plugin.clone(),
+        field: key.clone(),
+    };
+    state.registry.add_credential(&cred_entry)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to update registry: {}", e)))?;
 
     tracing::info!("Setting credential {}:{}", plugin, key);
     Ok(StatusCode::OK)
@@ -662,6 +677,11 @@ async fn delete_credential(
     state.store.delete(&store_key)
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to delete credential: {}", e)))?;
+
+    // Remove credential from registry
+    state.registry.remove_credential(&plugin, &key)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to update registry: {}", e)))?;
 
     tracing::info!("Deleting credential {}:{}", plugin, key);
     Ok(StatusCode::OK)
@@ -1242,5 +1262,349 @@ mod tests {
             Some(b"api_write_value".to_vec()),
             "API endpoint should write to the same store that was passed to ApiState"
         );
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn test_set_credential_updates_registry() {
+        use acp_lib::registry::CredentialEntry;
+        use argon2::password_hash::{rand_core::OsRng, SaltString};
+        use argon2::{Argon2, PasswordHasher};
+
+        let temp_dir = tempfile::tempdir().expect("create temp dir");
+        std::env::set_var("ACP_DATA_DIR", temp_dir.path());
+
+        let (token_cache, store, registry, _temp_dir) = create_test_token_cache().await;
+        let state = ApiState::new(9443, 9080, token_cache, store, registry.clone());
+
+        // Set up password hash
+        let password = "testpass123";
+        let salt = SaltString::generate(&mut OsRng);
+        let argon2 = Argon2::default();
+        let password_hash = argon2.hash_password(password.as_bytes(), &salt).unwrap().to_string();
+        state.set_password_hash(password_hash).await;
+
+        let app = create_router(state);
+
+        // Set a credential via the API
+        let body = serde_json::json!({
+            "password_hash": password,
+            "value": "secret_api_key_12345"
+        });
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/credentials/exa/api_key")
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+
+        // Verify the credential was added to the registry
+        let creds = registry.list_credentials().await.expect("list should succeed");
+        assert_eq!(creds.len(), 1);
+        assert_eq!(creds[0], CredentialEntry {
+            plugin: "exa".to_string(),
+            field: "api_key".to_string(),
+        });
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn test_delete_credential_updates_registry() {
+        use acp_lib::registry::CredentialEntry;
+        use argon2::password_hash::{rand_core::OsRng, SaltString};
+        use argon2::{Argon2, PasswordHasher};
+
+        let temp_dir = tempfile::tempdir().expect("create temp dir");
+        std::env::set_var("ACP_DATA_DIR", temp_dir.path());
+
+        let (token_cache, store, registry, _temp_dir) = create_test_token_cache().await;
+        let state = ApiState::new(9443, 9080, token_cache, store, registry.clone());
+
+        // Set up password hash
+        let password = "testpass123";
+        let salt = SaltString::generate(&mut OsRng);
+        let argon2 = Argon2::default();
+        let password_hash = argon2.hash_password(password.as_bytes(), &salt).unwrap().to_string();
+        state.set_password_hash(password_hash).await;
+
+        // Pre-populate registry with a credential
+        let cred = CredentialEntry {
+            plugin: "exa".to_string(),
+            field: "api_key".to_string(),
+        };
+        registry.add_credential(&cred).await.expect("add should succeed");
+
+        let app = create_router(state);
+
+        // Delete the credential via the API
+        let body = serde_json::json!({
+            "password_hash": password
+        });
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("DELETE")
+                    .uri("/credentials/exa/api_key")
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+
+        // Verify the credential was removed from the registry
+        let creds = registry.list_credentials().await.expect("list should succeed");
+        assert_eq!(creds.len(), 0);
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn test_set_credential_twice_no_duplicates() {
+        use acp_lib::registry::CredentialEntry;
+        use argon2::password_hash::{rand_core::OsRng, SaltString};
+        use argon2::{Argon2, PasswordHasher};
+
+        let temp_dir = tempfile::tempdir().expect("create temp dir");
+        std::env::set_var("ACP_DATA_DIR", temp_dir.path());
+
+        let (token_cache, store, registry, _temp_dir) = create_test_token_cache().await;
+        let state = ApiState::new(9443, 9080, token_cache, store, Arc::clone(&registry));
+
+        // Set up password hash
+        let password = "testpass123";
+        let salt = SaltString::generate(&mut OsRng);
+        let argon2 = Argon2::default();
+        let password_hash = argon2.hash_password(password.as_bytes(), &salt).unwrap().to_string();
+        state.set_password_hash(password_hash).await;
+
+        // Set a credential via the API
+        let body = serde_json::json!({
+            "password_hash": password,
+            "value": "secret_api_key_12345"
+        });
+
+        // Create first router and set credential
+        let app = create_router(state.clone());
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/credentials/exa/api_key")
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+
+        // Set the same credential again with different value
+        let body2 = serde_json::json!({
+            "password_hash": password,
+            "value": "new_secret_value"
+        });
+
+        let app2 = create_router(state);
+        let response2 = app2
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/credentials/exa/api_key")
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&body2).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response2.status(), StatusCode::OK);
+
+        // Verify the registry only has ONE entry for this credential (no duplicates)
+        let creds = registry.list_credentials().await.expect("list should succeed");
+        assert_eq!(creds.len(), 1);
+        assert_eq!(creds[0], CredentialEntry {
+            plugin: "exa".to_string(),
+            field: "api_key".to_string(),
+        });
+    }
+
+    // RED: Tests for registry integration with token endpoints
+    #[tokio::test]
+    #[serial]
+    async fn test_list_tokens_uses_registry() {
+        use acp_lib::registry::TokenEntry;
+        use argon2::password_hash::{rand_core::OsRng, SaltString};
+        use argon2::{Argon2, PasswordHasher};
+
+        let temp_dir = tempfile::tempdir().expect("create temp dir");
+        std::env::set_var("ACP_DATA_DIR", temp_dir.path());
+
+        let (token_cache, store, registry, _temp_dir) = create_test_token_cache().await;
+        let state = ApiState::new(9443, 9080, token_cache, store, registry.clone());
+
+        // Set up password hash
+        let password = "testpass123";
+        let salt = SaltString::generate(&mut OsRng);
+        let argon2 = Argon2::default();
+        let password_hash = argon2.hash_password(password.as_bytes(), &salt).unwrap().to_string();
+        state.set_password_hash(password_hash).await;
+
+        // Add a token to the registry directly
+        let token_entry = TokenEntry {
+            id: "test123".to_string(),
+            name: "test-token".to_string(),
+            created_at: Utc::now(),
+            prefix: "acp_test".to_string(),
+        };
+        registry.add_token(&token_entry).await.expect("add token to registry");
+
+        // List tokens via API
+        let app = create_router(state);
+        let body = serde_json::json!({
+            "password_hash": password
+        });
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/tokens")
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let body_bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let tokens_response: TokensResponse = serde_json::from_slice(&body_bytes).unwrap();
+
+        // Verify the token from registry is in the response
+        assert_eq!(tokens_response.tokens.len(), 1);
+        assert_eq!(tokens_response.tokens[0].id, "test123");
+        assert_eq!(tokens_response.tokens[0].name, "test-token");
+        assert_eq!(tokens_response.tokens[0].prefix, "acp_test");
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn test_create_token_adds_to_registry() {
+        use argon2::password_hash::{rand_core::OsRng, SaltString};
+        use argon2::{Argon2, PasswordHasher};
+
+        let temp_dir = tempfile::tempdir().expect("create temp dir");
+        std::env::set_var("ACP_DATA_DIR", temp_dir.path());
+
+        let (token_cache, store, registry, _temp_dir) = create_test_token_cache().await;
+        let state = ApiState::new(9443, 9080, token_cache, store, registry.clone());
+
+        // Set up password hash
+        let password = "testpass123";
+        let salt = SaltString::generate(&mut OsRng);
+        let argon2 = Argon2::default();
+        let password_hash = argon2.hash_password(password.as_bytes(), &salt).unwrap().to_string();
+        state.set_password_hash(password_hash).await;
+
+        // Create token via API
+        let app = create_router(state);
+        let body = serde_json::json!({
+            "password_hash": password,
+            "name": "new-token"
+        });
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/tokens/create")
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let body_bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let token_response: TokenResponse = serde_json::from_slice(&body_bytes).unwrap();
+
+        // Verify the token was added to the registry
+        let tokens = registry.list_tokens().await.expect("list tokens from registry");
+        assert_eq!(tokens.len(), 1);
+        assert_eq!(tokens[0].id, token_response.id);
+        assert_eq!(tokens[0].name, "new-token");
+        assert_eq!(tokens[0].prefix, token_response.prefix);
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn test_delete_token_removes_from_registry() {
+        use acp_lib::registry::TokenEntry;
+        use argon2::password_hash::{rand_core::OsRng, SaltString};
+        use argon2::{Argon2, PasswordHasher};
+
+        let temp_dir = tempfile::tempdir().expect("create temp dir");
+        std::env::set_var("ACP_DATA_DIR", temp_dir.path());
+
+        let (token_cache, store, registry, _temp_dir) = create_test_token_cache().await;
+        let state = ApiState::new(9443, 9080, token_cache.clone(), store, registry.clone());
+
+        // Set up password hash
+        let password = "testpass123";
+        let salt = SaltString::generate(&mut OsRng);
+        let argon2 = Argon2::default();
+        let password_hash = argon2.hash_password(password.as_bytes(), &salt).unwrap().to_string();
+        state.set_password_hash(password_hash).await;
+
+        // Create a token and add it to both registry and storage
+        let token = token_cache.create("test-token").await.expect("create token");
+        let token_entry = TokenEntry {
+            id: token.id.clone(),
+            name: token.name.clone(),
+            created_at: token.created_at,
+            prefix: token.prefix.clone(),
+        };
+        registry.add_token(&token_entry).await.expect("add token to registry");
+
+        // Delete token via API
+        let app = create_router(state);
+        let body = serde_json::json!({
+            "password_hash": password
+        });
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("DELETE")
+                    .uri(&format!("/tokens/{}", token.id))
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+
+        // Verify the token was removed from the registry
+        let tokens = registry.list_tokens().await.expect("list tokens from registry");
+        assert_eq!(tokens.len(), 0, "Token should be removed from registry");
     }
 }
