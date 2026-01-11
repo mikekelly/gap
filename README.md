@@ -34,8 +34,6 @@ Agents **opt in** by routing requests through the proxy. You give them a proxy t
 
 ## Get Started
 
-See [INSTALL.md](INSTALL.md) for detailed installation instructions, platform-specific guidance, and troubleshooting.
-
 ### macOS Quick Start
 
 ```bash
