@@ -6,10 +6,7 @@
 
 AI agents need to call APIs on your behalf - search the web, access your cloud services, interact with third-party tools. But how do you give them access?
 
-Today's options are terrible:
-- **Paste credentials into the agent** - Now your secrets live in chat logs, get sent to LLM providers, and could be extracted by prompt injection
-- **Set up OAuth flows** - Complex, not supported by most agent frameworks, and still requires trusting the agent with tokens
-- **Just don't use APIs** - Severely limits what agents can do for you
+Today's approach is not ideal - agents are entrusted with access to API credentials.
 
 ## The Solution
 
@@ -360,7 +357,10 @@ You need to trust it not to exfiltrate data it receives from APIs (like search r
 
 ### Native GUI Applications
 
-The CLI works, but managing credentials should be as easy as a password manager. We're building native desktop apps:
+The CLI works, but managing credentials should be as easy as a password manager. We're building native desktop apps with:
+
+- **Push-based approval** - get notified when agents request access tokens or trigger suspicious activity
+- **Credential management** - add, remove, and rotate API keys through a familiar UI
 
 | Platform | Status | Notes |
 |----------|--------|-------|
@@ -370,6 +370,7 @@ The CLI works, but managing credentials should be as easy as a password manager.
 
 ### Coming Soon
 
+- **Linux distro packages** - .deb, .rpm, and other native packages for easier installation
 - **Audit logging** - full trail of what credentials were used when
 - **Policy plugins** - custom policies that can assess and block requests
 - **Rate limiting policy** - prevent runaway agents from burning through quotas
