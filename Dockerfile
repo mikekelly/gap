@@ -67,11 +67,15 @@ RUN mkdir -p /var/lib/acp && \
 COPY --from=builder /build/target/release/acp /usr/local/bin/acp
 COPY --from=builder /build/target/release/acp-server /usr/local/bin/acp-server
 
-# Ensure binaries are executable
-RUN chmod +x /usr/local/bin/acp /usr/local/bin/acp-server
+# Copy entrypoint script
+COPY docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
 
-# Set up volume for persistent data
-VOLUME ["/var/lib/acp"]
+# Ensure binaries and entrypoint are executable
+RUN chmod +x /usr/local/bin/acp /usr/local/bin/acp-server /usr/local/bin/docker-entrypoint.sh
+
+# Note: We intentionally do NOT declare VOLUME here.
+# The entrypoint script enforces that a volume must be explicitly mounted.
+# This prevents accidental loss of secrets when the container is removed.
 
 # Switch to non-root user
 USER acp
@@ -83,6 +87,9 @@ EXPOSE 9443 9080
 # Health check for the management API
 HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
     CMD curl -f http://localhost:9080/status || exit 1
+
+# Entrypoint validates volume mount before starting
+ENTRYPOINT ["docker-entrypoint.sh"]
 
 # Default command runs the server with data directory set
 CMD ["acp-server", "--data-dir", "/var/lib/acp"]
