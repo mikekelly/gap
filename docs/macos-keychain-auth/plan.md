@@ -273,6 +273,83 @@ Recommendation: **Option B** — Swift has excellent Security framework support,
 
 ---
 
+## Cache Invalidation Strategy
+
+### The Problem
+
+When CLI/GUI mutate Keychain directly (bypassing the server's API), the server's in-memory caches become stale.
+
+### Cache Analysis
+
+| Component | Location | Concern Level | Reason |
+|-----------|----------|---------------|--------|
+| **TokenCache** | `token_cache.rs` | **HIGH** | Caches all tokens in `RwLock<Option<HashMap>>`. Uses invalidate-on-write, but won't see external writes. |
+| **Registry** | `registry.rs` | **LOW** | Always loads fresh from storage on each operation. No in-memory caching. |
+| **PluginRuntime** | `plugin_runtime.rs` | **NONE** | New instance created per HTTP request. Cache is request-scoped. |
+| **CertificateCache** | `tls.rs` | **NONE** | Only caches generated TLS certs by hostname. Not affected by credential/token changes. |
+
+### Solution: Lightweight Invalidation Endpoint
+
+Add a new unauthenticated endpoint that CLI/GUI call after direct mutations:
+
+```
+POST /invalidate
+```
+
+This endpoint:
+1. Calls `token_cache.invalidate()` to clear the token cache
+2. Returns 200 OK (no response body needed)
+3. No authentication required — worst case is extra cache invalidations (harmless)
+
+### Implementation
+
+#### Server (acp-server/src/api.rs)
+```rust
+async fn invalidate_caches(State(state): State<ApiState>) -> StatusCode {
+    state.token_cache.invalidate().await;
+    StatusCode::OK
+}
+
+// Add route
+.route("/invalidate", post(invalidate_caches))
+```
+
+#### CLI (after direct Keychain writes)
+```rust
+#[cfg(target_os = "macos")]
+async fn notify_server_of_mutation() {
+    // Best-effort notification - don't fail if server is down
+    let _ = reqwest::Client::new()
+        .post("http://127.0.0.1:9080/invalidate")
+        .send()
+        .await;
+}
+```
+
+### Alternative Considered: File-Based Watch
+
+Could touch a file after mutations and have server watch it with `notify` crate:
+- Pro: No HTTP call needed
+- Con: Adds filesystem dependency, more complex, cross-platform concerns
+
+**Decision**: HTTP endpoint is simpler and sufficient for the use case.
+
+### Testing Requirements
+
+1. **Unit test**: Verify `/invalidate` clears TokenCache
+2. **Integration test**: CLI creates token via direct Keychain → calls `/invalidate` → server sees new token
+3. **Smoke test**: Full workflow with CLI, server, and proxy verifying cache coherence
+4. **Negative test**: Server down when CLI calls `/invalidate` → CLI operation still succeeds (best-effort)
+
+### Acceptance Criteria (Cache Invalidation)
+- [ ] `/invalidate` endpoint exists and clears TokenCache
+- [ ] CLI calls `/invalidate` after direct Keychain mutations
+- [ ] GUI calls `/invalidate` after credential/token changes
+- [ ] CLI/GUI don't fail if server is unreachable during invalidation
+- [ ] Integration tests verify cache coherence across processes
+
+---
+
 ## Implementation Order
 
 ### Phase 1 Tasks (CLI)
