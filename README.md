@@ -26,7 +26,7 @@ acp token create my-agent
 # outputs: acp_xxxxxxxxxxxx
 ```
 
-Now configure your agent to use the proxy:
+Now you and your agents can use this to make requests:
 
 ```bash
 curl -x http://localhost:9443 \
@@ -261,6 +261,8 @@ cargo build --release
 
 This outputs a token like `acp_19ba8e89e25` - give this to your agent.
 
+> **Note:** Agent tokens are for **tracking and audit**, not strong authentication. Any process that can read the token (other agents, scripts, humans with shell access) can use it. The real security boundary is the credential store - tokens just help you see which agent made which request.
+
 ### 4. Configure your agent to use the proxy
 
 Point your agent's HTTP traffic through ACP:
@@ -342,8 +344,6 @@ The CLI works, but managing credentials should be as easy as a password manager.
 
 ### Coming Soon
 
-- **Plugin marketplace** - discover and install community plugins
-- **Usage analytics** - see which APIs your agents are calling
 - **Rate limiting** - prevent runaway agents from burning through quotas
 - **Audit logging** - full trail of what credentials were used when
 
