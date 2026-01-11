@@ -129,6 +129,70 @@ curl -x http://localhost:9443 \
      https://api.exa.ai/search
 ```
 
+## Docker (for containerized agents)
+
+> **Security note:** The Docker deployment is designed for environments where **agents also run in containers**. If your agent runs directly on the host machine, use the native macOS/Linux installation instead - a host-based agent could potentially access the Docker volume and read credentials directly, bypassing the proxy's protection.
+
+The Docker image is ideal for:
+- Sandboxed agent environments (agent and ACP both containerized)
+- Kubernetes deployments
+- CI/CD pipelines with ephemeral agents
+
+### Quick start
+
+```bash
+# Run with persistent storage (required)
+docker run -d \
+  --name acp-server \
+  -v acp-data:/var/lib/acp \
+  -p 9443:9443 \
+  -p 9080:9080 \
+  mikekelly321/acp:latest
+```
+
+### Docker Compose (recommended for containerized agents)
+
+```yaml
+services:
+  acp-server:
+    image: mikekelly321/acp:latest
+    volumes:
+      - acp-data:/var/lib/acp
+    ports:
+      - "9443:9443"
+      - "9080:9080"
+    networks:
+      - agent-network
+
+  my-agent:
+    image: your-agent-image
+    environment:
+      - HTTP_PROXY=http://acp-server:9443
+      - HTTPS_PROXY=http://acp-server:9443
+    networks:
+      - agent-network
+
+volumes:
+  acp-data:
+
+networks:
+  agent-network:
+```
+
+This isolates credentials from the agent - the agent container cannot access the `acp-data` volume.
+
+### Volume requirement
+
+The container **requires** a volume mount for `/var/lib/acp`. Without it, secrets would be lost when the container stops:
+
+```bash
+# This will fail with a helpful error
+docker run mikekelly321/acp:latest
+
+# For testing only, you can bypass with:
+docker run -e ACP_ALLOW_EPHEMERAL=I-understand-secrets-will-be-lost mikekelly321/acp:latest
+```
+
 ---
 
 ## The Problem
