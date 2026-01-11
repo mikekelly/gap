@@ -32,15 +32,31 @@ This document covers signing, notarizing, and distributing ACP binaries via Home
 
 ## Release Process
 
-### 1. Build Release Binaries
+### 1. Bump Version
+
+Update the version in `Cargo.toml`:
+```bash
+# Edit Cargo.toml and change:
+# [workspace.package]
+# version = "0.1.1"  # <- increment this
+
+# Verify the change
+grep 'version = ' Cargo.toml
+```
+
+### 2. Build Release Binaries
 ```bash
 cargo build --release
+
+# Verify version is correct
+./target/release/acp --version
+./target/release/acp-server --version
 ```
 Binaries are created at:
 - `target/release/acp`
 - `target/release/acp-server`
 
-### 2. Sign with Developer ID
+### 3. Sign with Developer ID
 ```bash
 ./scripts/macos-sign.sh --production
 ```
@@ -57,47 +73,57 @@ This script:
 - Homebrew's OpenSSL has a different (or no) Team ID
 - Without this entitlement, users get: "mapping process and mapped file have different Team IDs"
 
-### 3. Notarize with Apple
+### 4. Notarize with Apple
 ```bash
-./scripts/macos-notarize.sh target/release/acp-server --keychain-profile "notarytool-profile"
-./scripts/macos-notarize.sh target/release/acp --keychain-profile "notarytool-profile"
+# Create zip and submit for notarization
+cd target/release
+zip ../../dist/acp-binaries.zip acp acp-server
+cd ../..
+
+xcrun notarytool submit dist/acp-binaries.zip \
+  --keychain-profile "notarytool-profile" \
+  --wait
 ```
 
-This script:
-- Creates a zip archive of the binary
+This:
 - Submits to Apple's notarization service
 - Waits for approval (usually 2-5 minutes)
-- Attempts to staple the ticket (will fail for bare Mach-O binaries - this is expected)
+- Status should be "Accepted"
 
 **Note:** Stapling only works for `.app`, `.pkg`, and `.dmg` files. Bare executables can't be stapled, but Gatekeeper will verify them online.
 
-### 4. Package Release Tarball
+### 5. Package Release Tarball
 ```bash
-mkdir -p dist
-tar -czf dist/acp-darwin-arm64.tar.gz -C target/release acp acp-server
+cd target/release
+tar -czvf ../../dist/acp-darwin-arm64.tar.gz acp acp-server
+cd ../..
 shasum -a 256 dist/acp-darwin-arm64.tar.gz
 ```
 
 Record the SHA256 - you'll need it for the Homebrew formula.
 
-### 5. Create GitHub Release
+### 6. Commit and Tag
 ```bash
-# Create and push tag
-git tag v0.1.0
-git push origin v0.1.0
+git add Cargo.toml Cargo.lock
+git commit -m "Bump version to X.Y.Z"
+git tag -a vX.Y.Z -m "Release vX.Y.Z"
+git push origin main
+git push origin vX.Y.Z
+```
 
-# Create release with tarball
-gh release create v0.1.0 \
-  --title "v0.1.0" \
+### 7. Create GitHub Release
+```bash
+gh release create vX.Y.Z \
+  --title "vX.Y.Z - Description" \
   --notes "Release notes here" \
   dist/acp-darwin-arm64.tar.gz
 ```
 
-### 6. Update Homebrew Formula
+### 8. Update Homebrew Formula
 Edit `~/code/homebrew-acp/Formula/acp-server.rb`:
 - Update `version`
 - Update `url` to point to new release
-- Update `sha256` with the checksum from step 4
+- Update `sha256` with the checksum from step 5
 
 ```bash
 cd ~/code/homebrew-acp
