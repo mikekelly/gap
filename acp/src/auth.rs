@@ -4,14 +4,21 @@ use anyhow::{Context, Result};
 use sha2::{Digest, Sha512};
 
 /// Read password from stdin without echoing
-/// If ACP_PASSWORD environment variable is set, returns that value instead
-/// This allows automated testing and scripting without terminal prompts
 pub fn read_password(prompt: &str) -> Result<String> {
-    // Check for test password in environment first
+    // Internal: ACP_PASSWORD env var for testing (undocumented)
     if let Ok(password) = std::env::var("ACP_PASSWORD") {
         return Ok(password);
     }
     rpassword::prompt_password(prompt).context("Failed to read password")
+}
+
+/// Read a secret value from stdin without echoing
+pub fn read_secret(prompt: &str) -> Result<String> {
+    // Internal: ACP_CREDENTIAL_VALUE env var for testing (undocumented)
+    if let Ok(value) = std::env::var("ACP_CREDENTIAL_VALUE") {
+        return Ok(value);
+    }
+    rpassword::prompt_password(prompt).context("Failed to read secret value")
 }
 
 /// Read password with confirmation

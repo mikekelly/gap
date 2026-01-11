@@ -1,8 +1,8 @@
 //! Credential management commands
 
-use crate::auth::{hash_password, read_password};
+use crate::auth::{hash_password, read_password, read_secret};
 use crate::client::ApiClient;
-use anyhow::{Context, Result};
+use anyhow::Result;
 use serde_json::json;
 
 pub async fn set(server_url: &str, key: &str) -> Result<()> {
@@ -20,12 +20,13 @@ pub async fn set(server_url: &str, key: &str) -> Result<()> {
     let password_hash = hash_password(&password);
 
     // Get credential value (hidden input)
-    let credential_value = rpassword::prompt_password(format!("Value for {}:{}: ", plugin, credential_key))
-        .context("Failed to read credential value")?;
+    let credential_value = read_secret(&format!("Value for {}:{}: ", plugin, credential_key))?;
 
     let client = ApiClient::new(server_url);
 
-    let path = format!("/credentials/{}/{}", plugin, credential_key);
+    // URL-encode plugin name since it may contain slashes (e.g., "mikekelly/exa-acp")
+    let encoded_plugin = urlencoding::encode(plugin);
+    let path = format!("/credentials/{}/{}", encoded_plugin, credential_key);
     let body = json!({
         "value": credential_value
     });

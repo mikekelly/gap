@@ -619,7 +619,7 @@ async fn set_credential(
     State(state): State<ApiState>,
     Path((plugin, key)): Path<(String, String)>,
     body: Bytes,
-) -> Result<StatusCode, (StatusCode, String)> {
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
     use acp_lib::registry::CredentialEntry;
 
     let req: SetCredentialRequest = verify_auth(&state, &body).await?;
@@ -644,7 +644,11 @@ async fn set_credential(
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to update registry: {}", e)))?;
 
     tracing::info!("Setting credential {}:{}", plugin, key);
-    Ok(StatusCode::OK)
+    Ok(Json(serde_json::json!({
+        "plugin": plugin,
+        "key": key,
+        "set": true
+    })))
 }
 
 /// DELETE /credentials/:plugin/:key - Delete credential (requires auth)
