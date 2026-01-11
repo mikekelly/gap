@@ -26,7 +26,7 @@ services:
 
   # ACP server (from Docker Hub)
   acp-server-hub:
-    image: mikekelly/acp:latest
+    image: mikekelly321/acp:latest
     container_name: acp-server-hub
     ports:
       - "9443:9443"
