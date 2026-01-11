@@ -125,6 +125,7 @@ if [[ "$PRODUCTION_MODE" == true ]]; then
     # Create entitlements file for Homebrew OpenSSL compatibility
     # The disable-library-validation entitlement allows loading libraries
     # with different Team IDs (like Homebrew's OpenSSL)
+    # The keychain-access-groups entitlement ensures secrets survive binary re-signing
     ENTITLEMENTS_FILE=$(mktemp)
     cat > "$ENTITLEMENTS_FILE" <<ENTITLEMENTS
 <?xml version="1.0" encoding="UTF-8"?>
@@ -133,6 +134,14 @@ if [[ "$PRODUCTION_MODE" == true ]]; then
 <dict>
     <key>com.apple.security.cs.disable-library-validation</key>
     <true/>
+    <key>com.apple.security.application-groups</key>
+    <array>
+        <string>3R44BTH39W.com.acp.secrets</string>
+    </array>
+    <key>keychain-access-groups</key>
+    <array>
+        <string>3R44BTH39W.com.acp.secrets</string>
+    </array>
 </dict>
 </plist>
 ENTITLEMENTS
