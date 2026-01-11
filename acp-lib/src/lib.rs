@@ -13,7 +13,6 @@ pub mod proxy_transforms;
 pub mod registry;
 pub mod storage;
 pub mod tls;
-pub mod token_cache;
 pub mod types;
 
 pub use error::{AcpError, Result};
@@ -26,5 +25,4 @@ pub use storage::{create_store, FileStore, SecretStore};
 #[cfg(target_os = "macos")]
 pub use storage::KeychainStore;
 pub use tls::CertificateAuthority;
-pub use token_cache::TokenCache;
 pub use types::{ACPCredentials, ACPPlugin, ACPRequest, AgentToken, Config};
