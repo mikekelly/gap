@@ -21,10 +21,11 @@
 ## In Progress
 <!-- Currently being worked on -->
 
-- Token/Plugin Simplification: Remove TokenCache, store tokens by value, fix plugin matching (see docs/token-plugin-simplification/plan.md)
-
 ## Done
 <!-- Shipped — archive periodically -->
+
+### Token/Plugin Simplification ✓
+Removed TokenCache abstraction, tokens now stored directly as `token:{token_value}` → `{name, created_at}` for direct lookup. Fixed plugin matching to properly find matching plugins.
 
 ### Homebrew Formula ✓
 Homebrew tap for macOS distribution via `brew tap mikekelly/acp`.

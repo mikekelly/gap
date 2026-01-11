@@ -38,7 +38,6 @@ cargo run --bin acp-server  # Run server
 - `FileStore` - File-based storage with 0600 permissions (Linux: runs under dedicated service user for isolation)
 - `KeychainStore` - macOS Keychain integration (conditional compilation)
 - `create_store()` - Factory for platform-appropriate storage
-- `TokenCache` - Invalidate-on-write cache over SecretStore for agent tokens (read from cache/disk, write to disk + invalidate)
 - `Registry` - Centralized metadata storage for tokens, plugins, and credentials (stored at key "_registry")
 - `RegistryData` - JSON structure containing TokenEntry, PluginEntry, and CredentialEntry lists
 - `TokenEntry`, `PluginEntry`, `CredentialEntry` - Registry metadata types
@@ -69,15 +68,15 @@ cargo run --bin acp-server  # Run server
 - **HTTP parsing & transforms**: `http_utils` module parses raw HTTP, `plugin_matcher` finds matching plugins, `proxy_transforms` executes transforms
 - **Transform pipeline**: Parse HTTP → Match host → Load credentials → Execute plugin → Serialize → Forward
 - **Credential storage pattern**: Management API stores credentials as `credential:{plugin}:{field_name}` (e.g., `credential:exa:api_key`). ProxyServer loads ALL fields for a plugin by listing keys with prefix `credential:{plugin}:` and builds an ACPCredentials object.
-- **Token caching**: ProxyServer and Management API share `Arc<TokenCache>` which implements invalidate-on-write caching over SecretStore, enabling dynamic token updates without server restart
+- **Token storage pattern**: Tokens stored as `token:{token_value}` → `{name, created_at}` in SecretStore, enabling direct lookup by token value without caching layer
 - **SecretStore sharing**: ProxyServer receives `Arc<dyn SecretStore>` from main.rs (same instance as Management API) to ensure consistent credential access
 
 ## Management API (Phase 6)
 - **Authentication**: Client sends `password_hash` (SHA512 of password) in request body; server verifies Argon2(SHA512(password))
 - **Endpoints**: `/status` (no auth), `/plugins`, `/tokens`, `/credentials/:plugin/:key`, `/activity` (all require auth)
 - **Token management**: Full token value only returned on creation (via `token` field); list endpoint shows prefix only
-- **Token persistence**: Tokens are stored in SecretStore with key `token:{id}` via TokenCache create/delete methods
-- **State management**: `ApiState` holds server start time, ports, password hash, TokenCache, activity log, AND shared SecretStore
+- **Token persistence**: Tokens are stored in SecretStore with key `token:{token_value}` → `{name, created_at}` JSON, enabling direct lookup during authentication
+- **State management**: `ApiState` holds server start time, ports, password hash, activity log, and shared SecretStore
 - **Shared storage**: `ApiState` receives `Arc<dyn SecretStore>` from main.rs to ensure all endpoints use the same storage backend (respects --data-dir)
 
 ## CLI (Phase 7)
