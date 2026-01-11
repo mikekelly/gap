@@ -24,3 +24,6 @@ Thumbs.db
 # Local development
 .env
 .env.local
+
+# Release artifacts
+/dist/

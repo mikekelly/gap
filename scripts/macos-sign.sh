@@ -122,11 +122,27 @@ fi
 if [[ "$PRODUCTION_MODE" == true ]]; then
     log_info "Signing with hardened runtime and secure timestamp..."
 
+    # Create entitlements file for Homebrew OpenSSL compatibility
+    # The disable-library-validation entitlement allows loading libraries
+    # with different Team IDs (like Homebrew's OpenSSL)
+    ENTITLEMENTS_FILE=$(mktemp)
+    cat > "$ENTITLEMENTS_FILE" <<ENTITLEMENTS
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>com.apple.security.cs.disable-library-validation</key>
+    <true/>
+</dict>
+</plist>
+ENTITLEMENTS
+
     log_info "Signing acp-server..."
     codesign --sign "$CERT_NAME" \
         --force \
         --options runtime \
         --timestamp \
+        --entitlements "$ENTITLEMENTS_FILE" \
         target/release/acp-server
 
     log_info "Signing acp..."
@@ -134,7 +150,10 @@ if [[ "$PRODUCTION_MODE" == true ]]; then
         --force \
         --options runtime \
         --timestamp \
+        --entitlements "$ENTITLEMENTS_FILE" \
         target/release/acp
+
+    rm -f "$ENTITLEMENTS_FILE"
 else
     # Development mode: no hardened runtime
     # Note: We don't use --options runtime (hardened runtime) for development because it requires
