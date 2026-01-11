@@ -52,7 +52,7 @@ Today's options are terrible:
 
 ## The Solution
 
-ACP sits between your AI agent and the internet as a transparent proxy. When the agent makes a request to an API you've authorized, ACP automatically injects your credentials - the agent never sees them.
+ACP is an authenticating MITM proxy that sits between your AI agent and the internet. When the agent makes a request to an API you've authorized, ACP automatically injects your credentials - the agent never sees them.
 
 ```
 ┌─────────────┐      ┌─────────────┐      ┌─────────────┐
