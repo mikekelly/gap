@@ -2,6 +2,45 @@
 
 **Give AI agents secure access to your APIs - without sharing your credentials.**
 
+## Get Started (macOS)
+
+```bash
+# Install via Homebrew
+brew tap mikekelly/acp
+brew install acp-server
+
+# Start the background service
+brew services start acp-server
+
+# Initialize with a password (you'll need this for admin operations)
+acp init
+
+# Install a plugin (e.g., Exa search API)
+acp install mikekelly/exa-acp
+
+# Set your API key
+acp set mikekelly/exa-acp:apiKey
+
+# Create a token for your agent
+acp token create my-agent
+# outputs: acp_xxxxxxxxxxxx
+```
+
+Now configure your agent to use the proxy:
+
+```bash
+curl -x http://localhost:9443 \
+     --cacert ~/.config/acp/ca.crt \
+     --proxy-header "Proxy-Authorization: Bearer acp_xxxxxxxxxxxx" \
+     -H "Content-Type: application/json" \
+     -d '{"query": "latest AI news", "numResults": 3}' \
+     https://api.exa.ai/search
+```
+
+The agent sends requests without credentials - ACP injects them automatically.
+
+---
+
 ## The Problem
 
 AI agents need to call APIs on your behalf - search the web, access your cloud services, interact with third-party tools. But how do you give them access?
@@ -33,7 +72,7 @@ ACP sits between your AI agent and the internet as a transparent proxy. When the
 - **Works with any agent** - If it can use an HTTP proxy, it works with ACP
 - **Simple plugin system** - JavaScript transforms define how credentials are injected per API
 
-## Try It Yourself
+## Build from Source
 
 ### 1. Build and start the server
 
