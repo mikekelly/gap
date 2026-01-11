@@ -13,7 +13,8 @@
 ## Ready
 <!-- Designed + planned, can be picked up -->
 
-- macOS Direct Keychain Auth (see docs/macos-keychain-auth/plan.md)
+- Token/Plugin Simplification: Remove TokenCache, store tokens by value, fix plugin matching (see docs/macos-improvements/plan.md Phase 1)
+- macOS Native GUI: Menu bar app using existing management API (see docs/macos-improvements/plan.md Phase 2)
 
 ## In Progress
 <!-- Currently being worked on -->
