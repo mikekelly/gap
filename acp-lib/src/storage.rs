@@ -100,7 +100,13 @@ impl SecretStore for FileStore {
 
         // Write to temp file first, then rename (atomic on Unix)
         let temp_path = path.with_extension("tmp");
-        tokio::fs::write(&temp_path, value).await?;
+
+        // Write and explicitly sync to ensure data is persisted
+        let mut file = tokio::fs::File::create(&temp_path).await?;
+        use tokio::io::AsyncWriteExt;
+        file.write_all(value).await?;
+        file.sync_all().await?;
+        drop(file);
 
         // Set restrictive permissions (Unix only)
         #[cfg(unix)]
@@ -111,6 +117,17 @@ impl SecretStore for FileStore {
         }
 
         tokio::fs::rename(&temp_path, &path).await?;
+
+        // Sync directory to ensure rename is persisted
+        #[cfg(unix)]
+        {
+            if let Some(parent) = path.parent() {
+                if let Ok(dir) = tokio::fs::File::open(parent).await {
+                    let _ = dir.sync_all().await;
+                }
+            }
+        }
+
         Ok(())
     }
 
