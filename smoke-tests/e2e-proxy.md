@@ -311,14 +311,3 @@ rm -rf "$TEST_DIR"
 | 3.2 Run test | | |
 | 4 Cleanup | | |
 
----
-
-## Current Known Gaps
-
-**As of the last audit, these pieces need implementation:**
-
-1. **Proxy server not started** - `main.rs` only starts API, not ProxyServer
-2. **No HTTP parsing in proxy** - proxy pipes bytes but doesn't parse/transform requests
-3. **Credential set endpoint is TODO** - endpoint exists but doesn't store to SecretStore
-
-These must be fixed before this smoke test will pass.

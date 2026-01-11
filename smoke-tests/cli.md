@@ -115,10 +115,10 @@ export ACP_SERVER_BIN=./target/release/acp-server
 - Empty list or message indicating no plugins installed
 - Password input hidden
 
-### 3.2 Install bundled plugin
+### 3.2 Install plugin from GitHub
 
 **Steps:**
-1. Run `$ACP_BIN install exa`
+1. Run `$ACP_BIN install mikekelly/exa-acp`
 2. Observe plugin preview showing:
    - Plugin name
    - Version (git SHA)
@@ -126,9 +126,10 @@ export ACP_SERVER_BIN=./target/release/acp-server
 3. Enter password when prompted
 
 **Expected:**
+- Fetches from GitHub
 - Preview shown before password prompt
 - Success message after password
-- Guidance on next steps (e.g., "run: acp set exa:apiKey")
+- Guidance on next steps (e.g., "run: acp set mikekelly/exa-acp:apiKey")
 
 ### 3.3 List plugins (with installed plugin)
 
@@ -143,33 +144,21 @@ export ACP_SERVER_BIN=./target/release/acp-server
   - Version/SHA
   - Matched hosts (e.g., `api.exa.ai`)
 
-### 3.4 Install GitHub plugin
-
-**Steps:**
-1. Run `$ACP_BIN install mikekelly/exa-acp` (or valid GitHub repo)
-2. Review preview
-3. Enter password
-
-**Expected:**
-- Fetches from GitHub
-- Shows preview with hosts
-- Installs successfully
-
-### 3.5 Uninstall plugin
+### 3.4 Uninstall plugin
 
 **Steps:**
 1. Ensure plugin installed
-2. Run `$ACP_BIN uninstall exa`
+2. Run `$ACP_BIN uninstall mikekelly/exa-acp`
 3. Enter password
 
 **Expected:**
 - Success message
 - Plugin no longer appears in `acp plugins`
 
-### 3.6 Install with wrong password
+### 3.5 Install with wrong password
 
 **Steps:**
-1. Run `$ACP_BIN install exa`
+1. Run `$ACP_BIN install mikekelly/exa-acp`
 2. Enter wrong password
 
 **Expected:**
@@ -309,6 +298,8 @@ export ACP_SERVER_BIN=./target/release/acp-server
   - Latency
 
 ### 6.3 Follow activity stream
+
+> **Note:** Activity streaming (`--follow`) is not yet implemented. This test is for future functionality.
 
 **Steps:**
 1. Run `$ACP_BIN activity --follow`
