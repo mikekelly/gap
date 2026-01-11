@@ -52,25 +52,25 @@ Today's options are terrible:
 
 ## The Solution
 
-ACP is an authenticating MITM proxy that sits between your AI agent and the internet. When the agent makes a request to an API you've authorized, ACP automatically injects your credentials - the agent never sees them.
+ACP lets you grant agents authenticated API access without giving them your credentials.
+
+Agents **opt in** by routing requests through the proxy. You give them a proxy token - not your API keys. When they make a request to an API you've authorized, ACP injects your credentials at the network layer. The agent never sees them.
 
 ```
 ┌─────────────┐      ┌─────────────┐      ┌─────────────┐
 │   AI Agent  │ ──── │     ACP     │ ──── │   Exa API   │
 │             │      │  (proxy)    │      │             │
-│  "search    │      │  + injects  │      │  sees your  │
-│   for X"    │      │  API key    │      │  API key    │
+│  has: proxy │      │  has: your  │      │  sees: your │
+│  token only │      │  API keys   │      │  API key    │
 └─────────────┘      └─────────────┘      └─────────────┘
-       │
-       └── never sees your credentials
 ```
 
-**Key benefits:**
-- **One-way credential flow** - Credentials go into ACP and never come back out. There's no API to retrieve them, no way for an agent to extract them. The only path out is through privilege escalation on your machine.
-- **Credentials never leave your machine** - They're stored in your OS keychain (macOS) or encrypted files, and injected at the network layer
+**Why this matters:**
+- **Prompt injection can't leak credentials** - The agent doesn't have them. A malicious prompt can't trick the agent into revealing what it doesn't possess.
+- **Credentials never leave your machine** - Stored in your OS keychain (macOS) or encrypted files, injected at the network layer. The proxy only listens on localhost by default.
+- **One-way credential flow** - Credentials go into ACP and never come back out. There's no API to retrieve them, no export function. The only path out is privilege escalation on your machine.
 - **Scoped access** - Agents only get access to APIs you explicitly authorize via plugins
 - **Works with any agent** - If it can use an HTTP proxy, it works with ACP
-- **Simple plugin system** - JavaScript transforms define how credentials are injected per API
 
 ## Build from Source
 
