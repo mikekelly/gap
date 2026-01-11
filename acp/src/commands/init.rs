@@ -31,10 +31,11 @@ pub async fn run(server_url: &str, ca_path: Option<&str>) -> Result<()> {
     println!("CA certificate saved to: {}", response.ca_path);
     println!();
     println!("Next steps:");
-    println!("  1. Trust the CA certificate in your system");
-    println!("  2. Install plugins: acp install <plugin>");
-    println!("  3. Configure credentials: acp set <plugin>:<key>");
-    println!("  4. Create agent tokens: acp token create <name>");
+    println!("  1. Install plugins: acp install <plugin>");
+    println!("  2. Configure credentials: acp set <plugin>:<key>");
+    println!("  3. Create agent tokens: acp token create <name>");
+    println!();
+    println!("Clients should be configured to trust the CA cert at the path above.");
 
     Ok(())
 }
