@@ -550,12 +550,17 @@ async fn list_tokens(
     // Convert TokenEntry to TokenResponse
     let token_list: Vec<TokenResponse> = token_entries
         .into_iter()
-        .map(|entry| TokenResponse {
-            id: entry.id,
-            name: entry.name,
-            prefix: entry.prefix,
-            token: None, // Never expose full token in list
-            created_at: entry.created_at,
+        .map(|entry| {
+            // TokenEntry.token_value is the full token, use it as id
+            // Calculate prefix from token_value (first 8 chars)
+            let prefix = entry.token_value.chars().take(8).collect::<String>();
+            TokenResponse {
+                id: entry.token_value,
+                name: entry.name,
+                prefix,
+                token: None, // Never expose full token in list
+                created_at: entry.created_at,
+            }
         })
         .collect();
 
@@ -1510,11 +1515,11 @@ mod tests {
         state.set_password_hash(password_hash).await;
 
         // Add a token to the registry directly
+        let token_value = "acp_test_token_12345".to_string();
         let token_entry = TokenEntry {
-            id: "test123".to_string(),
+            token_value: token_value.clone(),
             name: "test-token".to_string(),
             created_at: Utc::now(),
-            prefix: "acp_test".to_string(),
         };
         registry.add_token(&token_entry).await.expect("add token to registry");
 
@@ -1545,7 +1550,7 @@ mod tests {
 
         // Verify the token from registry is in the response
         assert_eq!(tokens_response.tokens.len(), 1);
-        assert_eq!(tokens_response.tokens[0].id, "test123");
+        assert_eq!(tokens_response.tokens[0].id, token_value);
         assert_eq!(tokens_response.tokens[0].name, "test-token");
         assert_eq!(tokens_response.tokens[0].prefix, "acp_test");
     }
@@ -1598,9 +1603,8 @@ mod tests {
         // Verify the token was added to the registry
         let tokens = registry.list_tokens().await.expect("list tokens from registry");
         assert_eq!(tokens.len(), 1);
-        assert_eq!(tokens[0].id, token_response.id);
+        assert_eq!(tokens[0].token_value, token_response.id);
         assert_eq!(tokens[0].name, "new-token");
-        assert_eq!(tokens[0].prefix, token_response.prefix);
     }
 
     #[tokio::test]
@@ -1626,10 +1630,9 @@ mod tests {
         // Create a token and add it to both registry and storage
         let token = token_cache.create("test-token").await.expect("create token");
         let token_entry = TokenEntry {
-            id: token.id.clone(),
+            token_value: token.token.clone(),
             name: token.name.clone(),
             created_at: token.created_at,
-            prefix: token.prefix.clone(),
         };
         registry.add_token(&token_entry).await.expect("add token to registry");
 
