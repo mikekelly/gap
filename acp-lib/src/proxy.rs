@@ -217,25 +217,36 @@ fn parse_connect_request(line: &str) -> Result<String> {
 async fn validate_auth(
     headers: &[String],
     registry: &Registry,
-    store: &dyn SecretStore,
+    _store: &dyn SecretStore,
 ) -> Result<AgentToken> {
     for header in headers {
         let header = header.trim();
         if header.to_lowercase().starts_with("proxy-authorization:") {
             let value = header[20..].trim(); // Skip "proxy-authorization:"
 
-            if let Some(bearer_token) = value.strip_prefix("Bearer ") {
-                // Check if token exists in registry
-                let tokens = registry.list_tokens().await?;
-                if tokens.iter().any(|t| t.token_value == bearer_token) {
-                    // Load full token from storage
-                    let token_key = format!("token:{}", bearer_token);
-                    if let Some(token_bytes) = store.get(&token_key).await? {
-                        if let Ok(token) = serde_json::from_slice::<AgentToken>(&token_bytes) {
-                            return Ok(token);
-                        }
-                    }
-                }
+            // Extract Bearer token
+            let token_value = if let Some(bearer_token) = value.strip_prefix("Bearer ") {
+                bearer_token.to_string()
+            } else {
+                return Err(AcpError::auth("Invalid authorization scheme, expected Bearer"));
+            };
+
+            // Check if token exists in registry and get its details
+            let tokens = registry.list_tokens().await?;
+            if let Some(token_entry) = tokens.iter().find(|t| t.token_value == token_value) {
+                // Construct AgentToken from registry TokenEntry
+                let prefix = if token_value.len() >= 12 {
+                    token_value[..12].to_string()
+                } else {
+                    token_value.clone()
+                };
+                return Ok(AgentToken {
+                    id: token_value.clone(),
+                    name: token_entry.name.clone(),
+                    prefix,
+                    token: token_value,
+                    created_at: token_entry.created_at,
+                });
             }
 
             return Err(AcpError::auth("Invalid bearer token"));
