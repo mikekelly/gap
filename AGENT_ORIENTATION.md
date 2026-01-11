@@ -119,6 +119,7 @@ cargo run --bin acp-server  # Run server
 
 ## Gotchas
 - **Wildcard matching is single-level only**: The pattern `*.s3.amazonaws.com` matches `bucket.s3.amazonaws.com` but rejects both `s3.amazonaws.com` (no subdomain) and `evil.com.s3.amazonaws.com` (multiple levels)
+- **Keychain access groups**: Use low-level SecItem* APIs for access group support. High-level `security_framework::passwords` API doesn't support access groups. See `keychain_impl.rs` for proper implementation using CFMutableDictionary and direct SecItem* calls. Access groups require Team ID prefix (e.g., "3R44BTH39W.com.acp.secrets").
 - **Token serialization**: `AgentToken` fully serializes including the `token` field (needed for storage). API responses use `TokenResponse` wrapper to control token exposure - only shown on creation.
 - **Token field access**: `AgentToken.token` is a public field (not a method) - access via `token.token.clone()` not `token.token()`
 - **Boa 0.19 API**: When using Boa engine, must import `JsArgs` trait for `.get_or_undefined()`, use `JsString::from()` for string literals in API calls, import `base64::Engine` trait for `.encode()` method on BASE64_STANDARD
