@@ -223,6 +223,7 @@ pub struct ActivityResponse {
 #[derive(Debug, Deserialize)]
 pub struct InitRequest {
     pub ca_path: Option<String>,
+    pub management_sans: Option<Vec<String>>,
 }
 
 /// Init response
@@ -387,6 +388,35 @@ async fn init(
 
     std::fs::write(&ca_path, ca.ca_cert_pem())
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to write CA cert: {}", e)))?;
+
+    // Generate management certificate with provided SANs or defaults
+    let management_sans = req.data.management_sans.unwrap_or_else(|| {
+        vec![
+            "DNS:localhost".to_string(),
+            "IP:127.0.0.1".to_string(),
+            "IP:::1".to_string(),
+        ]
+    });
+
+    let (mgmt_cert_der, mgmt_key_der) = ca.sign_server_cert(&management_sans)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to generate management certificate: {}", e)))?;
+
+    // Convert DER to PEM for storage
+    let mgmt_cert_pem = acp_lib::tls::der_to_pem(&mgmt_cert_der, "CERTIFICATE");
+    let mgmt_key_pem = acp_lib::tls::der_to_pem(&mgmt_key_der, "PRIVATE KEY");
+
+    // Store management cert and key
+    state.store.set("mgmt:cert", mgmt_cert_pem.as_bytes()).await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to store management cert: {}", e)))?;
+
+    state.store.set("mgmt:key", mgmt_key_pem.as_bytes()).await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to store management key: {}", e)))?;
+
+    // Store the SANs used (for reference)
+    let sans_json = serde_json::to_vec(&management_sans)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to serialize SANs: {}", e)))?;
+    state.store.set("mgmt:sans", &sans_json).await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to store management SANs: {}", e)))?;
 
     Ok(Json(InitResponse { ca_path }))
 }
@@ -1791,5 +1821,112 @@ mod tests {
         // Verify the token was removed from the registry
         let tokens = registry.list_tokens().await.expect("list tokens from registry");
         assert_eq!(tokens.len(), 0, "Token should be removed from registry");
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn test_init_endpoint_with_management_sans() {
+        use acp_lib::tls::CertificateAuthority;
+
+        let temp_dir = tempfile::tempdir().expect("create temp dir");
+        std::env::set_var("ACP_DATA_DIR", temp_dir.path());
+
+        let (store, registry, _temp_dir) = create_test_storage().await;
+
+        // Pre-create CA in storage (as server does at startup)
+        let ca = CertificateAuthority::generate().expect("generate CA");
+        store.set("ca:cert", ca.ca_cert_pem().as_bytes()).await.expect("store CA cert");
+        store.set("ca:key", ca.ca_key_pem().as_bytes()).await.expect("store CA key");
+
+        let state = ApiState::new(9443, 9080, store.clone(), registry);
+        let app = create_router(state);
+
+        let password = "testpass123";
+
+        // Create init request with custom management SANs
+        let body = serde_json::json!({
+            "password_hash": password,
+            "management_sans": ["DNS:example.com", "IP:192.168.1.1"]
+        });
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/init")
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+
+        // Verify management cert and key were stored
+        let mgmt_cert = store.get("mgmt:cert").await.expect("get mgmt:cert");
+        assert!(mgmt_cert.is_some(), "Management cert should be stored");
+
+        let mgmt_key = store.get("mgmt:key").await.expect("get mgmt:key");
+        assert!(mgmt_key.is_some(), "Management key should be stored");
+
+        // Verify the stored SANs
+        let mgmt_sans = store.get("mgmt:sans").await.expect("get mgmt:sans");
+        assert!(mgmt_sans.is_some(), "Management SANs should be stored");
+        let sans: Vec<String> = serde_json::from_slice(&mgmt_sans.unwrap()).expect("parse SANs JSON");
+        assert_eq!(sans, vec!["DNS:example.com", "IP:192.168.1.1"]);
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn test_init_endpoint_with_default_management_sans() {
+        use acp_lib::tls::CertificateAuthority;
+
+        let temp_dir = tempfile::tempdir().expect("create temp dir");
+        std::env::set_var("ACP_DATA_DIR", temp_dir.path());
+
+        let (store, registry, _temp_dir) = create_test_storage().await;
+
+        // Pre-create CA in storage (as server does at startup)
+        let ca = CertificateAuthority::generate().expect("generate CA");
+        store.set("ca:cert", ca.ca_cert_pem().as_bytes()).await.expect("store CA cert");
+        store.set("ca:key", ca.ca_key_pem().as_bytes()).await.expect("store CA key");
+
+        let state = ApiState::new(9443, 9080, store.clone(), registry);
+        let app = create_router(state);
+
+        let password = "testpass123";
+
+        // Create init request without management SANs (should use defaults)
+        let body = serde_json::json!({
+            "password_hash": password
+        });
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/init")
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+
+        // Verify management cert and key were stored
+        let mgmt_cert = store.get("mgmt:cert").await.expect("get mgmt:cert");
+        assert!(mgmt_cert.is_some(), "Management cert should be stored");
+
+        let mgmt_key = store.get("mgmt:key").await.expect("get mgmt:key");
+        assert!(mgmt_key.is_some(), "Management key should be stored");
+
+        // Verify the default SANs were used
+        let mgmt_sans = store.get("mgmt:sans").await.expect("get mgmt:sans");
+        assert!(mgmt_sans.is_some(), "Management SANs should be stored");
+        let sans: Vec<String> = serde_json::from_slice(&mgmt_sans.unwrap()).expect("parse SANs JSON");
+        assert_eq!(sans, vec!["DNS:localhost", "IP:127.0.0.1", "IP:::1"]);
     }
 }

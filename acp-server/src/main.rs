@@ -191,15 +191,163 @@ async fn load_or_generate_ca(store: &dyn storage::SecretStore) -> anyhow::Result
     }
 }
 
+/// Load management certificate from storage or generate a new one
+async fn load_or_generate_mgmt_cert(
+    store: &dyn storage::SecretStore,
+    ca: &CertificateAuthority,
+) -> anyhow::Result<()> {
+    const MGMT_CERT_KEY: &str = "mgmt:cert";
+    const MGMT_KEY_KEY: &str = "mgmt:key";
+
+    // Try to load from storage
+    match (store.get(MGMT_CERT_KEY).await?, store.get(MGMT_KEY_KEY).await?) {
+        (Some(_cert_pem), Some(_key_pem)) => {
+            tracing::info!("Loaded management certificate from storage");
+            Ok(())
+        }
+        _ => {
+            // Generate new management certificate with default SANs
+            tracing::info!("Generating new management certificate");
+            let sans = vec![
+                "DNS:localhost".to_string(),
+                "IP:127.0.0.1".to_string(),
+                "IP:::1".to_string(),
+            ];
+
+            let (cert_der, key_der) = ca.sign_server_cert(&sans)?;
+
+            // Convert DER to PEM format
+            let cert_pem = der_to_pem(&cert_der, "CERTIFICATE");
+            let key_pem = der_to_pem(&key_der, "PRIVATE KEY");
+
+            // Save to storage
+            store.set(MGMT_CERT_KEY, cert_pem.as_bytes()).await?;
+            store.set(MGMT_KEY_KEY, key_pem.as_bytes()).await?;
+            tracing::info!("Management certificate saved to storage");
+
+            Ok(())
+        }
+    }
+}
+
+/// Convert DER to PEM format with line wrapping
+fn der_to_pem(der: &[u8], label: &str) -> String {
+    use std::fmt::Write;
+
+    const ALPHABET: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+
+    // Base64 encode with line wrapping at 64 characters
+    let mut encoded = String::new();
+    let mut line_buf = String::new();
+
+    let chunks = der.chunks_exact(3);
+    let remainder = chunks.remainder();
+
+    for chunk in chunks {
+        let b1 = chunk[0] as usize;
+        let b2 = chunk[1] as usize;
+        let b3 = chunk[2] as usize;
+
+        line_buf.push(ALPHABET[b1 >> 2] as char);
+        line_buf.push(ALPHABET[((b1 & 0x03) << 4) | (b2 >> 4)] as char);
+        line_buf.push(ALPHABET[((b2 & 0x0f) << 2) | (b3 >> 6)] as char);
+        line_buf.push(ALPHABET[b3 & 0x3f] as char);
+
+        if line_buf.len() >= 64 {
+            let _ = writeln!(encoded, "{}", line_buf);
+            line_buf.clear();
+        }
+    }
+
+    // Handle remainder
+    if !remainder.is_empty() {
+        let b1 = remainder[0] as usize;
+        line_buf.push(ALPHABET[b1 >> 2] as char);
+
+        if remainder.len() == 1 {
+            line_buf.push(ALPHABET[(b1 & 0x03) << 4] as char);
+            line_buf.push_str("==");
+        } else {
+            let b2 = remainder[1] as usize;
+            line_buf.push(ALPHABET[((b1 & 0x03) << 4) | (b2 >> 4)] as char);
+            line_buf.push(ALPHABET[(b2 & 0x0f) << 2] as char);
+            line_buf.push('=');
+        }
+    }
+
+    if !line_buf.is_empty() {
+        let _ = writeln!(encoded, "{}", line_buf);
+    }
+
+    format!("-----BEGIN {}-----\n{}-----END {}-----\n", label, encoded, label)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use acp_lib::storage::{FileStore, SecretStore};
 
     #[test]
     fn test_args_parsing() {
         let args = Args::parse_from(["acp-server"]);
         assert_eq!(args.proxy_port, 9443);
         assert_eq!(args.api_port, 9080);
+    }
+
+    #[tokio::test]
+    async fn test_load_or_generate_mgmt_cert_creates_new() {
+        // Create a temporary store
+        let temp_dir = tempfile::tempdir().unwrap();
+        let store = FileStore::new(temp_dir.path().to_path_buf()).await.unwrap();
+        let ca = CertificateAuthority::generate().unwrap();
+
+        // Store the CA
+        store.set("ca:cert", ca.ca_cert_pem().as_bytes()).await.unwrap();
+        store.set("ca:key", ca.ca_key_pem().as_bytes()).await.unwrap();
+
+        // Call load_or_generate_mgmt_cert - should create new cert with default SANs
+        load_or_generate_mgmt_cert(&store, &ca).await.unwrap();
+
+        // Verify cert and key were stored
+        let stored_cert = store.get("mgmt:cert").await.unwrap();
+        let stored_key = store.get("mgmt:key").await.unwrap();
+
+        assert!(stored_cert.is_some());
+        assert!(stored_key.is_some());
+
+        // Verify they look like PEM
+        let cert_str = String::from_utf8(stored_cert.unwrap()).unwrap();
+        let key_str = String::from_utf8(stored_key.unwrap()).unwrap();
+        assert!(cert_str.starts_with("-----BEGIN CERTIFICATE-----"));
+        assert!(key_str.starts_with("-----BEGIN PRIVATE KEY-----"));
+    }
+
+    #[tokio::test]
+    async fn test_load_or_generate_mgmt_cert_loads_existing() {
+        // Create a temporary store with existing mgmt cert
+        let temp_dir = tempfile::tempdir().unwrap();
+        let store = FileStore::new(temp_dir.path().to_path_buf()).await.unwrap();
+        let ca = CertificateAuthority::generate().unwrap();
+
+        // Pre-generate and store a management cert
+        let sans = vec!["DNS:test.local".to_string()];
+        let (cert_der, key_der) = ca.sign_server_cert(&sans).unwrap();
+
+        // Simple PEM formatting (good enough for test)
+        let cert_pem = format!("-----BEGIN CERTIFICATE-----\ntestcert\n-----END CERTIFICATE-----\n");
+        let key_pem = format!("-----BEGIN PRIVATE KEY-----\ntestkey\n-----END PRIVATE KEY-----\n");
+
+        store.set("mgmt:cert", cert_pem.as_bytes()).await.unwrap();
+        store.set("mgmt:key", key_pem.as_bytes()).await.unwrap();
+
+        // Call load_or_generate_mgmt_cert - should load existing, not regenerate
+        load_or_generate_mgmt_cert(&store, &ca).await.unwrap();
+
+        // Verify cert wasn't regenerated (still has our test values)
+        let loaded_cert = store.get("mgmt:cert").await.unwrap().unwrap();
+        let loaded_key = store.get("mgmt:key").await.unwrap().unwrap();
+        assert_eq!(String::from_utf8(loaded_cert).unwrap(), cert_pem);
+        assert_eq!(String::from_utf8(loaded_key).unwrap(), key_pem);
     }
 
     #[test]

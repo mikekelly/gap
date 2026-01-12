@@ -391,7 +391,7 @@ fn pem_to_der(pem: &str, label: &str) -> Result<Vec<u8>> {
 }
 
 /// Convert DER to PEM format
-fn der_to_pem(der: &[u8], label: &str) -> String {
+pub fn der_to_pem(der: &[u8], label: &str) -> String {
     let encoded = base64_encode(der);
     format!("-----BEGIN {}-----\n{}\n-----END {}-----\n", label, encoded, label)
 }
