@@ -189,10 +189,17 @@ TaskCreate:
 ```
 Task tool:
   subagent_type: promode:implementer
-  prompt: "Work on task {id}: {subject}"
+  prompt: "Work on task {id}: {subject}. End with a succinct summary of what you achieved."
   run_in_background: true
 ```
 After launching, immediately return control — do NOT call `TaskOutput` or check the output file. A `<task-notification>` will automatically wake you when the agent completes. This preserves your context for orchestration rather than wasting it on polling.
+
+**Retrieving agent results:**
+When a `<task-notification>` arrives with an `<output-file>` path, extract the agent's final message efficiently:
+```bash
+tail -1 {output_file_path} | jq -r '.message.content[0].text'
+```
+This returns just the agent's summary without loading the full conversation. Do NOT read the entire output file — it contains verbose JSON for every message in the agent's context.
 
 **Model selection:**
 - `haiku` — Mechanical tasks only (file listing, known-pattern grep)
