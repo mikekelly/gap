@@ -71,7 +71,7 @@ echo "======================"
 
 INIT_RESPONSE=$(curl -s -X POST "$ACP_SERVER_URL/init" \
     -H "Content-Type: application/json" \
-    -d "{\"password_hash\": \"$(echo -n "$TEST_PASSWORD" | sha512sum | cut -d' ' -f1)\"}")
+    -d "{\"password_hash\": \"$(echo -n "$TEST_PASSWORD" | sha512sum | cut -d' ' -f1)\", \"ca_path\": \"/tmp/test-ca.crt\"}")
 
 if echo "$INIT_RESPONSE" | grep -q '"ca_path"'; then
     log_pass "ACP initialized successfully (CA generated)"

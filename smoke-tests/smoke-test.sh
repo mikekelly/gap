@@ -118,7 +118,7 @@ echo "-----------------------------------"
 
 # 2.1: Initialize server using CLI
 log_step "Phase 2.1: Initializing server with 'acp init'"
-INIT_OUTPUT=$("$ACP" --server "http://localhost:$API_PORT" init 2>&1)
+INIT_OUTPUT=$("$ACP" --server "http://localhost:$API_PORT" init --ca-path "$TEMP_DIR/ca.crt" 2>&1)
 
 if echo "$INIT_OUTPUT" | grep -q "initialized successfully"; then
     log_success "Server initialized via CLI"

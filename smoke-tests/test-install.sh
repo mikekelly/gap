@@ -115,7 +115,7 @@ if command -v cargo &> /dev/null; then
     PASSWORD_HASH=$(echo -n "$ACP_PASSWORD" | sha512sum | cut -d' ' -f1)
     INIT_RESULT=$(curl -s -X POST http://localhost:19080/init \
         -H "Content-Type: application/json" \
-        -d "{\"password_hash\": \"$PASSWORD_HASH\"}")
+        -d "{\"password_hash\": \"$PASSWORD_HASH\", \"ca_path\": \"$TEMP_PREFIX/.config/acp/ca.crt\"}")
 
     if echo "$INIT_RESULT" | grep -q '"ca_path"'; then
         log_pass "ACP initialized via API"
