@@ -20,10 +20,11 @@
 ## In Progress
 <!-- Currently being worked on -->
 
-- Registry Simplification: Convert tokens/credentials from arrays to hashes, store credential values inline, eliminate redundant storage entries (see docs/registry-refactor/plan.md)
-
 ## Done
 <!-- Shipped — archive periodically -->
+
+### Registry Simplification ✓
+Converted tokens/credentials from arrays to HashMaps. Tokens now keyed by token value for O(1) lookup. Credentials stored as nested HashMap (plugin → field → value) directly in registry. Eliminated separate storage entries for tokens and credentials.
 
 ### Token/Plugin Simplification ✓
 Removed TokenCache abstraction, tokens now stored directly as `token:{token_value}` → `{name, created_at}` for direct lookup. Fixed plugin matching to properly find matching plugins.
