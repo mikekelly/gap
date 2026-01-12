@@ -109,6 +109,10 @@ async fn main() -> anyhow::Result<()> {
     let ca = load_or_generate_ca(&*store).await?;
     tracing::info!("CA certificate loaded/generated");
 
+    // Load or generate management certificate
+    load_or_generate_mgmt_cert(&*store, &ca).await?;
+    tracing::info!("Management certificate loaded/generated");
+
     // Create registry for centralized metadata storage
     let registry = Arc::new(Registry::new(Arc::clone(&store)));
     tracing::info!("Registry initialized");
@@ -151,14 +155,27 @@ async fn main() -> anyhow::Result<()> {
     // Build the API router
     let app = api::create_router(api_state);
 
-    // Bind to the API port
-    let listener = tokio::net::TcpListener::bind(format!("0.0.0.0:{}", config.api_port))
+    // Load management certificate for HTTPS
+    let mgmt_cert_pem = store.get("mgmt:cert").await?
+        .ok_or_else(|| anyhow::anyhow!("Management certificate not found"))?;
+    let mgmt_key_pem = store.get("mgmt:key").await?
+        .ok_or_else(|| anyhow::anyhow!("Management key not found"))?;
+
+    // Create TLS configuration
+    let tls_config = axum_server::tls_rustls::RustlsConfig::from_pem(
+        mgmt_cert_pem,
+        mgmt_key_pem
+    ).await?;
+
+    // Bind address for HTTPS server
+    let addr = std::net::SocketAddr::from(([0, 0, 0, 0], config.api_port));
+
+    tracing::info!("Management API listening on https://0.0.0.0:{}", config.api_port);
+
+    // Start HTTPS API server (main task)
+    axum_server::bind_rustls(addr, tls_config)
+        .serve(app.into_make_service())
         .await?;
-
-    tracing::info!("Management API listening on 0.0.0.0:{}", config.api_port);
-
-    // Start API server (main task)
-    axum::serve(listener, app).await?;
 
     Ok(())
 }
@@ -331,7 +348,7 @@ mod tests {
 
         // Pre-generate and store a management cert
         let sans = vec!["DNS:test.local".to_string()];
-        let (cert_der, key_der) = ca.sign_server_cert(&sans).unwrap();
+        let (_cert_der, _key_der) = ca.sign_server_cert(&sans).unwrap();
 
         // Simple PEM formatting (good enough for test)
         let cert_pem = format!("-----BEGIN CERTIFICATE-----\ntestcert\n-----END CERTIFICATE-----\n");
