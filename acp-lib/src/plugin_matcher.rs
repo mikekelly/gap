@@ -154,6 +154,7 @@ mod tests {
             name: "test".to_string(),
             hosts: vec!["api.example.com".to_string()],
             credential_schema: vec![],
+            commit_sha: None,
         };
         registry.add_plugin(&entry).await.unwrap();
 
@@ -193,6 +194,7 @@ mod tests {
             name: "s3".to_string(),
             hosts: vec!["*.s3.amazonaws.com".to_string()],
             credential_schema: vec![],
+            commit_sha: None,
         };
         registry.add_plugin(&entry).await.unwrap();
 
@@ -232,6 +234,7 @@ mod tests {
             name: "test".to_string(),
             hosts: vec!["api.example.com".to_string()],
             credential_schema: vec![],
+            commit_sha: None,
         };
         registry.add_plugin(&entry).await.unwrap();
 
@@ -267,6 +270,7 @@ mod tests {
             name: "nomatch1".to_string(),
             hosts: vec!["api.other.com".to_string()],
             credential_schema: vec![],
+            commit_sha: None,
         };
         registry.add_plugin(&entry1).await.unwrap();
 
@@ -274,6 +278,7 @@ mod tests {
             name: "nomatch2".to_string(),
             hosts: vec!["api.another.com".to_string()],
             credential_schema: vec![],
+            commit_sha: None,
         };
         registry.add_plugin(&entry2).await.unwrap();
 
@@ -281,6 +286,7 @@ mod tests {
             name: "match".to_string(),
             hosts: vec!["api.example.com".to_string()],
             credential_schema: vec![],
+            commit_sha: None,
         };
         registry.add_plugin(&entry3).await.unwrap();
 

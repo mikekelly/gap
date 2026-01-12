@@ -38,6 +38,9 @@ pub struct PluginEntry {
     pub name: String,
     pub hosts: Vec<String>,
     pub credential_schema: Vec<String>,
+    /// Git commit SHA (short) of the installed version
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub commit_sha: Option<String>,
 }
 
 /// Credential metadata entry in the registry (deprecated - kept for backwards compatibility in tests)
@@ -200,6 +203,18 @@ impl Registry {
         Ok(data.plugins)
     }
 
+    /// Check if a plugin exists in the registry
+    pub async fn has_plugin(&self, name: &str) -> Result<bool> {
+        let data = self.load().await?;
+        Ok(data.plugins.iter().any(|p| p.name == name))
+    }
+
+    /// Get a plugin by name
+    pub async fn get_plugin(&self, name: &str) -> Result<Option<PluginEntry>> {
+        let data = self.load().await?;
+        Ok(data.plugins.iter().find(|p| p.name == name).cloned())
+    }
+
     // Credential CRUD operations
 
     /// Add a credential to the registry (deprecated - use set_credential)
@@ -334,6 +349,7 @@ mod tests {
                 name: "exa".to_string(),
                 hosts: vec!["api.exa.ai".to_string()],
                 credential_schema: vec!["api_key".to_string()],
+                commit_sha: None,
             }],
             credentials,
             password_hash: Some("argon2hash123".to_string()),
@@ -391,6 +407,7 @@ mod tests {
             name: "aws-s3".to_string(),
             hosts: vec!["*.s3.amazonaws.com".to_string()],
             credential_schema: vec!["access_key".to_string(), "secret_key".to_string()],
+            commit_sha: None,
         };
 
         assert_eq!(plugin.name, "aws-s3");
@@ -461,6 +478,7 @@ mod tests {
                 name: "exa".to_string(),
                 hosts: vec!["api.exa.ai".to_string()],
                 credential_schema: vec!["api_key".to_string()],
+                commit_sha: None,
             }],
             credentials,
             password_hash: None,
@@ -691,6 +709,7 @@ mod tests {
             name: "exa".to_string(),
             hosts: vec!["api.exa.ai".to_string()],
             credential_schema: vec!["api_key".to_string()],
+            commit_sha: None,
         };
 
         // Add plugin should succeed
@@ -722,11 +741,13 @@ mod tests {
             name: "exa".to_string(),
             hosts: vec!["api.exa.ai".to_string()],
             credential_schema: vec!["api_key".to_string()],
+            commit_sha: None,
         };
         let plugin2 = PluginEntry {
             name: "github".to_string(),
             hosts: vec!["api.github.com".to_string()],
             credential_schema: vec!["token".to_string()],
+            commit_sha: None,
         };
         registry
             .add_plugin(&plugin1)
@@ -769,11 +790,13 @@ mod tests {
             name: "exa".to_string(),
             hosts: vec!["api.exa.ai".to_string()],
             credential_schema: vec!["api_key".to_string()],
+            commit_sha: None,
         };
         let plugin2 = PluginEntry {
             name: "github".to_string(),
             hosts: vec!["api.github.com".to_string()],
             credential_schema: vec!["token".to_string()],
+            commit_sha: None,
         };
         registry
             .add_plugin(&plugin1)

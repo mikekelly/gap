@@ -28,6 +28,7 @@ chrono.workspace = true
 git2.workspace = true
 tempfile.workspace = true
 dirs.workspace = true
+urlencoding = "2.1.3"
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util"] }

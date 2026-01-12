@@ -242,6 +242,24 @@ pub struct InstallRequest {
 pub struct InstallResponse {
     pub name: String,
     pub installed: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub commit_sha: Option<String>,
+}
+
+/// Uninstall plugin response
+#[derive(Debug, Serialize, Deserialize)]
+pub struct UninstallResponse {
+    pub name: String,
+    pub uninstalled: bool,
+}
+
+/// Update plugin response
+#[derive(Debug, Serialize, Deserialize)]
+pub struct UpdateResponse {
+    pub name: String,
+    pub updated: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub commit_sha: Option<String>,
 }
 
 /// API error response
@@ -263,6 +281,8 @@ pub fn create_router(state: ApiState) -> Router {
         .route("/init", post(init))
         .route("/plugins", post(post_plugins))
         .route("/plugins/install", post(install_plugin))
+        .route("/plugins/:name/update", post(update_plugin))
+        .route("/plugins/:name", delete(uninstall_plugin))
         .route("/tokens", get(list_tokens).post(post_list_tokens))
         .route("/tokens/create", post(create_token))
         .route("/tokens/:id", delete(delete_token))
@@ -431,38 +451,152 @@ async fn install_plugin(
     State(state): State<ApiState>,
     body: Bytes,
 ) -> std::result::Result<Json<InstallResponse>, (StatusCode, String)> {
+    let req: InstallRequest = verify_auth(&state, &body).await?;
+
+    // Parse GitHub owner/repo from name (e.g., "mikekelly/exa-ncp")
+    let plugin_name = parse_plugin_name(&req.name)?;
+
+    // Check if plugin already exists
+    let exists = state.registry.has_plugin(&plugin_name).await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to check plugin: {}", e)))?;
+
+    if exists {
+        return Err((
+            StatusCode::CONFLICT,
+            format!("Plugin '{}' is already installed. Use 'acp update {}' to update it.", plugin_name, plugin_name),
+        ));
+    }
+
+    // Clone, validate, and store plugin
+    let (plugin, commit_sha) = clone_and_validate_plugin(&state, &plugin_name).await?;
+
+    tracing::info!("Installed plugin: {} (matches: {:?}, commit: {})", plugin_name, plugin.match_patterns, commit_sha);
+
+    Ok(Json(InstallResponse {
+        name: plugin_name,
+        installed: true,
+        commit_sha: Some(commit_sha),
+    }))
+}
+
+/// DELETE /plugins/{name} - Uninstall a plugin (requires auth)
+#[axum::debug_handler]
+async fn uninstall_plugin(
+    State(state): State<ApiState>,
+    Path(name): Path<String>,
+    body: Bytes,
+) -> std::result::Result<Json<UninstallResponse>, (StatusCode, String)> {
+    // Verify auth (body contains password hash)
+    verify_auth::<serde_json::Value>(&state, &body).await?;
+
+    // URL-decode the name (handles owner/repo with %2F)
+    let plugin_name = urlencoding::decode(&name)
+        .map_err(|e| (StatusCode::BAD_REQUEST, format!("Invalid plugin name: {}", e)))?
+        .into_owned();
+
+    // Check if plugin exists
+    let exists = state.registry.has_plugin(&plugin_name).await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to check plugin: {}", e)))?;
+
+    if !exists {
+        return Err((
+            StatusCode::NOT_FOUND,
+            format!("Plugin '{}' is not installed.", plugin_name),
+        ));
+    }
+
+    // Remove plugin from registry
+    state.registry.remove_plugin(&plugin_name).await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to remove plugin from registry: {}", e)))?;
+
+    // Remove plugin code from SecretStore
+    let store_key = format!("plugin:{}", plugin_name);
+    state.store.delete(&store_key).await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to remove plugin code: {}", e)))?;
+
+    tracing::info!("Uninstalled plugin: {}", plugin_name);
+
+    Ok(Json(UninstallResponse {
+        name: plugin_name,
+        uninstalled: true,
+    }))
+}
+
+/// POST /plugins/{name}/update - Update a plugin from GitHub (requires auth)
+#[axum::debug_handler]
+async fn update_plugin(
+    State(state): State<ApiState>,
+    Path(name): Path<String>,
+    body: Bytes,
+) -> std::result::Result<Json<UpdateResponse>, (StatusCode, String)> {
+    // Verify auth
+    verify_auth::<serde_json::Value>(&state, &body).await?;
+
+    // URL-decode the name
+    let plugin_name = urlencoding::decode(&name)
+        .map_err(|e| (StatusCode::BAD_REQUEST, format!("Invalid plugin name: {}", e)))?
+        .into_owned();
+
+    // Check if plugin exists
+    let exists = state.registry.has_plugin(&plugin_name).await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to check plugin: {}", e)))?;
+
+    if !exists {
+        return Err((
+            StatusCode::NOT_FOUND,
+            format!("Plugin '{}' is not installed. Use 'acp install {}' to install it.", plugin_name, plugin_name),
+        ));
+    }
+
+    // Remove old plugin from registry (but keep credentials)
+    state.registry.remove_plugin(&plugin_name).await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to remove old plugin: {}", e)))?;
+
+    // Clone, validate, and store new version
+    let (plugin, commit_sha) = clone_and_validate_plugin(&state, &plugin_name).await?;
+
+    tracing::info!("Updated plugin: {} (matches: {:?}, commit: {})", plugin_name, plugin.match_patterns, commit_sha);
+
+    Ok(Json(UpdateResponse {
+        name: plugin_name,
+        updated: true,
+        commit_sha: Some(commit_sha),
+    }))
+}
+
+/// Parse plugin name from "owner/repo" format
+fn parse_plugin_name(name: &str) -> std::result::Result<String, (StatusCode, String)> {
+    let parts: Vec<&str> = name.split('/').collect();
+    if parts.len() != 2 {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            format!("Invalid plugin name format. Expected 'owner/repo', got '{}'", name),
+        ));
+    }
+    Ok(format!("{}/{}", parts[0], parts[1]))
+}
+
+/// Clone a plugin from GitHub, validate it, and store it
+/// Returns the validated plugin info and commit SHA
+async fn clone_and_validate_plugin(
+    state: &ApiState,
+    plugin_name: &str,
+) -> std::result::Result<(acp_lib::types::ACPPlugin, String), (StatusCode, String)> {
     use acp_lib::plugin_runtime::PluginRuntime;
     use git2::{build::RepoBuilder, Cred, FetchOptions, RemoteCallbacks};
     use tempfile::tempdir;
 
-    let req: InstallRequest = verify_auth(&state, &body).await?;
-
-    // Parse GitHub owner/repo from name (e.g., "mikekelly/exa-ncp")
-    let parts: Vec<&str> = req.name.split('/').collect();
-    if parts.len() != 2 {
-        return Err((
-            StatusCode::BAD_REQUEST,
-            format!("Invalid plugin name format. Expected 'owner/repo', got '{}'", req.name),
-        ));
-    }
-
+    let parts: Vec<&str> = plugin_name.split('/').collect();
     let (owner, repo) = (parts[0], parts[1]);
+    let repo_url = format!("https://github.com/{}/{}.git", owner, repo);
 
-    // Clone the repository to a temporary directory
     let temp_dir = tempdir()
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to create temp directory: {}", e)))?;
 
-    let repo_url = format!("https://github.com/{}/{}.git", owner, repo);
-
     // Clone and read plugin.js - scoped to ensure non-Send types are dropped before await
-    let plugin_name = format!("{}/{}", owner, repo);
-    let (transformed_code, plugin) = {
-        // Configure credentials callback for public repositories
-        // git2 requires a callback even for public repos, or it may fail with:
-        // "remote authentication required but no callback set"
+    let (transformed_code, plugin, commit_sha) = {
         let mut callbacks = RemoteCallbacks::new();
         callbacks.credentials(|_url, _username_from_url, _allowed_types| {
-            // For public HTTPS repos, return default (empty) credentials
             Cred::default()
         });
 
@@ -472,8 +606,15 @@ async fn install_plugin(
         let mut builder = RepoBuilder::new();
         builder.fetch_options(fetch_options);
 
-        builder.clone(&repo_url, temp_dir.path())
+        let git_repo = builder.clone(&repo_url, temp_dir.path())
             .map_err(|e| (StatusCode::BAD_GATEWAY, format!("Failed to clone repository: {}", e)))?;
+
+        // Get the commit SHA
+        let head = git_repo.head()
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to get HEAD: {}", e)))?;
+        let commit = head.peel_to_commit()
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to get commit: {}", e)))?;
+        let commit_sha = commit.id().to_string()[..7].to_string(); // Short SHA
 
         // Read plugin.js from the cloned repository
         let plugin_path = temp_dir.path().join("plugin.js");
@@ -484,15 +625,14 @@ async fn install_plugin(
         let transformed_code = transform_es6_export(&plugin_code);
 
         // Validate plugin by loading it in a temporary runtime
-        // IMPORTANT: PluginRuntime is not Send, so we must complete all operations before any await
         let mut runtime = PluginRuntime::new()
             .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to create runtime: {}", e)))?;
 
-        let plugin = runtime.load_plugin_from_code(&plugin_name, &transformed_code)
+        let plugin = runtime.load_plugin_from_code(plugin_name, &transformed_code)
             .map_err(|e| (StatusCode::BAD_REQUEST, format!("Invalid plugin code: {}", e)))?;
 
-        (transformed_code, plugin)
-    }; // All non-Send types dropped here, before the await below
+        (transformed_code, plugin, commit_sha)
+    };
 
     // Store plugin in SecretStore
     let store_key = format!("plugin:{}", plugin_name);
@@ -501,24 +641,18 @@ async fn install_plugin(
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to store plugin: {}", e)))?;
 
-    // Add plugin to registry
+    // Add plugin to registry with commit SHA
     use acp_lib::PluginEntry;
     let plugin_entry = PluginEntry {
         name: plugin.name.clone(),
         hosts: plugin.match_patterns.clone(),
         credential_schema: plugin.credential_schema.clone(),
+        commit_sha: Some(commit_sha.clone()),
     };
     state.registry.add_plugin(&plugin_entry).await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to add plugin to registry: {}", e)))?;
 
-    tracing::info!("Installed plugin: {} (matches: {:?})", plugin.name, plugin.match_patterns);
-
-    // Temp directory is automatically cleaned up when temp_dir goes out of scope
-
-    Ok(Json(InstallResponse {
-        name: plugin_name,
-        installed: true,
-    }))
+    Ok((plugin, commit_sha))
 }
 
 /// Transform ES6 export default to var plugin declaration

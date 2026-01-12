@@ -132,12 +132,20 @@ pub struct PluginsResponse {
 pub struct InstallResponse {
     pub name: String,
     pub installed: bool,
+    pub commit_sha: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
 pub struct UninstallResponse {
     pub name: String,
     pub uninstalled: bool,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct UpdateResponse {
+    pub name: String,
+    pub updated: bool,
+    pub commit_sha: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]

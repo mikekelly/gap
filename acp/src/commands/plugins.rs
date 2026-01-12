@@ -43,7 +43,11 @@ pub async fn install(server_url: &str, name: &str) -> Result<()> {
         client.post_auth("/plugins/install", &password_hash, body).await?;
 
     if response.installed {
-        println!("Plugin '{}' installed successfully.", response.name);
+        if let Some(sha) = response.commit_sha {
+            println!("Plugin '{}' installed successfully. (commit: {})", response.name, sha);
+        } else {
+            println!("Plugin '{}' installed successfully.", response.name);
+        }
     } else {
         println!("Failed to install plugin '{}'.", response.name);
     }
@@ -57,7 +61,9 @@ pub async fn uninstall(server_url: &str, name: &str) -> Result<()> {
 
     let client = ApiClient::new(server_url);
 
-    let path = format!("/plugins/{}", name);
+    // URL-encode the plugin name (handles owner/repo with /)
+    let encoded_name = urlencoding::encode(name);
+    let path = format!("/plugins/{}", encoded_name);
     let response: crate::client::UninstallResponse =
         client.delete_auth(&path, &password_hash).await?;
 
@@ -65,6 +71,31 @@ pub async fn uninstall(server_url: &str, name: &str) -> Result<()> {
         println!("Plugin '{}' uninstalled successfully.", response.name);
     } else {
         println!("Failed to uninstall plugin '{}'.", response.name);
+    }
+
+    Ok(())
+}
+
+pub async fn update(server_url: &str, name: &str) -> Result<()> {
+    let password = read_password("Password: ")?;
+    let password_hash = hash_password(&password);
+
+    let client = ApiClient::new(server_url);
+
+    // URL-encode the plugin name (handles owner/repo with /)
+    let encoded_name = urlencoding::encode(name);
+    let path = format!("/plugins/{}/update", encoded_name);
+    let response: crate::client::UpdateResponse =
+        client.post_auth(&path, &password_hash, json!({})).await?;
+
+    if response.updated {
+        if let Some(sha) = response.commit_sha {
+            println!("Plugin '{}' updated successfully. (commit: {})", response.name, sha);
+        } else {
+            println!("Plugin '{}' updated successfully.", response.name);
+        }
+    } else {
+        println!("Failed to update plugin '{}'.", response.name);
     }
 
     Ok(())

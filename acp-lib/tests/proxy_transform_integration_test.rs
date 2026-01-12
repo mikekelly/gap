@@ -48,6 +48,7 @@ async fn test_parse_and_transform_with_multi_field_credentials() {
         name: "multi-cred-api".to_string(),
         hosts: vec!["api.multicred.com".to_string()],
         credential_schema: vec!["access_key".to_string(), "secret_key".to_string(), "region".to_string()],
+        commit_sha: None,
     };
     registry.add_plugin(&plugin_entry).await.unwrap();
 
@@ -110,6 +111,7 @@ async fn test_parse_and_transform_with_single_field_credential() {
         name: "simple-api".to_string(),
         hosts: vec!["api.simple.com".to_string()],
         credential_schema: vec!["api_key".to_string()],
+        commit_sha: None,
     };
     registry.add_plugin(&plugin_entry).await.unwrap();
 
@@ -166,6 +168,7 @@ async fn test_parse_and_transform_missing_credentials() {
         name: "no-creds-api".to_string(),
         hosts: vec!["api.nocreds.com".to_string()],
         credential_schema: vec!["api_key".to_string()],
+        commit_sha: None,
     };
     registry.add_plugin(&plugin_entry).await.unwrap();
 

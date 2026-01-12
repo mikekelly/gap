@@ -50,6 +50,12 @@ enum Commands {
         name: String,
     },
 
+    /// Update a plugin to the latest version
+    Update {
+        /// Plugin name
+        name: String,
+    },
+
     /// Set a credential for a plugin
     Set {
         /// Credential key in format <plugin>:<key>
@@ -99,6 +105,7 @@ async fn main() {
         Commands::Plugins => commands::plugins::list(&cli.server).await,
         Commands::Install { name } => commands::plugins::install(&cli.server, &name).await,
         Commands::Uninstall { name } => commands::plugins::uninstall(&cli.server, &name).await,
+        Commands::Update { name } => commands::plugins::update(&cli.server, &name).await,
         Commands::Set { key } => commands::credentials::set(&cli.server, &key).await,
         Commands::Token(token_cmd) => match token_cmd {
             TokenCommands::List => commands::tokens::list(&cli.server).await,

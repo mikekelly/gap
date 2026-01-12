@@ -121,12 +121,14 @@ async fn test_find_matching_plugin() {
         name: "exa-plugin".to_string(),
         hosts: vec!["api.exa.ai".to_string()],
         credential_schema: vec!["api_key".to_string()],
+        commit_sha: None,
     }).await.unwrap();
 
     registry.add_plugin(&PluginEntry {
         name: "s3-plugin".to_string(),
         hosts: vec!["*.s3.amazonaws.com".to_string()],
         credential_schema: vec!["access_key".to_string(), "secret_key".to_string()],
+        commit_sha: None,
     }).await.unwrap();
 
     // Find matching plugin for api.exa.ai
@@ -182,6 +184,7 @@ async fn test_proxy_plugin_execution_flow() {
         name: "test-api".to_string(),
         hosts: vec!["api.example.com".to_string()],
         credential_schema: vec!["api_key".to_string()],
+        commit_sha: None,
     }).await.unwrap();
 
     // Store credentials
@@ -259,6 +262,7 @@ async fn test_complete_proxy_transform_pipeline() {
         name: "test-transform".to_string(),
         hosts: vec!["api.test.com".to_string()],
         credential_schema: vec!["secret".to_string()],
+        commit_sha: None,
     }).await.unwrap();
 
     // Set credentials directly in registry (no separate storage entry needed)
