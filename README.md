@@ -36,6 +36,7 @@ Agents **opt in** by routing requests through the proxy. You give them a proxy t
 
 ### macOS Quick Start
 
+Install and setup ACP:
 ```bash
 # Install via Homebrew
 brew tap mikekelly/acp
@@ -46,30 +47,33 @@ brew services start acp-server
 
 # Initialize with a password (you'll need this for admin operations)
 acp init
+```
 
+Install an ACP plugin for a given service (eg. Exa) and set credentials:
+```bash
 # Install a plugin (e.g. Exa search API)
 acp install mikekelly/exa-acp
 
 # Set your API key for the plugin
 acp set mikekelly/exa-acp:apiKey
+```
 
-# Create a token for your agent
+Assign an ACP token to an agent (eg. Claude Code)
+```bash
 acp token create my-agent
 # outputs: acp_xxxxxxxxxxxx
+
+cd /path/to/your/project
+
+echo "ACP_TOKEN=acp_xxxxxxxxxxxx" >> .env
 ```
 
-Now you and your agents can use this to make requests:
-
-```bash
-curl -x http://localhost:9443 \
-     --cacert ~/.config/acp/ca.crt \
-     --proxy-header "Proxy-Authorization: Bearer acp_xxxxxxxxxxxx" \
-     -H "Content-Type: application/json" \
-     -d '{"query": "latest AI news", "numResults": 3}' \
-     https://api.exa.ai/search
+Install ACP enabled tools (eg. this ACP-enabled fork of exa-mcp-server):
+```
+claude mcp add exa -- npx -y exa-acp-mcp
 ```
 
-The agent sends requests without service credentials - ACP injects them automatically.
+The agent can now talk to Exa without direct API credentials - ACP injects them automatically.
 
 ### Linux Quick Start
 
