@@ -51,15 +51,10 @@ async fn test_parse_and_transform_with_multi_field_credentials() {
     };
     registry.add_plugin(&plugin_entry).await.unwrap();
 
-    // Store credentials using the API pattern: credential:{plugin}:{field_name}
-    store.set("credential:multi-cred-api:access_key", b"AKIAIOSFODNN7EXAMPLE").await.unwrap();
-    store.set("credential:multi-cred-api:secret_key", b"wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY").await.unwrap();
-    store.set("credential:multi-cred-api:region", b"us-west-2").await.unwrap();
-
-    // Add credentials to registry
-    registry.add_credential(&CredentialEntry { plugin: "multi-cred-api".to_string(), field: "access_key".to_string() }).await.unwrap();
-    registry.add_credential(&CredentialEntry { plugin: "multi-cred-api".to_string(), field: "secret_key".to_string() }).await.unwrap();
-    registry.add_credential(&CredentialEntry { plugin: "multi-cred-api".to_string(), field: "region".to_string() }).await.unwrap();
+    // Set credentials directly in registry (no separate storage entries needed)
+    registry.set_credential("multi-cred-api", "access_key", "AKIAIOSFODNN7EXAMPLE").await.unwrap();
+    registry.set_credential("multi-cred-api", "secret_key", "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY").await.unwrap();
+    registry.set_credential("multi-cred-api", "region", "us-west-2").await.unwrap();
 
     // Simulate an incoming HTTP request
     let raw_http = b"GET /api/data HTTP/1.1\r\nHost: api.multicred.com\r\nUser-Agent: TestAgent/1.0\r\n\r\n";
@@ -118,11 +113,8 @@ async fn test_parse_and_transform_with_single_field_credential() {
     };
     registry.add_plugin(&plugin_entry).await.unwrap();
 
-    // Store credential using API pattern
-    store.set("credential:simple-api:api_key", b"secret-api-key-123").await.unwrap();
-
-    // Add credential to registry
-    registry.add_credential(&CredentialEntry { plugin: "simple-api".to_string(), field: "api_key".to_string() }).await.unwrap();
+    // Set credential directly in registry (no separate storage entry needed)
+    registry.set_credential("simple-api", "api_key", "secret-api-key-123").await.unwrap();
 
     // Simulate an incoming HTTP request
     let raw_http = b"GET /api/data HTTP/1.1\r\nHost: api.simple.com\r\n\r\n";

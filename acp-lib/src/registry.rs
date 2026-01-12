@@ -14,9 +14,17 @@ use crate::{
 };
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::sync::Arc;
 
-/// Token metadata entry in the registry
+/// Token metadata (without the token value, which is used as the hash key)
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct TokenMetadata {
+    pub name: String,
+    pub created_at: DateTime<Utc>,
+}
+
+/// Token metadata entry in the registry (deprecated - kept for backwards compatibility in tests)
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct TokenEntry {
     pub token_value: String,
@@ -32,7 +40,7 @@ pub struct PluginEntry {
     pub credential_schema: Vec<String>,
 }
 
-/// Credential metadata entry in the registry
+/// Credential metadata entry in the registry (deprecated - kept for backwards compatibility in tests)
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct CredentialEntry {
     pub plugin: String,
@@ -43,9 +51,11 @@ pub struct CredentialEntry {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct RegistryData {
     pub version: u32,
-    pub tokens: Vec<TokenEntry>,
+    /// Map of token value -> token metadata
+    pub tokens: HashMap<String, TokenMetadata>,
     pub plugins: Vec<PluginEntry>,
-    pub credentials: Vec<CredentialEntry>,
+    /// Map of plugin name -> (field name -> field value)
+    pub credentials: HashMap<String, HashMap<String, String>>,
     /// Argon2 hash of the admin password (set during init)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub password_hash: Option<String>,
@@ -55,9 +65,9 @@ impl Default for RegistryData {
     fn default() -> Self {
         Self {
             version: 1,
-            tokens: Vec::new(),
+            tokens: HashMap::new(),
             plugins: Vec::new(),
-            credentials: Vec::new(),
+            credentials: HashMap::new(),
             password_hash: None,
         }
     }
@@ -110,12 +120,23 @@ impl Registry {
 
     // Token CRUD operations
 
-    /// Add a token to the registry
+    /// Add a token to the registry (deprecated - use add_token_with_metadata)
     ///
-    /// Loads the registry, adds the token to the tokens vec, and saves.
+    /// Loads the registry, adds the token to the tokens map, and saves.
     pub async fn add_token(&self, token: &TokenEntry) -> Result<()> {
+        let metadata = TokenMetadata {
+            name: token.name.clone(),
+            created_at: token.created_at,
+        };
+        self.add_token_with_metadata(&token.token_value, &metadata).await
+    }
+
+    /// Add a token to the registry with metadata
+    ///
+    /// Loads the registry, adds the token to the tokens map, and saves.
+    pub async fn add_token_with_metadata(&self, token_value: &str, metadata: &TokenMetadata) -> Result<()> {
         let mut data = self.load().await?;
-        data.tokens.push(token.clone());
+        data.tokens.insert(token_value.to_string(), metadata.clone());
         self.save(&data).await
     }
 
@@ -124,16 +145,31 @@ impl Registry {
     /// Loads the registry, removes the token with matching token_value, and saves.
     pub async fn remove_token(&self, token_value: &str) -> Result<()> {
         let mut data = self.load().await?;
-        data.tokens.retain(|t| t.token_value != token_value);
+        data.tokens.remove(token_value);
         self.save(&data).await
+    }
+
+    /// Get a token from the registry by token value (O(1) lookup)
+    ///
+    /// Returns the token metadata if found, None otherwise.
+    pub async fn get_token(&self, token_value: &str) -> Result<Option<TokenMetadata>> {
+        let data = self.load().await?;
+        Ok(data.tokens.get(token_value).cloned())
     }
 
     /// List all tokens in the registry
     ///
-    /// Returns the tokens vec from the loaded registry.
+    /// Returns the tokens vec from the loaded registry (converted from HashMap for backwards compatibility).
     pub async fn list_tokens(&self) -> Result<Vec<TokenEntry>> {
         let data = self.load().await?;
-        Ok(data.tokens)
+        let tokens = data.tokens.iter().map(|(token_value, metadata)| {
+            TokenEntry {
+                token_value: token_value.clone(),
+                name: metadata.name.clone(),
+                created_at: metadata.created_at,
+            }
+        }).collect();
+        Ok(tokens)
     }
 
     // Plugin CRUD operations
@@ -166,12 +202,27 @@ impl Registry {
 
     // Credential CRUD operations
 
-    /// Add a credential to the registry
+    /// Add a credential to the registry (deprecated - use set_credential)
     ///
-    /// Loads the registry, adds the credential to the credentials vec, and saves.
+    /// Loads the registry, adds the credential to the credentials map, and saves.
     pub async fn add_credential(&self, credential: &CredentialEntry) -> Result<()> {
+        // This is a metadata-only operation, so we can't set an actual value
+        // For backwards compatibility, just ensure the plugin entry exists
         let mut data = self.load().await?;
-        data.credentials.push(credential.clone());
+        data.credentials.entry(credential.plugin.clone())
+            .or_insert_with(HashMap::new);
+        self.save(&data).await
+    }
+
+    /// Set a credential value in the registry
+    ///
+    /// Loads the registry, sets the credential value in the nested map, and saves.
+    pub async fn set_credential(&self, plugin: &str, field: &str, value: &str) -> Result<()> {
+        let mut data = self.load().await?;
+        data.credentials
+            .entry(plugin.to_string())
+            .or_insert_with(HashMap::new)
+            .insert(field.to_string(), value.to_string());
         self.save(&data).await
     }
 
@@ -180,17 +231,50 @@ impl Registry {
     /// Loads the registry, removes the credential with matching plugin and field, and saves.
     pub async fn remove_credential(&self, plugin: &str, field: &str) -> Result<()> {
         let mut data = self.load().await?;
-        data.credentials
-            .retain(|c| !(c.plugin == plugin && c.field == field));
+        if let Some(plugin_creds) = data.credentials.get_mut(plugin) {
+            plugin_creds.remove(field);
+            // Remove the plugin entry if it has no more credentials
+            if plugin_creds.is_empty() {
+                data.credentials.remove(plugin);
+            }
+        }
         self.save(&data).await
+    }
+
+    /// Get a credential value from the registry
+    ///
+    /// Returns the credential value if found, None otherwise.
+    pub async fn get_credential(&self, plugin: &str, field: &str) -> Result<Option<String>> {
+        let data = self.load().await?;
+        Ok(data.credentials
+            .get(plugin)
+            .and_then(|fields| fields.get(field))
+            .cloned())
+    }
+
+    /// Get all credentials for a plugin
+    ///
+    /// Returns a map of field name -> field value for the plugin, or None if plugin not found.
+    pub async fn get_plugin_credentials(&self, plugin: &str) -> Result<Option<HashMap<String, String>>> {
+        let data = self.load().await?;
+        Ok(data.credentials.get(plugin).cloned())
     }
 
     /// List all credentials in the registry
     ///
-    /// Returns the credentials vec from the loaded registry.
+    /// Returns the credentials vec from the loaded registry (converted from HashMap for backwards compatibility).
     pub async fn list_credentials(&self) -> Result<Vec<CredentialEntry>> {
         let data = self.load().await?;
-        Ok(data.credentials)
+        let mut creds = Vec::new();
+        for (plugin, fields) in data.credentials.iter() {
+            for field in fields.keys() {
+                creds.push(CredentialEntry {
+                    plugin: plugin.clone(),
+                    field: field.clone(),
+                });
+            }
+        }
+        Ok(creds)
     }
 
     // Password hash operations
@@ -225,31 +309,40 @@ mod tests {
 
     #[test]
     fn test_registry_data_serialization() {
-        let data = RegistryData {
-            version: 1,
-            tokens: vec![TokenEntry {
-                token_value: "acp_abc123".to_string(),
+        use std::collections::HashMap;
+
+        let mut tokens = HashMap::new();
+        tokens.insert(
+            "acp_abc123".to_string(),
+            TokenMetadata {
                 name: "test-token".to_string(),
                 created_at: DateTime::parse_from_rfc3339("2024-01-15T10:30:00Z")
                     .unwrap()
                     .with_timezone(&Utc),
-            }],
+            }
+        );
+
+        let mut credentials = HashMap::new();
+        let mut exa_creds = HashMap::new();
+        exa_creds.insert("api_key".to_string(), "test-value".to_string());
+        credentials.insert("exa".to_string(), exa_creds);
+
+        let data = RegistryData {
+            version: 1,
+            tokens,
             plugins: vec![PluginEntry {
                 name: "exa".to_string(),
                 hosts: vec!["api.exa.ai".to_string()],
                 credential_schema: vec!["api_key".to_string()],
             }],
-            credentials: vec![CredentialEntry {
-                plugin: "exa".to_string(),
-                field: "api_key".to_string(),
-            }],
+            credentials,
             password_hash: Some("argon2hash123".to_string()),
         };
 
         // Serialize to JSON
         let json = serde_json::to_string(&data).expect("serialization should succeed");
         assert!(json.contains("\"version\":1"));
-        assert!(json.contains("\"token_value\":\"acp_abc123\""));
+        assert!(json.contains("\"acp_abc123\""));
         assert!(json.contains("\"name\":\"exa\""));
 
         // Deserialize back
@@ -257,11 +350,11 @@ mod tests {
             serde_json::from_str(&json).expect("deserialization should succeed");
         assert_eq!(parsed.version, 1);
         assert_eq!(parsed.tokens.len(), 1);
-        assert_eq!(parsed.tokens[0].token_value, "acp_abc123");
+        assert_eq!(parsed.tokens.get("acp_abc123").unwrap().name, "test-token");
         assert_eq!(parsed.plugins.len(), 1);
         assert_eq!(parsed.plugins[0].name, "exa");
         assert_eq!(parsed.credentials.len(), 1);
-        assert_eq!(parsed.credentials[0].plugin, "exa");
+        assert_eq!(parsed.credentials.get("exa").unwrap().get("api_key").unwrap(), "test-value");
     }
 
     #[test]
@@ -347,22 +440,29 @@ mod tests {
         let registry = Registry::new(Arc::new(store));
 
         // Create test data
-        let data = RegistryData {
-            version: 1,
-            tokens: vec![TokenEntry {
-                token_value: "acp_test123".to_string(),
+        let mut tokens = HashMap::new();
+        tokens.insert(
+            "acp_test123".to_string(),
+            TokenMetadata {
                 name: "test-token".to_string(),
                 created_at: Utc::now(),
-            }],
+            }
+        );
+
+        let mut credentials = HashMap::new();
+        let mut exa_creds = HashMap::new();
+        exa_creds.insert("api_key".to_string(), "secret".to_string());
+        credentials.insert("exa".to_string(), exa_creds);
+
+        let data = RegistryData {
+            version: 1,
+            tokens,
             plugins: vec![PluginEntry {
                 name: "exa".to_string(),
                 hosts: vec!["api.exa.ai".to_string()],
                 credential_schema: vec!["api_key".to_string()],
             }],
-            credentials: vec![CredentialEntry {
-                plugin: "exa".to_string(),
-                field: "api_key".to_string(),
-            }],
+            credentials,
             password_hash: None,
         };
 
@@ -376,11 +476,11 @@ mod tests {
         let loaded = registry.load().await.expect("load should succeed");
         assert_eq!(loaded.version, data.version);
         assert_eq!(loaded.tokens.len(), 1);
-        assert_eq!(loaded.tokens[0].token_value, "acp_test123");
+        assert_eq!(loaded.tokens.get("acp_test123").unwrap().name, "test-token");
         assert_eq!(loaded.plugins.len(), 1);
         assert_eq!(loaded.plugins[0].name, "exa");
         assert_eq!(loaded.credentials.len(), 1);
-        assert_eq!(loaded.credentials[0].plugin, "exa");
+        assert_eq!(loaded.credentials.get("exa").unwrap().get("api_key").unwrap(), "secret");
     }
 
     #[tokio::test]
@@ -395,36 +495,46 @@ mod tests {
         let registry = Registry::new(Arc::new(store));
 
         // Save initial data
-        let data1 = RegistryData {
-            version: 1,
-            tokens: vec![TokenEntry {
-                token_value: "acp_token1".to_string(),
+        let mut tokens1 = HashMap::new();
+        tokens1.insert(
+            "acp_token1".to_string(),
+            TokenMetadata {
                 name: "first".to_string(),
                 created_at: Utc::now(),
-            }],
+            }
+        );
+
+        let data1 = RegistryData {
+            version: 1,
+            tokens: tokens1,
             plugins: vec![],
-            credentials: vec![],
+            credentials: HashMap::new(),
             password_hash: None,
         };
         registry.save(&data1).await.expect("save should succeed");
 
         // Overwrite with new data
+        let mut tokens2 = HashMap::new();
+        tokens2.insert(
+            "acp_token1".to_string(),
+            TokenMetadata {
+                name: "first".to_string(),
+                created_at: Utc::now(),
+            }
+        );
+        tokens2.insert(
+            "acp_token2".to_string(),
+            TokenMetadata {
+                name: "second".to_string(),
+                created_at: Utc::now(),
+            }
+        );
+
         let data2 = RegistryData {
             version: 1,
-            tokens: vec![
-                TokenEntry {
-                    token_value: "acp_token1".to_string(),
-                    name: "first".to_string(),
-                    created_at: Utc::now(),
-                },
-                TokenEntry {
-                    token_value: "acp_token2".to_string(),
-                    name: "second".to_string(),
-                    created_at: Utc::now(),
-                },
-            ],
+            tokens: tokens2,
             plugins: vec![],
-            credentials: vec![],
+            credentials: HashMap::new(),
             password_hash: None,
         };
         registry.save(&data2).await.expect("save should succeed");
@@ -432,7 +542,8 @@ mod tests {
         // Load and verify it was overwritten
         let loaded = registry.load().await.expect("load should succeed");
         assert_eq!(loaded.tokens.len(), 2);
-        assert_eq!(loaded.tokens[1].token_value, "acp_token2");
+        assert!(loaded.tokens.contains_key("acp_token2"));
+        assert_eq!(loaded.tokens.get("acp_token2").unwrap().name, "second");
     }
 
     #[tokio::test]
@@ -690,16 +801,11 @@ mod tests {
             .expect("create FileStore");
         let registry = Registry::new(Arc::new(store));
 
-        let cred = CredentialEntry {
-            plugin: "exa".to_string(),
-            field: "api_key".to_string(),
-        };
-
-        // Add credential should succeed
+        // Set credential with actual value
         registry
-            .add_credential(&cred)
+            .set_credential("exa", "api_key", "test-value")
             .await
-            .expect("add should succeed");
+            .expect("set should succeed");
 
         // Verify credential is in registry
         let creds = registry
@@ -722,31 +828,19 @@ mod tests {
             .expect("create FileStore");
         let registry = Registry::new(Arc::new(store));
 
-        // Add two credentials
-        let cred1 = CredentialEntry {
-            plugin: "exa".to_string(),
-            field: "api_key".to_string(),
-        };
-        let cred2 = CredentialEntry {
-            plugin: "exa".to_string(),
-            field: "secret".to_string(),
-        };
-        let cred3 = CredentialEntry {
-            plugin: "github".to_string(),
-            field: "token".to_string(),
-        };
+        // Set credentials with actual values
         registry
-            .add_credential(&cred1)
+            .set_credential("exa", "api_key", "key-value")
             .await
-            .expect("add should succeed");
+            .expect("set should succeed");
         registry
-            .add_credential(&cred2)
+            .set_credential("exa", "secret", "secret-value")
             .await
-            .expect("add should succeed");
+            .expect("set should succeed");
         registry
-            .add_credential(&cred3)
+            .set_credential("github", "token", "token-value")
             .await
-            .expect("add should succeed");
+            .expect("set should succeed");
 
         // Remove exa api_key credential
         registry
@@ -785,23 +879,15 @@ mod tests {
             .expect("list should succeed");
         assert_eq!(creds.len(), 0);
 
-        // Add credentials
-        let cred1 = CredentialEntry {
-            plugin: "exa".to_string(),
-            field: "api_key".to_string(),
-        };
-        let cred2 = CredentialEntry {
-            plugin: "github".to_string(),
-            field: "token".to_string(),
-        };
+        // Set credentials with actual values
         registry
-            .add_credential(&cred1)
+            .set_credential("exa", "api_key", "key-value")
             .await
-            .expect("add should succeed");
+            .expect("set should succeed");
         registry
-            .add_credential(&cred2)
+            .set_credential("github", "token", "token-value")
             .await
-            .expect("add should succeed");
+            .expect("set should succeed");
 
         // List should return both
         let creds = registry
@@ -868,5 +954,187 @@ mod tests {
         // Verify token is gone
         let tokens = registry.list_tokens().await.expect("list should succeed");
         assert_eq!(tokens.len(), 0);
+    }
+
+    // RED: Test for new TokenMetadata struct (token_value becomes hash key)
+    #[test]
+    fn test_token_metadata_struct() {
+        let metadata = TokenMetadata {
+            name: "test-agent".to_string(),
+            created_at: Utc::now(),
+        };
+
+        assert_eq!(metadata.name, "test-agent");
+    }
+
+    // RED: Test for HashMap-based tokens in RegistryData
+    #[test]
+    fn test_registry_data_with_hashmap_tokens() {
+        use std::collections::HashMap;
+
+        let mut tokens = HashMap::new();
+        tokens.insert(
+            "acp_abc123".to_string(),
+            TokenMetadata {
+                name: "test-token".to_string(),
+                created_at: DateTime::parse_from_rfc3339("2024-01-15T10:30:00Z")
+                    .unwrap()
+                    .with_timezone(&Utc),
+            }
+        );
+
+        let data = RegistryData {
+            version: 1,
+            tokens,
+            plugins: vec![],
+            credentials: HashMap::new(),
+            password_hash: None,
+        };
+
+        // Serialize to JSON
+        let json = serde_json::to_string(&data).expect("serialization should succeed");
+        assert!(json.contains("\"acp_abc123\""));
+        assert!(json.contains("\"test-token\""));
+
+        // Deserialize back
+        let parsed: RegistryData =
+            serde_json::from_str(&json).expect("deserialization should succeed");
+        assert_eq!(parsed.version, 1);
+        assert_eq!(parsed.tokens.len(), 1);
+        assert_eq!(parsed.tokens.get("acp_abc123").unwrap().name, "test-token");
+    }
+
+    // RED: Test for HashMap-based credentials in RegistryData
+    #[test]
+    fn test_registry_data_with_hashmap_credentials() {
+        use std::collections::HashMap;
+
+        let mut credentials = HashMap::new();
+        let mut exa_creds = HashMap::new();
+        exa_creds.insert("api_key".to_string(), "secret-value".to_string());
+        credentials.insert("exa".to_string(), exa_creds);
+
+        let data = RegistryData {
+            version: 1,
+            tokens: HashMap::new(),
+            plugins: vec![],
+            credentials,
+            password_hash: None,
+        };
+
+        // Serialize to JSON
+        let json = serde_json::to_string(&data).expect("serialization should succeed");
+        assert!(json.contains("\"exa\""));
+        assert!(json.contains("\"api_key\""));
+        assert!(json.contains("\"secret-value\""));
+
+        // Deserialize back
+        let parsed: RegistryData =
+            serde_json::from_str(&json).expect("deserialization should succeed");
+        assert_eq!(parsed.version, 1);
+        assert_eq!(parsed.credentials.len(), 1);
+        assert_eq!(parsed.credentials.get("exa").unwrap().get("api_key").unwrap(), "secret-value");
+    }
+
+    // RED: Test for get_token O(1) lookup
+    #[tokio::test]
+    async fn test_get_token_lookup() {
+        use crate::storage::FileStore;
+        use std::sync::Arc;
+
+        let temp_dir = tempfile::tempdir().expect("create temp dir");
+        let store = FileStore::new(temp_dir.path().to_path_buf())
+            .await
+            .expect("create FileStore");
+        let registry = Registry::new(Arc::new(store));
+
+        // Add a token
+        let metadata = TokenMetadata {
+            name: "test-agent".to_string(),
+            created_at: Utc::now(),
+        };
+        registry.add_token_with_metadata("acp_abc123", &metadata)
+            .await
+            .expect("add should succeed");
+
+        // Get token by value - should be O(1) lookup
+        let result = registry.get_token("acp_abc123")
+            .await
+            .expect("get should succeed");
+        assert!(result.is_some());
+        assert_eq!(result.unwrap().name, "test-agent");
+
+        // Get non-existent token
+        let result = registry.get_token("acp_nonexistent")
+            .await
+            .expect("get should succeed");
+        assert!(result.is_none());
+    }
+
+    // RED: Test for get_credential lookup
+    #[tokio::test]
+    async fn test_get_credential() {
+        use crate::storage::FileStore;
+        use std::sync::Arc;
+
+        let temp_dir = tempfile::tempdir().expect("create temp dir");
+        let store = FileStore::new(temp_dir.path().to_path_buf())
+            .await
+            .expect("create FileStore");
+        let registry = Registry::new(Arc::new(store));
+
+        // Set a credential
+        registry.set_credential("exa", "api_key", "secret-value")
+            .await
+            .expect("set should succeed");
+
+        // Get credential
+        let result = registry.get_credential("exa", "api_key")
+            .await
+            .expect("get should succeed");
+        assert_eq!(result, Some("secret-value".to_string()));
+
+        // Get non-existent credential
+        let result = registry.get_credential("exa", "nonexistent")
+            .await
+            .expect("get should succeed");
+        assert_eq!(result, None);
+    }
+
+    // RED: Test for get_plugin_credentials (all creds for a plugin)
+    #[tokio::test]
+    async fn test_get_plugin_credentials() {
+        use crate::storage::FileStore;
+        use std::sync::Arc;
+
+        let temp_dir = tempfile::tempdir().expect("create temp dir");
+        let store = FileStore::new(temp_dir.path().to_path_buf())
+            .await
+            .expect("create FileStore");
+        let registry = Registry::new(Arc::new(store));
+
+        // Set multiple credentials for a plugin
+        registry.set_credential("exa", "api_key", "key-value")
+            .await
+            .expect("set should succeed");
+        registry.set_credential("exa", "secret", "secret-value")
+            .await
+            .expect("set should succeed");
+
+        // Get all credentials for the plugin
+        let result = registry.get_plugin_credentials("exa")
+            .await
+            .expect("get should succeed");
+        assert!(result.is_some());
+        let creds = result.unwrap();
+        assert_eq!(creds.len(), 2);
+        assert_eq!(creds.get("api_key").unwrap(), "key-value");
+        assert_eq!(creds.get("secret").unwrap(), "secret-value");
+
+        // Get credentials for non-existent plugin
+        let result = registry.get_plugin_credentials("nonexistent")
+            .await
+            .expect("get should succeed");
+        assert!(result.is_none());
     }
 }

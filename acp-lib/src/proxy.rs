@@ -231,10 +231,9 @@ async fn validate_auth(
                 return Err(AcpError::auth("Invalid authorization scheme, expected Bearer"));
             };
 
-            // Check if token exists in registry and get its details
-            let tokens = registry.list_tokens().await?;
-            if let Some(token_entry) = tokens.iter().find(|t| t.token_value == token_value) {
-                // Construct AgentToken from registry TokenEntry
+            // Check if token exists in registry using O(1) lookup
+            if let Some(metadata) = registry.get_token(&token_value).await? {
+                // Construct AgentToken from registry TokenMetadata
                 let prefix = if token_value.len() >= 12 {
                     token_value[..12].to_string()
                 } else {
@@ -242,10 +241,10 @@ async fn validate_auth(
                 };
                 return Ok(AgentToken {
                     id: token_value.clone(),
-                    name: token_entry.name.clone(),
+                    name: metadata.name,
                     prefix,
                     token: token_value,
-                    created_at: token_entry.created_at,
+                    created_at: metadata.created_at,
                 });
             }
 

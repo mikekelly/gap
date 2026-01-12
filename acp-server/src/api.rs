@@ -584,29 +584,19 @@ async fn create_token(
     State(state): State<ApiState>,
     body: Bytes,
 ) -> Result<Json<TokenResponse>, (StatusCode, String)> {
-    use acp_lib::TokenEntry;
+    use acp_lib::registry::TokenMetadata;
 
     let req: CreateTokenRequest = verify_auth(&state, &body).await?;
 
     // Create a new AgentToken
     let token = AgentToken::new(&req.name);
 
-    // Store token in SecretStore with key: token:{token_value}
-    let store_key = format!("token:{}", token.token);
-    let token_json = serde_json::to_vec(&token)
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to serialize token: {}", e)))?;
-
-    state.store.set(&store_key, &token_json)
-        .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to store token: {}", e)))?;
-
-    // Add token to registry
-    let token_entry = TokenEntry {
-        token_value: token.token.clone(),
+    // Store token metadata directly in registry (no separate storage entry)
+    let metadata = TokenMetadata {
         name: token.name.clone(),
         created_at: token.created_at,
     };
-    state.registry.add_token(&token_entry)
+    state.registry.add_token_with_metadata(&token.token, &metadata)
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to add token to registry: {}", e)))?;
 
@@ -631,28 +621,20 @@ async fn delete_token(
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
     verify_auth::<serde_json::Value>(&state, &body).await?;
 
-    // The id is the token value (based on test usage)
-    // First, check if token exists in registry
-    let tokens = state.registry.list_tokens()
+    // The id is the token value
+    // Check if token exists in registry using O(1) lookup
+    let token = state.registry.get_token(&id)
         .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to list tokens: {}", e)))?;
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to get token: {}", e)))?;
 
-    let token_exists = tokens.iter().any(|t| t.token_value == id);
-
-    if !token_exists {
+    if token.is_none() {
         return Err((StatusCode::NOT_FOUND, format!("Token '{}' not found", id)));
     }
 
-    // Remove from registry
+    // Remove from registry (no separate storage deletion needed)
     state.registry.remove_token(&id)
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to remove token from registry: {}", e)))?;
-
-    // Delete from storage
-    let store_key = format!("token:{}", id);
-    state.store.delete(&store_key)
-        .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to delete token from storage: {}", e)))?;
 
     Ok(Json(serde_json::json!({
         "id": id,
@@ -666,28 +648,12 @@ async fn set_credential(
     Path((plugin, key)): Path<(String, String)>,
     body: Bytes,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
-    use acp_lib::registry::CredentialEntry;
-
     let req: SetCredentialRequest = verify_auth(&state, &body).await?;
 
-    // Store credential in SecretStore
-    let store_key = format!("credential:{}:{}", plugin, key);
-    state.store.set(&store_key, req.value.as_bytes())
+    // Store credential directly in registry (no separate storage entry)
+    state.registry.set_credential(&plugin, &key, &req.value)
         .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to store credential: {}", e)))?;
-
-    // Remove existing credential entry from registry (if it exists) to avoid duplicates
-    // Ignore errors since the credential might not exist yet
-    let _ = state.registry.remove_credential(&plugin, &key).await;
-
-    // Add credential to registry
-    let cred_entry = CredentialEntry {
-        plugin: plugin.clone(),
-        field: key.clone(),
-    };
-    state.registry.add_credential(&cred_entry)
-        .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to update registry: {}", e)))?;
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to set credential: {}", e)))?;
 
     tracing::info!("Setting credential {}:{}", plugin, key);
     Ok(Json(serde_json::json!({
@@ -705,16 +671,10 @@ async fn delete_credential(
 ) -> Result<StatusCode, (StatusCode, String)> {
     verify_auth::<serde_json::Value>(&state, &body).await?;
 
-    // Delete credential from SecretStore
-    let store_key = format!("credential:{}:{}", plugin, key);
-    state.store.delete(&store_key)
-        .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to delete credential: {}", e)))?;
-
-    // Remove credential from registry
+    // Remove from registry (no separate storage deletion needed)
     state.registry.remove_credential(&plugin, &key)
         .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to update registry: {}", e)))?;
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to remove credential from registry: {}", e)))?;
 
     tracing::info!("Deleting credential {}:{}", plugin, key);
     Ok(StatusCode::OK)
@@ -1320,12 +1280,8 @@ mod tests {
         let password_hash = argon2.hash_password(password.as_bytes(), &salt).unwrap().to_string();
         state.set_password_hash(password_hash).await;
 
-        // Write a test credential directly to the shared store
-        let test_key = "credential:test-plugin:api_key";
-        store.set(test_key, b"direct_write_value").await.expect("write to store");
-
-        // Now set a credential via the API
-        let app = create_router(state);
+        // Now set a credential via the API (credentials are stored directly in registry)
+        let app = create_router(state.clone());
         let body = serde_json::json!({
             "password_hash": password,
             "value": "api_write_value"
@@ -1345,13 +1301,15 @@ mod tests {
 
         assert_eq!(response.status(), StatusCode::OK);
 
-        // Verify the credential was written to the SAME store
-        // If the endpoint used create_store(None), it would have written to a different store
-        let stored_value = store.get(test_key).await.expect("read from store");
+        // Verify the credential was written to the registry (which uses the shared store)
+        // Credentials are now stored directly in the registry, not as separate storage entries
+        let credential = state.registry.get_credential("test-plugin", "api_key")
+            .await
+            .expect("read from registry");
         assert_eq!(
-            stored_value,
-            Some(b"api_write_value".to_vec()),
-            "API endpoint should write to the same store that was passed to ApiState"
+            credential,
+            Some("api_write_value".to_string()),
+            "API endpoint should write to the registry using the shared store"
         );
     }
 

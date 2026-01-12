@@ -11,33 +11,21 @@ use crate::storage::SecretStore;
 use crate::types::ACPCredentials;
 use tracing::{debug, warn};
 
-/// Load all credential fields for a plugin from storage using Registry
+/// Load all credential fields for a plugin from Registry
 ///
-/// Uses the Registry to list credential metadata for the plugin,
-/// then loads the actual values from storage.
+/// Credentials are now stored directly in the registry as a nested HashMap.
+/// No separate storage lookups needed.
 async fn load_plugin_credentials<S: SecretStore + ?Sized>(
     plugin_name: &str,
-    store: &S,
+    _store: &S,
     registry: &Registry,
 ) -> Result<ACPCredentials> {
     let mut credentials = ACPCredentials::new();
 
-    // Get credential entries from registry
-    let all_credentials = registry.list_credentials().await?;
-
-    // Filter for this plugin
-    let plugin_credentials: Vec<_> = all_credentials
-        .iter()
-        .filter(|c| c.plugin == plugin_name)
-        .collect();
-
-    // Load each credential value from storage
-    for cred in plugin_credentials {
-        let key = format!("credential:{}:{}", plugin_name, cred.field);
-        if let Some(value_bytes) = store.get(&key).await? {
-            let value = String::from_utf8(value_bytes)
-                .map_err(|e| AcpError::storage(format!("Invalid UTF-8 in credential {}: {}", key, e)))?;
-            credentials.set(&cred.field, &value);
+    // Get credentials directly from registry (they're stored there now)
+    if let Some(plugin_creds) = registry.get_plugin_credentials(plugin_name).await? {
+        for (field, value) in plugin_creds {
+            credentials.set(&field, &value);
         }
     }
 
@@ -127,30 +115,17 @@ mod tests {
         ) as Arc<dyn SecretStore>;
         let registry = Registry::new(Arc::clone(&store));
 
-        // Add credential entries to registry
-        let cred1 = CredentialEntry {
-            plugin: "exa".to_string(),
-            field: "api_key".to_string(),
-        };
-        let cred2 = CredentialEntry {
-            plugin: "exa".to_string(),
-            field: "secret".to_string(),
-        };
-        registry.add_credential(&cred1).await.expect("add credential");
-        registry.add_credential(&cred2).await.expect("add credential");
-
-        // Store actual credential values
-        store
-            .set("credential:exa:api_key", b"test-api-key-value")
+        // Set credentials with actual values directly in registry
+        registry
+            .set_credential("exa", "api_key", "test-api-key-value")
             .await
-            .expect("store credential value");
-        store
-            .set("credential:exa:secret", b"test-secret-value")
+            .expect("set credential");
+        registry
+            .set_credential("exa", "secret", "test-secret-value")
             .await
-            .expect("store credential value");
+            .expect("set credential");
 
         // Load credentials using the new Registry-based approach
-        // This will fail until we implement it
         let credentials = load_plugin_credentials("exa", &*store, &registry)
             .await
             .expect("load credentials");

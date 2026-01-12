@@ -261,14 +261,10 @@ async fn test_complete_proxy_transform_pipeline() {
         credential_schema: vec!["secret".to_string()],
     }).await.unwrap();
 
-    // Store credentials using the new pattern: credential:{plugin}:{field_name}
-    store.set("credential:test-transform:secret", b"my-secret-value").await.unwrap();
-
-    // Add credential to registry
-    registry.add_credential(&acp_lib::registry::CredentialEntry {
-        plugin: "test-transform".to_string(),
-        field: "secret".to_string(),
-    }).await.unwrap();
+    // Set credentials directly in registry (no separate storage entry needed)
+    registry.set_credential("test-transform", "secret", "my-secret-value")
+        .await
+        .unwrap();
 
     // Simulate an incoming HTTP request (as raw bytes)
     let raw_http = b"GET /api/data HTTP/1.1\r\nHost: api.test.com\r\nUser-Agent: TestAgent/1.0\r\n\r\n";
