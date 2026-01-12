@@ -170,7 +170,7 @@ INSTALL_RESPONSE=$(curl -s -X POST "$ACP_SERVER_URL/plugins/install" \
     -H "Content-Type: application/json" \
     -d "{
         \"password_hash\": \"$(echo -n "$TEST_PASSWORD" | sha512sum | cut -d' ' -f1)\",
-        \"url\": \"mikekelly/exa-acp\"
+        \"name\": \"mikekelly/exa-acp\"
     }")
 
 if echo "$INSTALL_RESPONSE" | grep -q '"name"'; then
@@ -202,13 +202,13 @@ if echo "$PLUGINS_RESPONSE" | grep -q '"plugins"'; then
         log_fail "Installed plugin does not appear in plugin list"
     fi
 
-    # Verify plugin metadata is present (hosts and credential_schema)
+    # Verify plugin metadata is present (match_patterns and credential_schema)
     PLUGIN_DATA=$(echo "$PLUGINS_RESPONSE" | jq -r ".plugins[] | select(.name == \"$PLUGIN_NAME\")")
-    if echo "$PLUGIN_DATA" | jq -e '.hosts' > /dev/null 2>&1; then
-        HOSTS=$(echo "$PLUGIN_DATA" | jq -r '.hosts | join(", ")')
-        log_pass "Plugin metadata includes hosts: $HOSTS"
+    if echo "$PLUGIN_DATA" | jq -e '.match_patterns' > /dev/null 2>&1; then
+        HOSTS=$(echo "$PLUGIN_DATA" | jq -r '.match_patterns | join(", ")')
+        log_pass "Plugin metadata includes match_patterns: $HOSTS"
     else
-        log_fail "Plugin metadata missing hosts field"
+        log_fail "Plugin metadata missing match_patterns field"
     fi
 
     if echo "$PLUGIN_DATA" | jq -e '.credential_schema' > /dev/null 2>&1; then
