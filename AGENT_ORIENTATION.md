@@ -26,126 +26,34 @@ cargo run --bin acp  # Run CLI
 cargo run --bin acp-server  # Run server
 ```
 
-## Core Types (acp-lib)
-- `ACPRequest` - HTTP request with method, url, headers, body
-- `ACPCredentials` - String key-value map for plugin credentials
-- `ACPPlugin` - Plugin definition with host matching (supports wildcards like `*.s3.amazonaws.com`)
-- `AgentToken` - Bearer token for agent authentication (token field is public for direct access)
-- `Config` - Runtime configuration
-- `AcpError` - Unified error type with context helpers (includes Network and Protocol variants)
-- `PluginRuntime` - Sandboxed Boa JS runtime with ACP.crypto, ACP.util, ACP.log, TextEncoder/TextDecoder, URL/URLSearchParams
-- `SecretStore` - Async trait for secure storage (FileStore, KeychainStore implementations)
-- `FileStore` - File-based storage with 0600 permissions (Linux: runs under dedicated service user for isolation)
-- `KeychainStore` - macOS Keychain integration (conditional compilation)
-- `create_store()` - Factory for platform-appropriate storage
-- `Registry` - Centralized metadata storage for tokens, plugins, and credentials (stored at key "_registry")
-- `RegistryData` - JSON structure containing TokenEntry, PluginEntry, and CredentialEntry lists
-- `TokenEntry`, `PluginEntry`, `CredentialEntry` - Registry metadata types
-- `CertificateAuthority` - TLS CA for dynamic certificate generation (Phase 3)
-- `ProxyServer` - MITM HTTPS proxy with agent authentication and bidirectional streaming (Phase 4)
+## Top 5 Critical Gotchas
 
-## Patterns
-- **Wildcard host matching**: `*.example.com` matches `sub.example.com` but NOT `a.b.example.com` (single-level only)
-- **Builder pattern**: All types use `.with_*()` methods for fluent construction
-- **Error context**: Use `AcpError::storage("msg")` rather than `AcpError::Storage("msg".to_string())`
-- **TLS certificate caching**: Generated certificates cached by hostname with expiry; auto-cleanup on access
-- **Registry pattern**: Centralized metadata storage at key "_registry" solves listing issues on platforms like macOS Keychain. Registry tracks what exists (metadata), while actual values remain at individual keys. Registry.load() returns empty RegistryData if not found (not an error).
+1. **Wildcard matching is single-level only**: `*.s3.amazonaws.com` matches `bucket.s3.amazonaws.com` but rejects both `s3.amazonaws.com` (no subdomain) and `evil.com.s3.amazonaws.com` (multiple levels). This is a security feature.
 
-## TLS Infrastructure (rcgen 0.13)
-- **CA generation**: `CertificateAuthority::generate()` creates self-signed CA valid for 10 years
-- **Dynamic cert signing**: `ca.sign_for_hostname(hostname, validity_opt)` generates certs signed by CA (default 24h validity), returns `(Vec<u8>, Vec<u8>)` for cert and key in DER format
-- **PEM/DER support**: CA exported/imported as PEM or DER; PEM used internally for storage
-- **Certificate caching**: In-memory cache with expiry based on validity period
-- **rcgen limitation**: Cannot reload `Certificate` from PEM/DER - must recreate CA params for signing
-- **rustls integration**: Use `CertificateDer::from(der_bytes)` and `PrivateKeyDer::try_from(der_bytes)` to convert DER bytes for rustls
+2. **PluginRuntime is not Send**: Contains Boa engine with `Rc` types. In async Axum handlers, scope PluginRuntime operations in a block to ensure the runtime is dropped before any `.await` points. Enable `#[axum::debug_handler]` to see detailed Send/Sync errors.
 
-## Proxy Infrastructure (Phase 4)
-- **MITM proxy**: Implements HTTP CONNECT tunnel with dual TLS (agent-side and upstream)
-- **Agent authentication**: Bearer token validation via `Proxy-Authorization` header (returns 407 if invalid)
-- **Dynamic cert generation**: Uses CertificateAuthority to generate host-specific certs on-demand
-- **Upstream TLS**: Uses webpki-roots for system CA trust (TLS_SERVER_ROOTS)
-- **Bidirectional streaming**: tokio::io::copy with tokio::select! for full-duplex proxying
-- **HTTP parsing & transforms**: `http_utils` module parses raw HTTP, `plugin_matcher` finds matching plugins, `proxy_transforms` executes transforms
-- **Transform pipeline**: Parse HTTP → Match host → Load credentials → Execute plugin → Serialize → Forward
-- **Credential storage pattern**: Management API stores credentials as `credential:{plugin}:{field_name}` (e.g., `credential:exa:api_key`). ProxyServer loads ALL fields for a plugin by listing keys with prefix `credential:{plugin}:` and builds an ACPCredentials object.
-- **Token storage pattern**: Tokens stored as `token:{token_value}` → `{name, created_at}` in SecretStore, enabling direct lookup by token value without caching layer
-- **SecretStore sharing**: ProxyServer receives `Arc<dyn SecretStore>` from main.rs (same instance as Management API) to ensure consistent credential access
+3. **KeychainStore.list() limitation**: Returns empty vec due to security-framework API limitations. This is why we use the Registry pattern for metadata tracking. FileStore provides full list() functionality.
 
-## Management API (Phase 6)
-- **Authentication**: Client sends `password_hash` (SHA512 of password) in request body; server verifies Argon2(SHA512(password))
-- **Endpoints**: `/status` (no auth), `/plugins`, `/tokens`, `/credentials/:plugin/:key`, `/activity` (all require auth)
-- **Token management**: Full token value only returned on creation (via `token` field); list endpoint shows prefix only
-- **Token persistence**: Tokens are stored in SecretStore with key `token:{token_value}` → `{name, created_at}` JSON, enabling direct lookup during authentication
-- **State management**: `ApiState` holds server start time, ports, password hash, activity log, and shared SecretStore
-- **Shared storage**: `ApiState` receives `Arc<dyn SecretStore>` from main.rs to ensure all endpoints use the same storage backend (respects --data-dir)
+4. **git2 callbacks are not Send**: `RepoBuilder` with `RemoteCallbacks` closures is not `Send`. In async handlers, scope the entire git clone operation in a block to ensure all non-Send types are dropped before any `.await` points.
 
-## CLI (Phase 7)
-- **Password input**: Uses `rpassword` crate for hidden password input (no echo)
-- **ACP_PASSWORD env var**: Set `ACP_PASSWORD` to bypass interactive password prompt for testing/automation
-- **Password hashing**: Client-side SHA512 hashing via `sha2` crate before sending to API
-- **HTTP client**: Built with `reqwest` 0.12, handles JSON requests/responses
-- **Server URL**: Configurable via `--server` flag (default: http://localhost:9080)
-- **Command structure**: Uses clap derive macros with nested subcommands (e.g., `token create`)
-- **Error handling**: Returns exit code 1 on errors, prints to stderr
+5. **PluginRuntime single-context limitation**: Loading a plugin overwrites the global `plugin` object in the JS context. Only the most recently loaded plugin's transform function can be executed. Plugin metadata is preserved for all loaded plugins.
 
-## Testing (Phase 8)
-- **Integration tests**: Located in `acp-lib/tests/` for end-to-end testing
-  - `integration_test.rs` - Plugin pipeline tests (FileStore → PluginRuntime → Transform)
-  - `e2e_integration_test.rs` - Full system E2E tests (server → API → storage)
-- **E2E test infrastructure**: `TestServer` helper spawns `acp-server` in subprocess with dynamic ports and temp directories
-- **Test plugin**: `plugins/test-api.js` for integration testing (production plugins installed from GitHub)
-- **Plugin testing**: Use `PluginRuntime::load_plugin_from_code()` to load plugins from files for testing (avoids SecretStore dependency)
-- **Test suite**: 120 tests across all workspace crates (117 passing, 3 ignored on macOS)
-- **Test organization**: Unit tests inline with source, integration tests in `tests/` directory
-- **Platform differences**: Some E2E tests ignored on macOS due to Keychain requiring user interaction. Run with `--ignored` for manual testing.
-- **Smoke tests**: Located in `smoke-tests/` directory for installation verification (`test-install.sh`, `test-docker.sh`)
+## Detailed Reference Documentation
 
-## Plugin Management
-- **Plugin installation**: Uses git2 (0.19) to clone GitHub repos instead of HTTP fetch
-- **Installation flow**: `RepoBuilder` with credentials callback → clone → read `plugin.js` → validate → store → cleanup (automatic via tempfile Drop)
-- **git2 credentials**: Must use `RepoBuilder` with `FetchOptions` and credentials callback even for public repos. Direct `Repository::clone()` fails with auth error.
-- **Temp directory cleanup**: `tempfile::tempdir()` automatically cleans up when it goes out of scope (RAII)
-- **Error mapping**: Clone failures return BAD_GATEWAY (502), missing plugin.js returns BAD_REQUEST (400)
-- **Plugin credential schema formats**: Supports two formats:
-  1. Simple: `credentialSchema: ["api_key", "secret"]`
-  2. Rich: `credentialSchema: { fields: [{name: "apiKey", label: "API Key", type: "password", required: true}, ...] }`
-  The runtime extracts just the `name` field from the rich format for internal use.
+For comprehensive details, see:
+- **[docs/reference/types.md](docs/reference/types.md)** - All core types, their purposes, and usage patterns
+- **[docs/reference/architecture.md](docs/reference/architecture.md)** - System design, patterns, TLS infrastructure, proxy pipeline, Management API, CLI, plugin management, installation
+- **[docs/reference/gotchas.md](docs/reference/gotchas.md)** - Complete list of 30+ implementation caveats with explanations
 
-## Installation (Phase 8.3)
-- **install.sh**: Cross-platform installation script (macOS/Linux, x86_64/aarch64) with build-from-source and binary download support
-- **Dockerfile**: Multi-stage build with dependency caching layer using `rustlang/rust:nightly-slim` (required for edition2024 support); runtime uses non-root user `acp` on Debian Bookworm with curl installed for healthcheck
-- **Dockerfile.test-runner**: Test runner image with curl, jq, and coreutils for integration testing
-- **docker-compose.yml**: Complete test environment with ACP server, mock API (httpbin), test-runner service (profile: test), and persistent volumes
-- **smoke-tests/test-docker-integration.sh**: Integration tests covering init, token creation, credential management, and API access
-- **Binaries**: Release binaries at `target/release/acp` and `target/release/acp-server` (5-6MB each)
-- **Default ports**: 9443 (proxy), 9080 (management API), 8080 (mock-api internal)
-- **Data directory**: `/var/lib/acp` in Docker, `~/.config/acp/` or `$XDG_CONFIG_HOME/acp/` on host systems
-- **Health check**: Management API `/status` endpoint used for Docker health checks (requires curl in runtime image)
+## Quick Type Reference
 
-## Gotchas
-- **Wildcard matching is single-level only**: The pattern `*.s3.amazonaws.com` matches `bucket.s3.amazonaws.com` but rejects both `s3.amazonaws.com` (no subdomain) and `evil.com.s3.amazonaws.com` (multiple levels)
-- **Keychain access groups**: Use low-level SecItem* APIs for access group support. High-level `security_framework::passwords` API doesn't support access groups. See `keychain_impl.rs` for proper implementation using CFMutableDictionary and direct SecItem* calls. Access groups require Team ID prefix (e.g., "3R44BTH39W.com.acp.secrets").
-- **Token serialization**: `AgentToken` fully serializes including the `token` field (needed for storage). API responses use `TokenResponse` wrapper to control token exposure - only shown on creation.
-- **Token field access**: `AgentToken.token` is a public field (not a method) - access via `token.token.clone()` not `token.token()`
-- **Boa 0.19 API**: When using Boa engine, must import `JsArgs` trait for `.get_or_undefined()`, use `JsString::from()` for string literals in API calls, import `base64::Engine` trait for `.encode()` method on BASE64_STANDARD
-- **Boa closures with state**: `NativeFunction::from_fn_ptr()` only accepts pure function pointers, not closures that capture variables. To maintain state, use JavaScript globals or context properties instead. Example: Store logs in `__acp_logs` JavaScript array rather than Rust Rc<RefCell<Vec<String>>>
-- **KeychainStore.list() limitation**: Returns empty vec due to security-framework API limitations. FileStore provides full list() functionality.
-- **Storage key encoding**: FileStore uses base64url encoding for filenames to handle colons and slashes in keys safely across filesystems
-- **rcgen 0.13 signing**: To sign certificates, recreate CA `CertificateParams` with same DN/settings, call `self_signed(&ca_key_pair)` to get `Certificate` object, then use that to sign new certs with `params.signed_by(&key_pair, &ca_cert, &ca_key_pair)`
-- **CA returns DER not PEM**: `sign_for_hostname()` returns raw DER bytes `(Vec<u8>, Vec<u8>)` for certificate and key, not PEM format
-- **rustls-native-certs vs webpki-roots**: Use webpki-roots (TLS_SERVER_ROOTS) for cross-platform system CA trust; rustls-native-certs has platform-specific quirks
-- **Axum authentication**: Custom extractors using `FromRequest` with request body are complex in Axum 0.7. Simpler to use helper functions that take `Bytes` parameter and verify authentication manually in each handler.
-- **Argon2 password hashing**: Client sends SHA512(password), server stores Argon2(SHA512(password)). Verification uses `Argon2::default().verify_password()` with client's SHA512 hash against stored Argon2 hash.
-- **PluginRuntime single-context limitation**: Loading a plugin overwrites the global `plugin` object in the JS context. Only the most recently loaded plugin's transform function can be executed. Plugin metadata (name, patterns, schema) is preserved for all loaded plugins.
-- **PluginRuntime loading methods**: Use `load_plugin(name, store)` to load from SecretStore (async), or `load_plugin_from_code(name, code)` to load from string (sync). Both cache the plugin for `execute_transform()`. Using `execute()` + `extract_plugin_metadata()` alone does NOT cache the plugin.
-- **PluginRuntime timeout limitation**: `execute_transform_with_timeout()` cannot interrupt tight infinite loops in JavaScript (Boa limitation). It measures elapsed time after execution completes, so only catches slow operations that eventually finish.
-- **Environment variable test isolation**: Tests modifying environment variables must use a static Mutex to serialize execution and an RAII guard to ensure cleanup, as env vars are process-global and tests run in parallel.
-- **E2E test binary resolution**: Use `std::env::var("CARGO_BIN_EXE_acp-server")` with fallback to workspace-relative path for finding test binaries. The env var is only set when using `cargo test`, not `cargo build`.
-- **E2E test keychain isolation (macOS)**: Tests using server init will trigger Keychain prompts on macOS. Mark with `#[cfg_attr(target_os = "macos", ignore = "reason")]` or set `HOME` env var to temp dir (doesn't fully prevent Keychain access).
-- **portpicker for test isolation**: Use `portpicker` crate to get dynamic ports for test servers, avoiding port conflicts in parallel test execution.
-- **PluginRuntime is not Send**: PluginRuntime contains Boa engine with `Rc` types, making it not `Send`. In async Axum handlers, scope PluginRuntime operations in a block to ensure the runtime is dropped before any `.await` points. Enable `axum = { version = "0.7", features = ["macros"] }` and use `#[axum::debug_handler]` to see detailed Send/Sync errors during development.
-- **git2 callbacks are not Send**: `RepoBuilder` with `RemoteCallbacks` closures is not `Send`. In async handlers, scope the entire git clone operation (callbacks, fetch options, builder) in a block to ensure all non-Send types are dropped before any `.await` points.
-- **SecretStore trait with ?Sized**: When working with trait objects (`&dyn SecretStore`), functions accepting generic `S: SecretStore` parameters need `+ ?Sized` bound to support unsized types. This applies to `parse_and_transform()`, `load_plugin_credentials()`, and `find_matching_plugin()`.
-- **Rust nightly required for Docker builds**: The Dockerfile uses `rustlang/rust:nightly-slim` because `base64ct` 1.8.2+ requires edition2024 support, which is not stabilized in Rust 1.83/1.84. Use nightly for Docker builds.
-- **Docker compose profiles**: The test-runner service uses profile `test`, so it only runs when invoked with `docker compose --profile test up`. This prevents accidental test runs during normal compose up operations.
-- **Docker healthcheck dependencies**: Use `depends_on` with `condition: service_healthy` to ensure test-runner waits for acp-server to be ready before running tests.
+Key types you'll use frequently:
+- `ACPRequest`, `ACPCredentials`, `ACPPlugin` - HTTP and plugin types
+- `AgentToken` - Bearer token (`.token` is a field, not a method)
+- `SecretStore` trait - Storage abstraction (`FileStore`, `KeychainStore`)
+- `PluginRuntime` - Sandboxed Boa JS runtime for plugins
+- `Registry` - Centralized metadata at key `"_registry"`
+- `CertificateAuthority` - TLS CA for dynamic cert generation
+- `ProxyServer` - MITM HTTPS proxy with agent auth
+
+See [docs/reference/types.md](docs/reference/types.md) for full details.
