@@ -193,17 +193,104 @@ impl CertificateAuthority {
         Ok((cert, key))
     }
 
-    /// Generate a certificate for the hostname without caching
-    fn generate_cert_for_hostname(&self, hostname: &str, validity: Duration) -> Result<(Vec<u8>, Vec<u8>)> {
-        use rcgen::{CertificateParams, DistinguishedName, DnType, KeyPair};
+    /// Generate a server certificate with configurable Subject Alternative Names (SANs)
+    ///
+    /// Returns a tuple of (certificate_der, private_key_der).
+    ///
+    /// SANs should be in the format:
+    /// - `DNS:hostname` for DNS names (e.g., "DNS:localhost", "DNS:example.com")
+    /// - `IP:address` for IP addresses (e.g., "IP:127.0.0.1", "IP:::1")
+    ///
+    /// The certificate will have key usages appropriate for TLS server authentication.
+    pub fn sign_server_cert(&self, sans: &[String]) -> Result<(Vec<u8>, Vec<u8>)> {
+        use rcgen::{CertificateParams, DistinguishedName, DnType, KeyPair, SanType};
         use time::{Duration as TimeDuration, OffsetDateTime};
+
+        // Parse SANs
+        let mut parsed_sans = Vec::new();
+        for san in sans {
+            if let Some(dns_name) = san.strip_prefix("DNS:") {
+                parsed_sans.push(SanType::DnsName(dns_name.to_string().try_into()
+                    .map_err(|e| AcpError::tls(format!("Invalid DNS name '{}': {}", dns_name, e)))?));
+            } else if let Some(ip_str) = san.strip_prefix("IP:") {
+                let ip_addr = ip_str.parse()
+                    .map_err(|e| AcpError::tls(format!("Invalid IP address '{}': {}", ip_str, e)))?;
+                parsed_sans.push(SanType::IpAddress(ip_addr));
+            } else {
+                return Err(AcpError::tls(format!("Invalid SAN format '{}'. Expected 'DNS:hostname' or 'IP:address'", san)));
+            }
+        }
+
+        if parsed_sans.is_empty() {
+            return Err(AcpError::tls("At least one SAN is required"));
+        }
+
+        // Reconstruct CA for signing
+        let (ca_cert, ca_key_pair) = self.reconstruct_ca_for_signing()?;
+
+        // Generate key pair for the new certificate
+        let key_pair = KeyPair::generate()
+            .map_err(|e| AcpError::tls(format!("Failed to generate key pair: {}", e)))?;
+
+        // Set up certificate parameters with SANs
+        let mut params = CertificateParams::default();
+        params.subject_alt_names = parsed_sans;
+
+        // Set distinguished name (use first SAN as CN if available)
+        let mut dn = DistinguishedName::new();
+        if let Some(first_san) = sans.first() {
+            let cn = if let Some(dns) = first_san.strip_prefix("DNS:") {
+                dns
+            } else if let Some(ip) = first_san.strip_prefix("IP:") {
+                ip
+            } else {
+                "ACP Server"
+            };
+            dn.push(DnType::CommonName, cn);
+        }
+        params.distinguished_name = dn;
+
+        // Set validity period (default to 90 days for server certs)
+        let now = OffsetDateTime::now_utc();
+        let validity = TimeDuration::days(90);
+        params.not_before = now - TimeDuration::minutes(5); // Allow 5 minute clock skew
+        params.not_after = now + validity;
+
+        // Set as end-entity certificate (not a CA)
+        params.is_ca = rcgen::IsCa::NoCa;
+
+        // Set key usages for server authentication
+        params.key_usages = vec![
+            rcgen::KeyUsagePurpose::DigitalSignature,
+            rcgen::KeyUsagePurpose::KeyEncipherment,
+        ];
+
+        params.extended_key_usages = vec![
+            rcgen::ExtendedKeyUsagePurpose::ServerAuth,
+        ];
+
+        // Sign the certificate with the CA
+        let cert = params.signed_by(&key_pair, &ca_cert, &ca_key_pair)
+            .map_err(|e| AcpError::tls(format!("Failed to sign certificate: {}", e)))?;
+
+        let cert_der = cert.der().to_vec();
+        let key_der = key_pair.serialize_der().to_vec();
+
+        Ok((cert_der, key_der))
+    }
+
+    /// Reconstruct the CA certificate and key pair for signing operations
+    ///
+    /// This is a workaround for rcgen 0.13 not supporting loading certs from PEM/DER.
+    /// We reconstruct the CA from its parameters so it can be used for signing.
+    fn reconstruct_ca_for_signing(&self) -> Result<(rcgen::Certificate, rcgen::KeyPair)> {
+        use rcgen::{CertificateParams, DistinguishedName, DnType, KeyPair};
 
         // Parse the CA key pair from PEM
         let ca_key_pair = KeyPair::from_pem(&self.ca_key_pem)
             .map_err(|e| AcpError::tls(format!("Failed to parse CA private key: {}", e)))?;
 
-        // Recreate the CA certificate params to use for signing
-        // This is a workaround for rcgen 0.13 not supporting loading certs from PEM/DER
+        // Recreate the CA certificate params
         let mut ca_params = CertificateParams::default();
         let mut ca_dn = DistinguishedName::new();
         ca_dn.push(DnType::CommonName, "ACP Certificate Authority");
@@ -217,6 +304,17 @@ impl CertificateAuthority {
 
         let ca_cert = ca_params.self_signed(&ca_key_pair)
             .map_err(|e| AcpError::tls(format!("Failed to reconstruct CA certificate: {}", e)))?;
+
+        Ok((ca_cert, ca_key_pair))
+    }
+
+    /// Generate a certificate for the hostname without caching
+    fn generate_cert_for_hostname(&self, hostname: &str, validity: Duration) -> Result<(Vec<u8>, Vec<u8>)> {
+        use rcgen::{CertificateParams, DistinguishedName, DnType, KeyPair};
+        use time::{Duration as TimeDuration, OffsetDateTime};
+
+        // Reconstruct CA for signing
+        let (ca_cert, ca_key_pair) = self.reconstruct_ca_for_signing()?;
 
         // Generate key pair for the new certificate
         let key_pair = KeyPair::generate()
@@ -541,6 +639,72 @@ mod tests {
 
         // Should be able to clear cache even when empty
         assert!(ca.clear_cache().is_ok());
+    }
+
+    #[test]
+    fn test_sign_server_cert_dns_only() {
+        // Generate a CA
+        let ca = CertificateAuthority::generate().unwrap();
+
+        // Sign a server certificate with DNS SANs only
+        let sans = vec![
+            "DNS:localhost".to_string(),
+            "DNS:example.com".to_string(),
+            "DNS:*.example.com".to_string(),
+        ];
+        let (cert_der, key_der) = ca.sign_server_cert(&sans).unwrap();
+
+        // Certificate and key should be non-empty
+        assert!(!cert_der.is_empty());
+        assert!(!key_der.is_empty());
+
+        // The certificate should be different from the CA certificate
+        let ca_cert_der = ca.ca_cert_der();
+        assert_ne!(cert_der, ca_cert_der);
+    }
+
+    #[test]
+    fn test_sign_server_cert_ip_only() {
+        // Generate a CA
+        let ca = CertificateAuthority::generate().unwrap();
+
+        // Sign a server certificate with IP SANs only
+        let sans = vec![
+            "IP:127.0.0.1".to_string(),
+            "IP:::1".to_string(),
+        ];
+        let (cert_der, key_der) = ca.sign_server_cert(&sans).unwrap();
+
+        // Certificate and key should be non-empty
+        assert!(!cert_der.is_empty());
+        assert!(!key_der.is_empty());
+
+        // The certificate should be different from the CA certificate
+        let ca_cert_der = ca.ca_cert_der();
+        assert_ne!(cert_der, ca_cert_der);
+    }
+
+    #[test]
+    fn test_sign_server_cert_mixed_sans() {
+        // Generate a CA
+        let ca = CertificateAuthority::generate().unwrap();
+
+        // Sign a server certificate with mixed DNS and IP SANs
+        let sans = vec![
+            "DNS:localhost".to_string(),
+            "IP:127.0.0.1".to_string(),
+            "IP:::1".to_string(),
+            "DNS:example.com".to_string(),
+        ];
+        let (cert_der, key_der) = ca.sign_server_cert(&sans).unwrap();
+
+        // Certificate and key should be non-empty
+        assert!(!cert_der.is_empty());
+        assert!(!key_der.is_empty());
+
+        // The certificate should be different from the CA certificate
+        let ca_cert_der = ca.ca_cert_der();
+        assert_ne!(cert_der, ca_cert_der);
     }
 }
 
