@@ -1,7 +1,6 @@
 //! Credential management commands
 
 use crate::auth::{hash_password, read_password, read_secret};
-use crate::client::ApiClient;
 use anyhow::Result;
 use serde_json::json;
 
@@ -22,7 +21,7 @@ pub async fn set(server_url: &str, key: &str) -> Result<()> {
     // Get credential value (hidden input)
     let credential_value = read_secret(&format!("Value for {}:{}: ", plugin, credential_key))?;
 
-    let client = ApiClient::new(server_url);
+    let client = crate::create_api_client(server_url)?;
 
     // URL-encode plugin name since it may contain slashes (e.g., "mikekelly/exa-acp")
     let encoded_plugin = urlencoding::encode(plugin);

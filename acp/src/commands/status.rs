@@ -1,10 +1,9 @@
 //! Status command implementation
 
-use crate::client::ApiClient;
 use anyhow::Result;
 
 pub async fn run(server_url: &str) -> Result<()> {
-    let client = ApiClient::new(server_url);
+    let client = crate::create_api_client(server_url)?;
     let status: crate::client::StatusResponse = client.get("/status").await?;
 
     println!("ACP Server Status");

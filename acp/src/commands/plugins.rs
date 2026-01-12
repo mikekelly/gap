@@ -1,7 +1,6 @@
 //! Plugin management commands
 
 use crate::auth::{hash_password, read_password};
-use crate::client::ApiClient;
 use anyhow::Result;
 use serde_json::json;
 
@@ -9,7 +8,7 @@ pub async fn list(server_url: &str) -> Result<()> {
     let password = read_password("Password: ")?;
     let password_hash = hash_password(&password);
 
-    let client = ApiClient::new(server_url);
+    let client = crate::create_api_client(server_url)?;
     let response: crate::client::PluginsResponse =
         client.post_auth("/plugins", &password_hash, json!({})).await?;
 
@@ -33,7 +32,7 @@ pub async fn install(server_url: &str, name: &str) -> Result<()> {
     let password = read_password("Password: ")?;
     let password_hash = hash_password(&password);
 
-    let client = ApiClient::new(server_url);
+    let client = crate::create_api_client(server_url)?;
 
     let body = json!({
         "name": name
@@ -59,7 +58,7 @@ pub async fn uninstall(server_url: &str, name: &str) -> Result<()> {
     let password = read_password("Password: ")?;
     let password_hash = hash_password(&password);
 
-    let client = ApiClient::new(server_url);
+    let client = crate::create_api_client(server_url)?;
 
     // URL-encode the plugin name (handles owner/repo with /)
     let encoded_name = urlencoding::encode(name);
@@ -80,7 +79,7 @@ pub async fn update(server_url: &str, name: &str) -> Result<()> {
     let password = read_password("Password: ")?;
     let password_hash = hash_password(&password);
 
-    let client = ApiClient::new(server_url);
+    let client = crate::create_api_client(server_url)?;
 
     // URL-encode the plugin name (handles owner/repo with /)
     let encoded_name = urlencoding::encode(name);

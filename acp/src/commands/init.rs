@@ -14,7 +14,27 @@ pub async fn run(server_url: &str, ca_path: Option<&str>, management_sans: Optio
     let password_hash = hash_password(&password);
 
     // Call init endpoint
-    let client = ApiClient::new(server_url);
+    // For init, we use the basic client without CA verification since the CA doesn't exist yet
+    // If the server URL is HTTPS, we'll use a client that accepts any certificate
+    let client = if server_url.starts_with("https://") {
+        eprintln!("Note: Using HTTPS for init. The server certificate will not be verified during initialization.");
+        eprintln!("After init completes, the CA certificate will be saved and used for all future connections.");
+        eprintln!();
+
+        // Create a client that accepts any certificate for init
+        // This is acceptable because:
+        // 1. Init is interactive and the user can verify the CA cert afterward
+        // 2. The CA cert is downloaded during init and saved locally
+        // 3. All subsequent commands will verify against this CA cert
+        let client = reqwest::Client::builder()
+            .danger_accept_invalid_certs(true)
+            .build()
+            .map_err(|e| anyhow::anyhow!("Failed to create HTTP client: {}", e))?;
+
+        ApiClient::from_reqwest_client(server_url, client)
+    } else {
+        ApiClient::new(server_url)
+    };
 
     // Parse management SANs if provided
     let management_sans_vec = management_sans.map(|s| {

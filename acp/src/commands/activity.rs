@@ -1,7 +1,6 @@
 //! Activity log commands
 
 use crate::auth::{hash_password, read_password};
-use crate::client::ApiClient;
 use anyhow::Result;
 use serde_json::json;
 
@@ -9,7 +8,7 @@ pub async fn run(server_url: &str, follow: bool) -> Result<()> {
     let password = read_password("Password: ")?;
     let password_hash = hash_password(&password);
 
-    let client = ApiClient::new(server_url);
+    let client = crate::create_api_client(server_url)?;
 
     if follow {
         // TODO: Implement SSE streaming for --follow

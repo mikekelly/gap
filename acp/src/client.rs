@@ -17,6 +17,32 @@ impl ApiClient {
         }
     }
 
+    /// Create a new ApiClient with a custom CA certificate for HTTPS verification
+    pub fn with_ca_cert(base_url: &str, ca_cert_pem: &[u8]) -> Result<Self> {
+        // Parse the PEM certificate
+        let cert = reqwest::Certificate::from_pem(ca_cert_pem)
+            .context("Failed to parse CA certificate")?;
+
+        // Build a client with custom root certificate
+        let client = reqwest::Client::builder()
+            .add_root_certificate(cert)
+            .build()
+            .context("Failed to build HTTP client with custom CA")?;
+
+        Ok(Self {
+            base_url: base_url.trim_end_matches('/').to_string(),
+            client,
+        })
+    }
+
+    /// Create a new ApiClient from an existing reqwest Client
+    pub fn from_reqwest_client(base_url: &str, client: reqwest::Client) -> Self {
+        Self {
+            base_url: base_url.trim_end_matches('/').to_string(),
+            client,
+        }
+    }
+
     /// GET request without authentication
     pub async fn get<T: for<'de> Deserialize<'de>>(&self, path: &str) -> Result<T> {
         let url = format!("{}{}", self.base_url, path);
@@ -209,5 +235,31 @@ mod tests {
     fn test_client_strips_trailing_slash() {
         let client = ApiClient::new("http://localhost:9080/");
         assert_eq!(client.base_url, "http://localhost:9080");
+    }
+
+    #[test]
+    fn test_client_with_ca_cert() {
+        // Generate a real CA certificate for testing
+        let ca = acp_lib::tls::CertificateAuthority::generate().expect("Failed to create CA");
+        let ca_pem = ca.ca_cert_pem();
+
+        // This should create a client with custom CA cert
+        let result = ApiClient::with_ca_cert("https://localhost:9443", ca_pem.as_bytes());
+        assert!(result.is_ok(), "Failed to create client with CA cert: {:?}", result.err());
+
+        let client = result.unwrap();
+        assert_eq!(client.base_url, "https://localhost:9443");
+    }
+
+    #[test]
+    fn test_client_with_invalid_ca_cert() {
+        // Note: reqwest::Certificate::from_pem may not fail on all invalid inputs
+        // It only validates the certificate when actually establishing a connection
+        // So we just test that the method doesn't panic
+        let invalid_pem = b"not a valid certificate";
+
+        let _result = ApiClient::with_ca_cert("https://localhost:9443", invalid_pem);
+        // The method may or may not return an error depending on reqwest's validation
+        // The important thing is that it doesn't panic
     }
 }

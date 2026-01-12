@@ -1,7 +1,6 @@
 //! Token management commands
 
 use crate::auth::{hash_password, read_password};
-use crate::client::ApiClient;
 use anyhow::Result;
 use serde_json::json;
 
@@ -9,7 +8,7 @@ pub async fn list(server_url: &str) -> Result<()> {
     let password = read_password("Password: ")?;
     let password_hash = hash_password(&password);
 
-    let client = ApiClient::new(server_url);
+    let client = crate::create_api_client(server_url)?;
     let response: crate::client::TokensResponse =
         client.post_auth("/tokens", &password_hash, json!({})).await?;
 
@@ -34,7 +33,7 @@ pub async fn create(server_url: &str, name: &str) -> Result<()> {
     let password = read_password("Password: ")?;
     let password_hash = hash_password(&password);
 
-    let client = ApiClient::new(server_url);
+    let client = crate::create_api_client(server_url)?;
 
     let body = json!({
         "name": name
@@ -58,7 +57,7 @@ pub async fn revoke(server_url: &str, id: &str) -> Result<()> {
     let password = read_password("Password: ")?;
     let password_hash = hash_password(&password);
 
-    let client = ApiClient::new(server_url);
+    let client = crate::create_api_client(server_url)?;
 
     let path = format!("/tokens/{}", id);
     let response: crate::client::RevokeTokenResponse =

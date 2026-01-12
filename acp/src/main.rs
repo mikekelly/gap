@@ -15,8 +15,8 @@ mod commands;
 #[command(name = "acp")]
 #[command(author, version, about = "Agent Credential Proxy CLI", long_about = None)]
 struct Cli {
-    /// Server URL (default: http://localhost:9080, can be set via SERVER env var)
-    #[arg(long, default_value = "http://localhost:9080")]
+    /// Server URL (default: https://localhost:9443, can be set via SERVER env var)
+    #[arg(long, default_value = "https://localhost:9443")]
     server: String,
 
     #[command(subcommand)]
@@ -101,6 +101,39 @@ enum TokenCommands {
         /// Token ID
         id: String,
     },
+}
+
+pub fn get_default_ca_path() -> std::path::PathBuf {
+    let home = std::env::var("HOME")
+        .or_else(|_| std::env::var("USERPROFILE"))
+        .expect("Cannot determine home directory");
+    std::path::PathBuf::from(home).join(".config").join("acp").join("ca.crt")
+}
+
+pub fn create_api_client(server_url: &str) -> anyhow::Result<client::ApiClient> {
+    // If using HTTPS, try to load the CA cert
+    if server_url.starts_with("https://") {
+        let ca_path = get_default_ca_path();
+
+        // For init command, the CA doesn't exist yet, so we'll handle that specially
+        // in the init command itself. For all other commands, we require the CA cert.
+        if ca_path.exists() {
+            let ca_pem = std::fs::read(&ca_path)
+                .map_err(|e| anyhow::anyhow!("Failed to read CA certificate from {}: {}", ca_path.display(), e))?;
+
+            client::ApiClient::with_ca_cert(server_url, &ca_pem)
+                .map_err(|e| anyhow::anyhow!("Failed to create HTTPS client: {}. Ensure the CA certificate at {} is valid.", e, ca_path.display()))
+        } else {
+            // CA cert doesn't exist - likely need to run `acp init` first
+            Err(anyhow::anyhow!(
+                "CA certificate not found at {}. Please run `acp init` first to initialize the server and download the CA certificate.",
+                ca_path.display()
+            ))
+        }
+    } else {
+        // HTTP - use default client (for backwards compatibility during transition)
+        Ok(client::ApiClient::new(server_url))
+    }
 }
 
 #[tokio::main]
@@ -241,7 +274,7 @@ mod tests {
     #[test]
     fn test_cli_server_default() {
         let cli = Cli::parse_from(["acp", "status"]);
-        assert_eq!(cli.server, "http://localhost:9080");
+        assert_eq!(cli.server, "https://localhost:9443");
     }
 
     #[test]
