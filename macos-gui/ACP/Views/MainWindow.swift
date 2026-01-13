@@ -76,7 +76,7 @@ struct PluginsView: View {
                     .fontWeight(.semibold)
 
                 HStack {
-                    TextField("owner/repo (e.g., mikekelly/exa-ncp)", text: $newPluginRepo)
+                    TextField("owner/repo (e.g., mikekelly/exa-acp)", text: $newPluginRepo)
                         .textFieldStyle(.roundedBorder)
                         .frame(maxWidth: 300)
 

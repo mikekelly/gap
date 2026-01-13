@@ -95,7 +95,7 @@ class ACPClient {
     /// - Throws: ACPError if the request fails or authentication fails
     func installPlugin(repo: String, passwordHash: String) async throws -> PluginInstallResponse {
         return try await post("/plugins/install", body: [
-            "repo": repo,
+            "name": repo,
             "password_hash": passwordHash
         ])
     }

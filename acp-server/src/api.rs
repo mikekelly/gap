@@ -520,7 +520,7 @@ async fn install_plugin(
 ) -> std::result::Result<Json<InstallResponse>, (StatusCode, String)> {
     let req: InstallRequest = verify_auth(&state, &body).await?;
 
-    // Parse GitHub owner/repo from name (e.g., "mikekelly/exa-ncp")
+    // Parse GitHub owner/repo from name (e.g., "mikekelly/exa-acp")
     let plugin_name = parse_plugin_name(&req.name)?;
 
     // Check if plugin already exists
@@ -1328,7 +1328,7 @@ mod tests {
         // Using a test repo that should have plugin.js
         let body = serde_json::json!({
             "password_hash": password,
-            "name": "mikekelly/exa-ncp"  // Real repo with plugin.js
+            "name": "mikekelly/exa-acp"  // Real repo with plugin.js
         });
 
         let response = app
@@ -1378,7 +1378,7 @@ mod tests {
         // Using the same test repo that should have plugin.js
         let body = serde_json::json!({
             "password_hash": password,
-            "name": "mikekelly/exa-ncp"  // Real repo with plugin.js
+            "name": "mikekelly/exa-acp"  // Real repo with plugin.js
         });
 
         let response = app
@@ -1400,7 +1400,7 @@ mod tests {
 
             // Find the installed plugin
             let installed_plugin = plugins.iter()
-                .find(|p| p.name == "mikekelly/exa-ncp")
+                .find(|p| p.name == "mikekelly/exa-acp")
                 .expect("plugin should be in registry");
 
             // Verify plugin metadata
