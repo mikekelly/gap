@@ -217,8 +217,18 @@ None. All critical paths passing.
 ## Recommendations
 
 1. **Documentation:** Update README to mention `--data-dir` flag for testing/containers
-2. **Password Input:** Consider adding password flag for non-interactive use (CI/scripts)
-3. **Success:** Both critical bugs are FIXED and verified working
+2. **Success:** Both critical bugs are FIXED and verified working
+
+## Testing Notes
+
+**Password in CI/Scripts:** For non-interactive testing, use the `ACP_PASSWORD` environment variable (intentionally undocumented to discourage production use). This avoids passwords appearing in shell history while enabling automation:
+
+```bash
+ACP_PASSWORD=testpass123 cargo run -p acp -- init
+ACP_PASSWORD=testpass123 cargo run -p acp -- new-management-cert --sans "DNS:localhost"
+```
+
+A `--password` flag is intentionally NOT provided to prevent secrets from appearing in shell history and process listings.
 
 ## Reproduction Steps for Future Testing
 
@@ -234,8 +244,8 @@ cargo run -p acp-server -- --api-port 9080 --proxy-port 9081 --data-dir /tmp/acp
 # 3. Wait for server to start (3 seconds)
 sleep 3
 
-# 4. Initialize (requires interactive password input)
-# Use expect script or manual input: testpass123
+# 4. Initialize (use ACP_PASSWORD env var for non-interactive testing)
+ACP_PASSWORD=testpass123 cargo run -p acp -- init
 
 # 5. Verify HTTPS
 openssl s_client -connect localhost:9080 -CAfile ~/.config/acp/ca.crt </dev/null | grep "Verify return"
@@ -245,9 +255,8 @@ openssl s_client -connect localhost:9080 -CAfile ~/.config/acp/ca.crt </dev/null
 cargo run -p acp -- status
 # Expected: Shows version, uptime, ports
 
-# 7. Test rotation
-cargo run -p acp -- new-management-cert --sans "DNS:localhost,IP:127.0.0.1"
-# Provide password when prompted
+# 7. Test rotation (use ACP_PASSWORD env var)
+ACP_PASSWORD=testpass123 cargo run -p acp -- new-management-cert --sans "DNS:localhost,IP:127.0.0.1"
 
 # 8. Verify still works
 cargo run -p acp -- status
