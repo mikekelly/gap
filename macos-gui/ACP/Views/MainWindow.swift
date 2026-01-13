@@ -3,9 +3,8 @@ import SwiftUI
 /// Main application window with tab-based navigation.
 ///
 /// This window provides access to all major features:
-/// - Plugins: View and manage installed plugins
+/// - Plugins: View and manage installed plugins (including credentials)
 /// - Tokens: Create, view, and revoke agent tokens
-/// - Credentials: Set and manage plugin credentials
 /// - Activity: View recent proxy request activity
 ///
 /// The window uses a NavigationSplitView with a sidebar for tab selection
@@ -17,14 +16,12 @@ struct MainWindow: View {
     enum Tab: String, CaseIterable {
         case plugins = "Plugins"
         case tokens = "Tokens"
-        case credentials = "Credentials"
         case activity = "Activity"
 
         var icon: String {
             switch self {
             case .plugins: return "puzzlepiece"
             case .tokens: return "key"
-            case .credentials: return "lock"
             case .activity: return "list.bullet"
             }
         }
@@ -42,8 +39,6 @@ struct MainWindow: View {
                 PluginsView()
             case .tokens:
                 TokensView()
-            case .credentials:
-                CredentialsView()
             case .activity:
                 ActivityView()
             }
@@ -214,9 +209,16 @@ struct PluginsView: View {
 }
 
 struct PluginRow: View {
+    @EnvironmentObject var appState: AppState
     let plugin: Plugin
     let onUpdate: () -> Void
     let onUninstall: () -> Void
+
+    @State private var showingCredentials: Bool = false
+    @State private var credentialValues: [String: String] = [:]
+    @State private var savingCredential: String? = nil
+    @State private var credentialError: String?
+    @State private var credentialSuccess: String?
 
     var body: some View {
         HStack {
@@ -235,14 +237,111 @@ struct PluginRow: View {
 
             Spacer()
 
-            Button("Update", action: onUpdate)
+            if !plugin.credentialSchema.isEmpty {
+                Button(action: { showingCredentials.toggle() }) {
+                    Image(systemName: "key")
+                }
                 .buttonStyle(.bordered)
+                .help("Set credentials")
+                .popover(isPresented: $showingCredentials, arrowEdge: .trailing) {
+                    credentialsPopover
+                }
+            }
 
-            Button("Uninstall", action: onUninstall)
-                .buttonStyle(.bordered)
-                .tint(.red)
+            Button(action: onUpdate) {
+                Image(systemName: "arrow.clockwise")
+            }
+            .buttonStyle(.bordered)
+            .help("Update plugin")
+
+            Button(action: onUninstall) {
+                Image(systemName: "trash")
+            }
+            .buttonStyle(.bordered)
+            .tint(.red)
+            .help("Uninstall plugin")
         }
         .padding(.vertical, 4)
+    }
+
+    private var credentialsPopover: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text("Set Credentials")
+                .font(.headline)
+
+            Text(plugin.name)
+                .font(.caption)
+                .foregroundColor(.secondary)
+
+            Divider()
+
+            ForEach(plugin.credentialSchema, id: \.self) { key in
+                HStack {
+                    Text(key)
+                        .frame(width: 100, alignment: .trailing)
+
+                    SecureField("Enter value", text: binding(for: key))
+                        .textFieldStyle(.roundedBorder)
+                        .frame(width: 180)
+
+                    Button(action: { saveCredential(key: key) }) {
+                        if savingCredential == key {
+                            ProgressView()
+                                .scaleEffect(0.6)
+                        } else {
+                            Text("Set")
+                        }
+                    }
+                    .disabled(credentialValues[key]?.isEmpty ?? true || savingCredential != nil)
+                    .frame(width: 50)
+                }
+            }
+
+            if let error = credentialError {
+                Text(error)
+                    .foregroundColor(.red)
+                    .font(.caption)
+            }
+
+            if let success = credentialSuccess {
+                Text(success)
+                    .foregroundColor(.green)
+                    .font(.caption)
+            }
+        }
+        .padding()
+        .frame(width: 400)
+    }
+
+    private func binding(for key: String) -> Binding<String> {
+        Binding(
+            get: { credentialValues[key] ?? "" },
+            set: { credentialValues[key] = $0 }
+        )
+    }
+
+    private func saveCredential(key: String) {
+        guard let value = credentialValues[key], !value.isEmpty else { return }
+        savingCredential = key
+        credentialError = nil
+        credentialSuccess = nil
+
+        Task {
+            do {
+                guard let hash = appState.passwordHash else { return }
+                _ = try await appState.client.setCredential(
+                    plugin: plugin.name,
+                    key: key,
+                    value: value,
+                    passwordHash: hash
+                )
+                credentialSuccess = "\(key) saved"
+                credentialValues[key] = ""  // Clear after success
+            } catch {
+                credentialError = error.localizedDescription
+            }
+            savingCredential = nil
+        }
     }
 }
 
@@ -425,215 +524,6 @@ struct TokenRow: View {
             return String(isoString[..<range.lowerBound])
         }
         return isoString
-    }
-}
-
-/// View for managing plugin credentials.
-///
-/// Credentials are write-only for security. This view allows setting and deleting
-/// credential values, but never displays them. The view shows which credentials
-/// each plugin requires via its credentialSchema.
-struct CredentialsView: View {
-    @EnvironmentObject var appState: AppState
-    @State private var selectedPlugin: String = ""
-    @State private var selectedKey: String = ""
-    @State private var credentialValue: String = ""
-    @State private var isSubmitting: Bool = false
-    @State private var successMessage: String?
-    @State private var errorMessage: String?
-
-    private var selectedPluginObj: Plugin? {
-        appState.plugins.first { $0.name == selectedPlugin }
-    }
-
-    var body: some View {
-        VStack(spacing: 0) {
-            // Header
-            VStack(alignment: .leading, spacing: 12) {
-                Text("Credential Management")
-                    .font(.title2)
-                    .fontWeight(.semibold)
-
-                Text("Credentials are write-only for security. You can set or delete them, but not view their values.")
-                    .font(.caption)
-                    .foregroundColor(.secondary)
-            }
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .padding()
-
-            Divider()
-
-            // Set credential form
-            GroupBox("Set Credential") {
-                VStack(alignment: .leading, spacing: 16) {
-                    // Plugin picker
-                    HStack {
-                        Text("Plugin:")
-                            .frame(width: 80, alignment: .trailing)
-                        Picker("", selection: $selectedPlugin) {
-                            Text("Select a plugin...").tag("")
-                            ForEach(appState.plugins) { plugin in
-                                Text(plugin.name).tag(plugin.name)
-                            }
-                        }
-                        .frame(width: 250)
-                        .onChange(of: selectedPlugin) { _ in
-                            selectedKey = ""  // Reset key when plugin changes
-                        }
-                    }
-
-                    // Credential key picker
-                    HStack {
-                        Text("Credential:")
-                            .frame(width: 80, alignment: .trailing)
-                        Picker("", selection: $selectedKey) {
-                            Text("Select a credential...").tag("")
-                            if let plugin = selectedPluginObj {
-                                ForEach(plugin.credentialSchema, id: \.self) { key in
-                                    Text(key).tag(key)
-                                }
-                            }
-                        }
-                        .frame(width: 250)
-                        .disabled(selectedPlugin.isEmpty)
-                    }
-
-                    // Value input
-                    HStack {
-                        Text("Value:")
-                            .frame(width: 80, alignment: .trailing)
-                        SecureField("Enter credential value", text: $credentialValue)
-                            .textFieldStyle(.roundedBorder)
-                            .frame(width: 250)
-                    }
-
-                    // Action buttons
-                    HStack {
-                        Spacer()
-                            .frame(width: 80)
-
-                        Button(action: setCredential) {
-                            if isSubmitting {
-                                ProgressView()
-                                    .scaleEffect(0.7)
-                            } else {
-                                Text("Set Credential")
-                            }
-                        }
-                        .disabled(!canSubmit || isSubmitting)
-
-                        Button("Delete Credential", action: deleteCredential)
-                            .disabled(selectedPlugin.isEmpty || selectedKey.isEmpty || isSubmitting)
-                            .foregroundColor(.red)
-                    }
-
-                    if let success = successMessage {
-                        HStack {
-                            Spacer().frame(width: 80)
-                            Text(success)
-                                .foregroundColor(.green)
-                                .font(.caption)
-                        }
-                    }
-
-                    if let error = errorMessage {
-                        HStack {
-                            Spacer().frame(width: 80)
-                            Text(error)
-                                .foregroundColor(.red)
-                                .font(.caption)
-                        }
-                    }
-                }
-                .padding()
-            }
-            .padding()
-
-            Divider()
-
-            // Plugin credential requirements
-            GroupBox("Plugin Credential Requirements") {
-                if appState.plugins.isEmpty {
-                    Text("No plugins installed")
-                        .foregroundColor(.secondary)
-                        .padding()
-                } else {
-                    List(appState.plugins) { plugin in
-                        VStack(alignment: .leading, spacing: 4) {
-                            Text(plugin.name)
-                                .font(.headline)
-                            if plugin.credentialSchema.isEmpty {
-                                Text("No credentials required")
-                                    .font(.caption)
-                                    .foregroundColor(.secondary)
-                            } else {
-                                Text("Required: \(plugin.credentialSchema.joined(separator: ", "))")
-                                    .font(.caption)
-                                    .foregroundColor(.secondary)
-                            }
-                        }
-                        .padding(.vertical, 2)
-                    }
-                }
-            }
-            .padding()
-
-            Spacer()
-        }
-        .task {
-            // Refresh plugins to get credential schemas
-            try? await appState.refreshPlugins()
-        }
-    }
-
-    private var canSubmit: Bool {
-        !selectedPlugin.isEmpty && !selectedKey.isEmpty && !credentialValue.isEmpty
-    }
-
-    private func setCredential() {
-        guard canSubmit else { return }
-        isSubmitting = true
-        errorMessage = nil
-        successMessage = nil
-
-        Task {
-            do {
-                guard let hash = appState.passwordHash else { return }
-                _ = try await appState.client.setCredential(
-                    plugin: selectedPlugin,
-                    key: selectedKey,
-                    value: credentialValue,
-                    passwordHash: hash
-                )
-                successMessage = "Credential '\(selectedKey)' set for \(selectedPlugin)"
-                credentialValue = ""  // Clear the value
-            } catch {
-                errorMessage = error.localizedDescription
-            }
-            isSubmitting = false
-        }
-    }
-
-    private func deleteCredential() {
-        guard !selectedPlugin.isEmpty, !selectedKey.isEmpty else { return }
-        isSubmitting = true
-        errorMessage = nil
-        successMessage = nil
-
-        Task {
-            do {
-                guard let hash = appState.passwordHash else { return }
-                try await appState.client.deleteCredential(
-                    plugin: selectedPlugin,
-                    key: selectedKey,
-                    passwordHash: hash
-                )
-                successMessage = "Credential '\(selectedKey)' deleted from \(selectedPlugin)"
-            } catch {
-                errorMessage = error.localizedDescription
-            }
-            isSubmitting = false
-        }
     }
 }
 
