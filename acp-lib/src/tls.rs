@@ -717,45 +717,120 @@ mod cert_verify_tests {
     fn test_generated_cert_is_valid() {
         use std::fs;
         use std::process::Command;
-        
+
         // Load CA
         let ca_cert = fs::read_to_string("/Users/mike/.config/acp/ca.crt").unwrap();
         let ca_key = fs::read_to_string("/Users/mike/.config/acp/ca.key").unwrap();
-        
+
         let ca = CertificateAuthority::from_pem(&ca_cert, &ca_key).unwrap();
-        
+
         // Generate cert for a test hostname
         let (cert_der, _key_der) = ca.sign_for_hostname("test.example.com", None).unwrap();
-        
+
         // Save cert and convert to PEM
         fs::write("/tmp/test_cert.der", &cert_der).unwrap();
-        
+
         let convert = Command::new("openssl")
             .args(&["x509", "-in", "/tmp/test_cert.der", "-inform", "DER", "-out", "/tmp/test_cert.pem"])
             .output()
             .unwrap();
-        
+
         assert!(convert.status.success(), "Failed to convert to PEM");
-        
+
         // Verify the certificate against the CA
         let verify = Command::new("openssl")
             .args(&["verify", "-CAfile", "/Users/mike/.config/acp/ca.crt", "/tmp/test_cert.pem"])
             .output()
             .unwrap();
-        
+
         let verify_output = String::from_utf8_lossy(&verify.stdout);
         let verify_error = String::from_utf8_lossy(&verify.stderr);
-        
+
         println!("Verify output: {}", verify_output);
         if !verify_error.is_empty() {
             println!("Verify errors: {}", verify_error);
         }
-        
+
         assert!(
             verify_output.contains("OK"),
             "Certificate verification failed!\nOutput: {}\nError: {}",
             verify_output,
             verify_error
+        );
+    }
+
+    #[test]
+    fn test_signed_cert_verifies_against_original_ca() {
+        // This test reproduces the bug: when CA is saved/loaded through PEM,
+        // certs signed afterwards should still verify against the original CA cert
+
+        // Step 1: Generate a CA (mimics server startup)
+        let ca_original = CertificateAuthority::generate().unwrap();
+        let ca_cert_pem = ca_original.ca_cert_pem();
+        let ca_key_pem = ca_original.ca_key_pem();
+
+        // Step 2: Wait a bit to ensure time difference
+        std::thread::sleep(std::time::Duration::from_secs(2));
+
+        // Step 3: Save and reload the CA (mimics persistence)
+        let ca_reloaded = CertificateAuthority::from_pem(&ca_cert_pem, &ca_key_pem).unwrap();
+
+        // Step 4: Sign a server certificate using the RELOADED CA
+        let sans = vec!["DNS:localhost".to_string(), "IP:127.0.0.1".to_string()];
+        let (cert_der, _key_der) = ca_reloaded.sign_server_cert(&sans).unwrap();
+
+        // Step 5: Write CA cert (from original) and signed cert to temp files
+        use std::io::Write;
+        let mut ca_file = tempfile::NamedTempFile::new().unwrap();
+        ca_file.write_all(ca_cert_pem.as_bytes()).unwrap();
+        ca_file.flush().unwrap();
+
+        let mut cert_file = tempfile::NamedTempFile::new().unwrap();
+        let cert_pem = der_to_pem(&cert_der, "CERTIFICATE");
+        cert_file.write_all(cert_pem.as_bytes()).unwrap();
+        cert_file.flush().unwrap();
+
+        // Step 6: Verify the certificate using openssl
+        let output = std::process::Command::new("openssl")
+            .args(&[
+                "verify",
+                "-CAfile", ca_file.path().to_str().unwrap(),
+                cert_file.path().to_str().unwrap()
+            ])
+            .output()
+            .expect("Failed to run openssl verify");
+
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+
+        // Debug: print the cert details
+        if !output.status.success() || !stdout.contains("OK") {
+            eprintln!("Verification failed!");
+            eprintln!("stdout: {}", stdout);
+            eprintln!("stderr: {}", stderr);
+
+            // Show CA cert details
+            let ca_output = std::process::Command::new("openssl")
+                .args(&["x509", "-in", ca_file.path().to_str().unwrap(), "-text", "-noout"])
+                .output()
+                .expect("openssl ca");
+            eprintln!("CA cert:\n{}", String::from_utf8_lossy(&ca_output.stdout));
+
+            // Show signed cert details
+            let cert_output = std::process::Command::new("openssl")
+                .args(&["x509", "-in", cert_file.path().to_str().unwrap(), "-text", "-noout"])
+                .output()
+                .expect("openssl cert");
+            eprintln!("Signed cert:\n{}", String::from_utf8_lossy(&cert_output.stdout));
+        }
+
+        // This assertion will FAIL if the bug exists - the reconstructed CA
+        // creates a different certificate than the original
+        assert!(
+            output.status.success() && stdout.contains("OK"),
+            "Certificate verification failed!\nstdout: {}\nstderr: {}",
+            stdout,
+            stderr
         );
     }
 }

@@ -214,6 +214,8 @@ async fn load_or_generate_mgmt_cert(
     store: &dyn storage::SecretStore,
     ca: &CertificateAuthority,
 ) -> anyhow::Result<()> {
+    use acp_lib::tls::der_to_pem;
+
     const MGMT_CERT_KEY: &str = "mgmt:cert";
     const MGMT_KEY_KEY: &str = "mgmt:key";
 
@@ -234,7 +236,7 @@ async fn load_or_generate_mgmt_cert(
 
             let (cert_der, key_der) = ca.sign_server_cert(&sans)?;
 
-            // Convert DER to PEM format
+            // Convert DER to PEM format using library function
             let cert_pem = der_to_pem(&cert_der, "CERTIFICATE");
             let key_pem = der_to_pem(&key_der, "PRIVATE KEY");
 
@@ -246,58 +248,6 @@ async fn load_or_generate_mgmt_cert(
             Ok(())
         }
     }
-}
-
-/// Convert DER to PEM format with line wrapping
-fn der_to_pem(der: &[u8], label: &str) -> String {
-    use std::fmt::Write;
-
-    const ALPHABET: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-
-    // Base64 encode with line wrapping at 64 characters
-    let mut encoded = String::new();
-    let mut line_buf = String::new();
-
-    let chunks = der.chunks_exact(3);
-    let remainder = chunks.remainder();
-
-    for chunk in chunks {
-        let b1 = chunk[0] as usize;
-        let b2 = chunk[1] as usize;
-        let b3 = chunk[2] as usize;
-
-        line_buf.push(ALPHABET[b1 >> 2] as char);
-        line_buf.push(ALPHABET[((b1 & 0x03) << 4) | (b2 >> 4)] as char);
-        line_buf.push(ALPHABET[((b2 & 0x0f) << 2) | (b3 >> 6)] as char);
-        line_buf.push(ALPHABET[b3 & 0x3f] as char);
-
-        if line_buf.len() >= 64 {
-            let _ = writeln!(encoded, "{}", line_buf);
-            line_buf.clear();
-        }
-    }
-
-    // Handle remainder
-    if !remainder.is_empty() {
-        let b1 = remainder[0] as usize;
-        line_buf.push(ALPHABET[b1 >> 2] as char);
-
-        if remainder.len() == 1 {
-            line_buf.push(ALPHABET[(b1 & 0x03) << 4] as char);
-            line_buf.push_str("==");
-        } else {
-            let b2 = remainder[1] as usize;
-            line_buf.push(ALPHABET[((b1 & 0x03) << 4) | (b2 >> 4)] as char);
-            line_buf.push(ALPHABET[(b2 & 0x0f) << 2] as char);
-            line_buf.push('=');
-        }
-    }
-
-    if !line_buf.is_empty() {
-        let _ = writeln!(encoded, "{}", line_buf);
-    }
-
-    format!("-----BEGIN {}-----\n{}-----END {}-----\n", label, encoded, label)
 }
 
 #[cfg(test)]
