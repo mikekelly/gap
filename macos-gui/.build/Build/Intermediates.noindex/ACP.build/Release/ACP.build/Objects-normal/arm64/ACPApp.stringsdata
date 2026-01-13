@@ -1,0 +1,16 @@
+{
+  "source": "/Users/mike/code/agent-credential-proxy/macos-gui/ACP/ACPApp.swift",
+  "tables": {
+    "Localizable": [
+      {
+        "comment": "",
+        "key": "ACP",
+        "location": {
+          "startingColumn": 16,
+          "startingLine": 15
+        }
+      }
+    ]
+  },
+  "version": 1
+}

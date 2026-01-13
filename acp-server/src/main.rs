@@ -62,6 +62,9 @@ enum Command {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    // Install default crypto provider for rustls (required for TLS operations)
+    let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+
     let args = Args::parse();
 
     // Handle subcommands

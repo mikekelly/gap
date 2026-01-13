@@ -4,7 +4,7 @@ version = 4
 
 [[package]]
 name = "acp"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "acp-lib",
  "anyhow",
@@ -23,7 +23,7 @@ dependencies = [
 
 [[package]]
 name = "acp-lib"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -57,7 +57,7 @@ dependencies = [
 
 [[package]]
 name = "acp-server"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "acp-lib",
  "anyhow",
@@ -69,6 +69,7 @@ dependencies = [
  "dirs",
  "git2",
  "hyper",
+ "rustls",
  "serde",
  "serde_json",
  "serial_test",

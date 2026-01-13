@@ -1,0 +1,368 @@
+{
+  "source": "/Users/mike/code/agent-credential-proxy/macos-gui/ACP/Views/MainWindow.swift",
+  "tables": {
+    "Localizable": [
+      {
+        "comment": "",
+        "key": "No plugins installed",
+        "location": {
+          "startingColumn": 22,
+          "startingLine": 124
+        }
+      },
+      {
+        "comment": "",
+        "key": "Loading plugins...",
+        "location": {
+          "startingColumn": 30,
+          "startingLine": 120
+        }
+      },
+      {
+        "comment": "",
+        "key": "Installed Plugins",
+        "location": {
+          "startingColumn": 22,
+          "startingLine": 74
+        }
+      },
+      {
+        "comment": "",
+        "key": "owner/repo (e.g., mikekelly/exa-ncp)",
+        "location": {
+          "startingColumn": 31,
+          "startingLine": 79
+        }
+      },
+      {
+        "comment": "",
+        "key": "Install",
+        "location": {
+          "startingColumn": 34,
+          "startingLine": 88
+        }
+      },
+      {
+        "comment": "",
+        "key": "Update",
+        "location": {
+          "startingColumn": 20,
+          "startingLine": 226
+        }
+      },
+      {
+        "comment": "",
+        "key": "Uninstall",
+        "location": {
+          "startingColumn": 20,
+          "startingLine": 229
+        }
+      },
+      {
+        "comment": "",
+        "key": "Credentials: %@",
+        "location": {
+          "startingColumn": 26,
+          "startingLine": 218
+        }
+      },
+      {
+        "comment": "",
+        "key": "No tokens created",
+        "location": {
+          "startingColumn": 22,
+          "startingLine": 319
+        }
+      },
+      {
+        "comment": "",
+        "key": "Loading tokens...",
+        "location": {
+          "startingColumn": 30,
+          "startingLine": 315
+        }
+      },
+      {
+        "comment": "",
+        "key": "Agent Tokens",
+        "location": {
+          "startingColumn": 22,
+          "startingLine": 253
+        }
+      },
+      {
+        "comment": "",
+        "key": "Token name (e.g., claude-code)",
+        "location": {
+          "startingColumn": 31,
+          "startingLine": 258
+        }
+      },
+      {
+        "comment": "",
+        "key": "Create",
+        "location": {
+          "startingColumn": 34,
+          "startingLine": 267
+        }
+      },
+      {
+        "comment": "",
+        "key": "Token created:",
+        "location": {
+          "startingColumn": 30,
+          "startingLine": 285
+        }
+      },
+      {
+        "comment": "",
+        "key": "Copy to clipboard",
+        "location": {
+          "startingColumn": 31,
+          "startingLine": 292
+        }
+      },
+      {
+        "comment": "",
+        "key": "Dismiss",
+        "location": {
+          "startingColumn": 32,
+          "startingLine": 293
+        }
+      },
+      {
+        "comment": "",
+        "key": "Revoke",
+        "location": {
+          "startingColumn": 20,
+          "startingLine": 403
+        }
+      },
+      {
+        "comment": "",
+        "key": "Created: %@",
+        "location": {
+          "startingColumn": 26,
+          "startingLine": 395
+        }
+      },
+      {
+        "comment": "",
+        "key": "Set Credential",
+        "location": {
+          "startingColumn": 22,
+          "startingLine": 455
+        }
+      },
+      {
+        "comment": "",
+        "key": "Plugin Credential Requirements",
+        "location": {
+          "startingColumn": 22,
+          "startingLine": 543
+        }
+      },
+      {
+        "comment": "",
+        "key": "Credential Management",
+        "location": {
+          "startingColumn": 22,
+          "startingLine": 441
+        }
+      },
+      {
+        "comment": "",
+        "key": "Credentials are write-only for security. You can set or delete them, but not view their values.",
+        "location": {
+          "startingColumn": 22,
+          "startingLine": 445
+        }
+      },
+      {
+        "comment": "",
+        "key": "Plugin:",
+        "location": {
+          "startingColumn": 30,
+          "startingLine": 459
+        }
+      },
+      {
+        "comment": "",
+        "key": "",
+        "location": {
+          "startingColumn": 32,
+          "startingLine": 461
+        }
+      },
+      {
+        "comment": "",
+        "key": "Select a plugin...",
+        "location": {
+          "startingColumn": 34,
+          "startingLine": 462
+        }
+      },
+      {
+        "comment": "",
+        "key": "Credential:",
+        "location": {
+          "startingColumn": 30,
+          "startingLine": 475
+        }
+      },
+      {
+        "comment": "",
+        "key": "",
+        "location": {
+          "startingColumn": 32,
+          "startingLine": 477
+        }
+      },
+      {
+        "comment": "",
+        "key": "Select a credential...",
+        "location": {
+          "startingColumn": 34,
+          "startingLine": 478
+        }
+      },
+      {
+        "comment": "",
+        "key": "Value:",
+        "location": {
+          "startingColumn": 30,
+          "startingLine": 491
+        }
+      },
+      {
+        "comment": "",
+        "key": "Enter credential value",
+        "location": {
+          "startingColumn": 37,
+          "startingLine": 493
+        }
+      },
+      {
+        "comment": "",
+        "key": "Delete Credential",
+        "location": {
+          "startingColumn": 32,
+          "startingLine": 513
+        }
+      },
+      {
+        "comment": "",
+        "key": "Set Credential",
+        "location": {
+          "startingColumn": 38,
+          "startingLine": 508
+        }
+      },
+      {
+        "comment": "",
+        "key": "No plugins installed",
+        "location": {
+          "startingColumn": 26,
+          "startingLine": 545
+        }
+      },
+      {
+        "comment": "",
+        "key": "No credentials required",
+        "location": {
+          "startingColumn": 38,
+          "startingLine": 554
+        }
+      },
+      {
+        "comment": "",
+        "key": "Required: %@",
+        "location": {
+          "startingColumn": 38,
+          "startingLine": 558
+        }
+      },
+      {
+        "comment": "",
+        "key": "No activity recorded",
+        "location": {
+          "startingColumn": 22,
+          "startingLine": 682
+        }
+      },
+      {
+        "comment": "",
+        "key": "Loading activity...",
+        "location": {
+          "startingColumn": 30,
+          "startingLine": 678
+        }
+      },
+      {
+        "comment": "",
+        "key": "Activity Log",
+        "location": {
+          "startingColumn": 22,
+          "startingLine": 643
+        }
+      },
+      {
+        "comment": "",
+        "key": "Auto-refresh",
+        "location": {
+          "startingColumn": 24,
+          "startingLine": 649
+        }
+      },
+      {
+        "comment": "",
+        "key": "Time",
+        "location": {
+          "startingColumn": 33,
+          "startingLine": 687
+        }
+      },
+      {
+        "comment": "",
+        "key": "Method",
+        "location": {
+          "startingColumn": 33,
+          "startingLine": 693
+        }
+      },
+      {
+        "comment": "",
+        "key": "URL",
+        "location": {
+          "startingColumn": 33,
+          "startingLine": 700
+        }
+      },
+      {
+        "comment": "",
+        "key": "Agent",
+        "location": {
+          "startingColumn": 33,
+          "startingLine": 708
+        }
+      },
+      {
+        "comment": "",
+        "key": "Status",
+        "location": {
+          "startingColumn": 33,
+          "startingLine": 714
+        }
+      },
+      {
+        "comment": "",
+        "key": "%lld",
+        "location": {
+          "startingColumn": 30,
+          "startingLine": 715
+        }
+      }
+    ]
+  },
+  "version": 1
+}

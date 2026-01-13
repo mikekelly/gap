@@ -1,0 +1,48 @@
+{
+  "source": "/Users/mike/code/agent-credential-proxy/macos-gui/ACP/Views/MenuBarView.swift",
+  "tables": {
+    "Localizable": [
+      {
+        "comment": "",
+        "key": "Open ACP",
+        "location": {
+          "startingColumn": 20,
+          "startingLine": 27
+        }
+      },
+      {
+        "comment": "",
+        "key": "Lock",
+        "location": {
+          "startingColumn": 24,
+          "startingLine": 34
+        }
+      },
+      {
+        "comment": "",
+        "key": "Quit",
+        "location": {
+          "startingColumn": 20,
+          "startingLine": 42
+        }
+      },
+      {
+        "comment": "",
+        "key": "Connected",
+        "location": {
+          "startingColumn": 45,
+          "startingLine": 20
+        }
+      },
+      {
+        "comment": "",
+        "key": "Not Connected",
+        "location": {
+          "startingColumn": 59,
+          "startingLine": 20
+        }
+      }
+    ]
+  },
+  "version": 1
+}
