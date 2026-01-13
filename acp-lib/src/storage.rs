@@ -243,8 +243,14 @@ pub async fn create_store(data_dir: Option<PathBuf>) -> Result<Box<dyn SecretSto
             // Platform-specific default
             #[cfg(target_os = "macos")]
             {
+                // In test mode, use a test-specific namespace to avoid interfering with production keychain
+                #[cfg(test)]
+                let service_name = format!("com.acp.test.{}", std::process::id());
+                #[cfg(not(test))]
+                let service_name = "com.acp.credentials";
+
                 let store = KeychainStore::new_with_access_group(
-                    "com.acp.credentials",
+                    service_name,
                     "3R44BTH39W.com.acp.secrets",
                 )?;
                 Ok(Box::new(store))
@@ -482,5 +488,56 @@ mod tests {
 
         // Cleanup
         let _ = store.delete("test:access_group").await;
+    }
+
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    async fn test_create_store_uses_test_namespace_in_test_mode() {
+        // Verify that create_store(None) uses test namespace when running in test mode
+        // This prevents tests from interfering with production keychain
+
+        // Unset ACP_DATA_DIR to ensure we get KeychainStore
+        std::env::remove_var("ACP_DATA_DIR");
+
+        let store = create_store(None)
+            .await
+            .expect("create_store should succeed");
+
+        // Downcast to KeychainStore to verify service name
+        let keychain_store = store
+            .as_any()
+            .downcast_ref::<KeychainStore>()
+            .expect("Should be KeychainStore on macOS in test mode without data_dir");
+
+        // Verify service name starts with test prefix
+        assert!(
+            keychain_store.service_name.starts_with("com.acp.test."),
+            "Service name should use test namespace, got: {}",
+            keychain_store.service_name
+        );
+
+        // Verify it contains the process ID
+        let expected_suffix = std::process::id().to_string();
+        assert!(
+            keychain_store.service_name.ends_with(&expected_suffix),
+            "Service name should include process ID, got: {}",
+            keychain_store.service_name
+        );
+
+        // Test that we can actually use it without affecting production keychain
+        store
+            .set("test:isolation_check", b"test_value")
+            .await
+            .expect("set should succeed");
+
+        let value = store
+            .get("test:isolation_check")
+            .await
+            .expect("get should succeed")
+            .expect("value should exist");
+        assert_eq!(value, b"test_value");
+
+        // Cleanup
+        let _ = store.delete("test:isolation_check").await;
     }
 }
