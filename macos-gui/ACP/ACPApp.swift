@@ -6,11 +6,29 @@ struct ACPApp: App {
 
     var body: some Scene {
         MenuBarExtra {
-            Button("Quit ACP") {
-                NSApplication.shared.terminate(nil)
-            }
+            MenuBarView()
+                .environmentObject(appState)
         } label: {
-            Image(systemName: "shield.checkered")
+            Image(systemName: appState.isConnected ? "shield.checkered" : "shield.slash")
+        }
+
+        Window("ACP", id: "main") {
+            ContentView()
+                .environmentObject(appState)
+        }
+        .defaultSize(width: 700, height: 500)
+    }
+}
+
+struct ContentView: View {
+    @EnvironmentObject var appState: AppState
+
+    var body: some View {
+        if appState.isAuthenticated {
+            Text("Authenticated! Main UI coming soon...")
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+        } else {
+            PasswordPrompt()
         }
     }
 }

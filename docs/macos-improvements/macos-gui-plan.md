@@ -94,7 +94,7 @@ Note: A password dialog is potentially vulnerable to accessibility automation (a
    - Token Manager — create, revoke agent tokens
    - Plugin Manager — view installed plugins
    - Activity Log — recent proxy requests
-3. **Password Prompt** — shown on launch and after idle timeout
+3. **Password Prompt** — shown on launch
 
 ---
 
@@ -108,7 +108,6 @@ Note: A password dialog is potentially vulnerable to accessibility automation (a
 6. Build token management UI
 7. Build plugin list UI
 8. Build activity log view
-9. Add idle timeout (re-prompt after X minutes)
 10. Set up code signing and notarization
 11. Update documentation
 
@@ -132,7 +131,6 @@ Note: A password dialog is potentially vulnerable to accessibility automation (a
 - [ ] Can view, create, revoke tokens
 - [ ] Can view installed plugins
 - [ ] Can view activity log
-- [ ] Password re-prompted after idle timeout
 - [ ] All operations use same API as CLI
 - [ ] Password hash format matches CLI exactly
 - [ ] App is signed and notarized
@@ -155,6 +153,5 @@ These were based on a misunderstanding of the threat model. The shared secret is
 
 | Risk | Impact | Mitigation |
 |------|--------|------------|
-| GUI idle timeout too aggressive | User annoyance | Make timeout configurable, default to reasonable value (15 min) |
 | Password dialog vulnerable to accessibility automation | Agent could automate GUI | Touch ID enhancement addresses this; document the limitation |
 | Hash implementation differs from CLI | Auth fails | Test hash output matches CLI exactly; share implementation if possible |

@@ -10,6 +10,11 @@
 		A1000001000000000000001 /* ACPApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1000002000000000000001 /* ACPApp.swift */; };
 		A1000003000000000000001 /* AppState.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1000004000000000000001 /* AppState.swift */; };
 		A1000005000000000000001 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = A1000006000000000000001 /* Assets.xcassets */; };
+		A1000020000000000000001 /* ACPClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1000021000000000000001 /* ACPClient.swift */; };
+		A1000022000000000000001 /* Models.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1000023000000000000001 /* Models.swift */; };
+		A1000024000000000000001 /* PasswordHash.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1000025000000000000001 /* PasswordHash.swift */; };
+		A1000026000000000000001 /* PasswordPrompt.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1000027000000000000001 /* PasswordPrompt.swift */; };
+		A1000028000000000000001 /* MenuBarView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1000029000000000000001 /* MenuBarView.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -18,8 +23,11 @@
 		A1000004000000000000001 /* AppState.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppState.swift; sourceTree = "<group>"; };
 		A1000006000000000000001 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 		A1000007000000000000001 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
-		A1000008000000000000001 /* API */ = {isa = PBXFileReference; lastKnownFileType = folder; path = API; sourceTree = "<group>"; };
-		A1000009000000000000001 /* Views */ = {isa = PBXFileReference; lastKnownFileType = folder; path = Views; sourceTree = "<group>"; };
+		A1000021000000000000001 /* ACPClient.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ACPClient.swift; sourceTree = "<group>"; };
+		A1000023000000000000001 /* Models.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Models.swift; sourceTree = "<group>"; };
+		A1000025000000000000001 /* PasswordHash.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PasswordHash.swift; sourceTree = "<group>"; };
+		A1000027000000000000001 /* PasswordPrompt.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PasswordPrompt.swift; sourceTree = "<group>"; };
+		A1000029000000000000001 /* MenuBarView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MenuBarView.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -52,6 +60,25 @@
 				A1000007000000000000001 /* Info.plist */,
 			);
 			path = ACP;
+			sourceTree = "<group>";
+		};
+		A1000008000000000000001 /* API */ = {
+			isa = PBXGroup;
+			children = (
+				A1000021000000000000001 /* ACPClient.swift */,
+				A1000023000000000000001 /* Models.swift */,
+				A1000025000000000000001 /* PasswordHash.swift */,
+			);
+			path = API;
+			sourceTree = "<group>";
+		};
+		A1000009000000000000001 /* Views */ = {
+			isa = PBXGroup;
+			children = (
+				A1000027000000000000001 /* PasswordPrompt.swift */,
+				A1000029000000000000001 /* MenuBarView.swift */,
+			);
+			path = Views;
 			sourceTree = "<group>";
 		};
 		A100000D000000000000001 /* Products */ = {
@@ -141,6 +168,11 @@
 			files = (
 				A1000001000000000000001 /* ACPApp.swift in Sources */,
 				A1000003000000000000001 /* AppState.swift in Sources */,
+				A1000020000000000000001 /* ACPClient.swift in Sources */,
+				A1000022000000000000001 /* Models.swift in Sources */,
+				A1000024000000000000001 /* PasswordHash.swift in Sources */,
+				A1000026000000000000001 /* PasswordPrompt.swift in Sources */,
+				A1000028000000000000001 /* MenuBarView.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
