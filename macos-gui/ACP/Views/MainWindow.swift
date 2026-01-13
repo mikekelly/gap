@@ -55,16 +55,182 @@ struct MainWindow: View {
 // MARK: - Placeholder Views
 // These will be implemented in separate tasks
 
-/// Placeholder view for plugin management.
+/// Plugin management view.
 ///
-/// Will display installed plugins with their names and URL patterns,
-/// and provide controls to install, update, and uninstall plugins.
+/// Displays installed plugins with their names and URL patterns,
+/// and provides controls to install, update, and uninstall plugins.
 struct PluginsView: View {
     @EnvironmentObject var appState: AppState
+    @State private var newPluginRepo: String = ""
+    @State private var isInstalling: Bool = false
+    @State private var isLoading: Bool = false
+    @State private var errorMessage: String?
+    @State private var successMessage: String?
 
     var body: some View {
-        Text("Plugins View - Coming Soon")
-            .frame(maxWidth: .infinity, maxHeight: .infinity)
+        VStack(spacing: 0) {
+            // Header with install form
+            VStack(alignment: .leading, spacing: 12) {
+                Text("Installed Plugins")
+                    .font(.title2)
+                    .fontWeight(.semibold)
+
+                HStack {
+                    TextField("owner/repo (e.g., mikekelly/exa-ncp)", text: $newPluginRepo)
+                        .textFieldStyle(.roundedBorder)
+                        .frame(maxWidth: 300)
+
+                    Button(action: installPlugin) {
+                        if isInstalling {
+                            ProgressView()
+                                .scaleEffect(0.7)
+                        } else {
+                            Text("Install")
+                        }
+                    }
+                    .disabled(newPluginRepo.isEmpty || isInstalling)
+
+                    Spacer()
+
+                    Button(action: { Task { await refresh() } }) {
+                        Image(systemName: "arrow.clockwise")
+                    }
+                    .disabled(isLoading)
+                }
+
+                if let error = errorMessage {
+                    Text(error)
+                        .foregroundColor(.red)
+                        .font(.caption)
+                }
+
+                if let success = successMessage {
+                    Text(success)
+                        .foregroundColor(.green)
+                        .font(.caption)
+                }
+            }
+            .padding()
+
+            Divider()
+
+            // Plugin list
+            if isLoading && appState.plugins.isEmpty {
+                Spacer()
+                ProgressView("Loading plugins...")
+                Spacer()
+            } else if appState.plugins.isEmpty {
+                Spacer()
+                Text("No plugins installed")
+                    .foregroundColor(.secondary)
+                Spacer()
+            } else {
+                List(appState.plugins) { plugin in
+                    PluginRow(
+                        plugin: plugin,
+                        onUpdate: { updatePlugin(plugin.name) },
+                        onUninstall: { uninstallPlugin(plugin.name) }
+                    )
+                }
+            }
+        }
+        .task { await refresh() }
+    }
+
+    private func refresh() async {
+        isLoading = true
+        errorMessage = nil
+        do {
+            try await appState.refreshPlugins()
+        } catch {
+            errorMessage = error.localizedDescription
+        }
+        isLoading = false
+    }
+
+    private func installPlugin() {
+        guard !newPluginRepo.isEmpty else { return }
+        isInstalling = true
+        errorMessage = nil
+        successMessage = nil
+
+        Task {
+            do {
+                guard let hash = appState.passwordHash else { return }
+                let response = try await appState.client.installPlugin(repo: newPluginRepo, passwordHash: hash)
+                successMessage = "Installed \(response.name)"
+                newPluginRepo = ""
+                try await appState.refreshPlugins()
+            } catch {
+                errorMessage = error.localizedDescription
+            }
+            isInstalling = false
+        }
+    }
+
+    private func updatePlugin(_ name: String) {
+        errorMessage = nil
+        successMessage = nil
+
+        Task {
+            do {
+                guard let hash = appState.passwordHash else { return }
+                let response = try await appState.client.updatePlugin(name: name, passwordHash: hash)
+                successMessage = "Updated \(response.name)"
+                try await appState.refreshPlugins()
+            } catch {
+                errorMessage = error.localizedDescription
+            }
+        }
+    }
+
+    private func uninstallPlugin(_ name: String) {
+        errorMessage = nil
+        successMessage = nil
+
+        Task {
+            do {
+                guard let hash = appState.passwordHash else { return }
+                _ = try await appState.client.uninstallPlugin(name: name, passwordHash: hash)
+                successMessage = "Uninstalled \(name)"
+                try await appState.refreshPlugins()
+            } catch {
+                errorMessage = error.localizedDescription
+            }
+        }
+    }
+}
+
+struct PluginRow: View {
+    let plugin: Plugin
+    let onUpdate: () -> Void
+    let onUninstall: () -> Void
+
+    var body: some View {
+        HStack {
+            VStack(alignment: .leading, spacing: 4) {
+                Text(plugin.name)
+                    .font(.headline)
+                Text(plugin.matchPatterns.joined(separator: ", "))
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+                if !plugin.credentialSchema.isEmpty {
+                    Text("Credentials: \(plugin.credentialSchema.joined(separator: ", "))")
+                        .font(.caption2)
+                        .foregroundColor(.secondary)
+                }
+            }
+
+            Spacer()
+
+            Button("Update", action: onUpdate)
+                .buttonStyle(.bordered)
+
+            Button("Uninstall", action: onUninstall)
+                .buttonStyle(.bordered)
+                .tint(.red)
+        }
+        .padding(.vertical, 4)
     }
 }
 
