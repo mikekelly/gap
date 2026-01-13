@@ -247,17 +247,212 @@ struct TokensView: View {
     }
 }
 
-/// Placeholder view for credential management.
+/// View for managing plugin credentials.
 ///
-/// Will display credentials grouped by plugin, and provide controls
-/// to set and delete credential values. Credential values are write-only
-/// and cannot be retrieved.
+/// Credentials are write-only for security. This view allows setting and deleting
+/// credential values, but never displays them. The view shows which credentials
+/// each plugin requires via its credentialSchema.
 struct CredentialsView: View {
     @EnvironmentObject var appState: AppState
+    @State private var selectedPlugin: String = ""
+    @State private var selectedKey: String = ""
+    @State private var credentialValue: String = ""
+    @State private var isSubmitting: Bool = false
+    @State private var successMessage: String?
+    @State private var errorMessage: String?
+
+    private var selectedPluginObj: Plugin? {
+        appState.plugins.first { $0.name == selectedPlugin }
+    }
 
     var body: some View {
-        Text("Credentials View - Coming Soon")
-            .frame(maxWidth: .infinity, maxHeight: .infinity)
+        VStack(spacing: 0) {
+            // Header
+            VStack(alignment: .leading, spacing: 12) {
+                Text("Credential Management")
+                    .font(.title2)
+                    .fontWeight(.semibold)
+
+                Text("Credentials are write-only for security. You can set or delete them, but not view their values.")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding()
+
+            Divider()
+
+            // Set credential form
+            GroupBox("Set Credential") {
+                VStack(alignment: .leading, spacing: 16) {
+                    // Plugin picker
+                    HStack {
+                        Text("Plugin:")
+                            .frame(width: 80, alignment: .trailing)
+                        Picker("", selection: $selectedPlugin) {
+                            Text("Select a plugin...").tag("")
+                            ForEach(appState.plugins) { plugin in
+                                Text(plugin.name).tag(plugin.name)
+                            }
+                        }
+                        .frame(width: 250)
+                        .onChange(of: selectedPlugin) { _ in
+                            selectedKey = ""  // Reset key when plugin changes
+                        }
+                    }
+
+                    // Credential key picker
+                    HStack {
+                        Text("Credential:")
+                            .frame(width: 80, alignment: .trailing)
+                        Picker("", selection: $selectedKey) {
+                            Text("Select a credential...").tag("")
+                            if let plugin = selectedPluginObj {
+                                ForEach(plugin.credentialSchema, id: \.self) { key in
+                                    Text(key).tag(key)
+                                }
+                            }
+                        }
+                        .frame(width: 250)
+                        .disabled(selectedPlugin.isEmpty)
+                    }
+
+                    // Value input
+                    HStack {
+                        Text("Value:")
+                            .frame(width: 80, alignment: .trailing)
+                        SecureField("Enter credential value", text: $credentialValue)
+                            .textFieldStyle(.roundedBorder)
+                            .frame(width: 250)
+                    }
+
+                    // Action buttons
+                    HStack {
+                        Spacer()
+                            .frame(width: 80)
+
+                        Button(action: setCredential) {
+                            if isSubmitting {
+                                ProgressView()
+                                    .scaleEffect(0.7)
+                            } else {
+                                Text("Set Credential")
+                            }
+                        }
+                        .disabled(!canSubmit || isSubmitting)
+
+                        Button("Delete Credential", action: deleteCredential)
+                            .disabled(selectedPlugin.isEmpty || selectedKey.isEmpty || isSubmitting)
+                            .foregroundColor(.red)
+                    }
+
+                    if let success = successMessage {
+                        HStack {
+                            Spacer().frame(width: 80)
+                            Text(success)
+                                .foregroundColor(.green)
+                                .font(.caption)
+                        }
+                    }
+
+                    if let error = errorMessage {
+                        HStack {
+                            Spacer().frame(width: 80)
+                            Text(error)
+                                .foregroundColor(.red)
+                                .font(.caption)
+                        }
+                    }
+                }
+                .padding()
+            }
+            .padding()
+
+            Divider()
+
+            // Plugin credential requirements
+            GroupBox("Plugin Credential Requirements") {
+                if appState.plugins.isEmpty {
+                    Text("No plugins installed")
+                        .foregroundColor(.secondary)
+                        .padding()
+                } else {
+                    List(appState.plugins) { plugin in
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text(plugin.name)
+                                .font(.headline)
+                            if plugin.credentialSchema.isEmpty {
+                                Text("No credentials required")
+                                    .font(.caption)
+                                    .foregroundColor(.secondary)
+                            } else {
+                                Text("Required: \(plugin.credentialSchema.joined(separator: ", "))")
+                                    .font(.caption)
+                                    .foregroundColor(.secondary)
+                            }
+                        }
+                        .padding(.vertical, 2)
+                    }
+                }
+            }
+            .padding()
+
+            Spacer()
+        }
+        .task {
+            // Refresh plugins to get credential schemas
+            try? await appState.refreshPlugins()
+        }
+    }
+
+    private var canSubmit: Bool {
+        !selectedPlugin.isEmpty && !selectedKey.isEmpty && !credentialValue.isEmpty
+    }
+
+    private func setCredential() {
+        guard canSubmit else { return }
+        isSubmitting = true
+        errorMessage = nil
+        successMessage = nil
+
+        Task {
+            do {
+                guard let hash = appState.passwordHash else { return }
+                _ = try await appState.client.setCredential(
+                    plugin: selectedPlugin,
+                    key: selectedKey,
+                    value: credentialValue,
+                    passwordHash: hash
+                )
+                successMessage = "Credential '\(selectedKey)' set for \(selectedPlugin)"
+                credentialValue = ""  // Clear the value
+            } catch {
+                errorMessage = error.localizedDescription
+            }
+            isSubmitting = false
+        }
+    }
+
+    private func deleteCredential() {
+        guard !selectedPlugin.isEmpty, !selectedKey.isEmpty else { return }
+        isSubmitting = true
+        errorMessage = nil
+        successMessage = nil
+
+        Task {
+            do {
+                guard let hash = appState.passwordHash else { return }
+                try await appState.client.deleteCredential(
+                    plugin: selectedPlugin,
+                    key: selectedKey,
+                    passwordHash: hash
+                )
+                successMessage = "Credential '\(selectedKey)' deleted from \(selectedPlugin)"
+            } catch {
+                errorMessage = error.localizedDescription
+            }
+            isSubmitting = false
+        }
     }
 }
 
