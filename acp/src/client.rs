@@ -250,11 +250,11 @@ mod tests {
         let ca_pem = ca.ca_cert_pem();
 
         // This should create a client with custom CA cert
-        let result = ApiClient::with_ca_cert("https://localhost:9443", ca_pem.as_bytes());
+        let result = ApiClient::with_ca_cert("https://localhost:9080", ca_pem.as_bytes());
         assert!(result.is_ok(), "Failed to create client with CA cert: {:?}", result.err());
 
         let client = result.unwrap();
-        assert_eq!(client.base_url, "https://localhost:9443");
+        assert_eq!(client.base_url, "https://localhost:9080");
     }
 
     #[test]
@@ -264,7 +264,7 @@ mod tests {
         // So we just test that the method doesn't panic
         let invalid_pem = b"not a valid certificate";
 
-        let _result = ApiClient::with_ca_cert("https://localhost:9443", invalid_pem);
+        let _result = ApiClient::with_ca_cert("https://localhost:9080", invalid_pem);
         // The method may or may not return an error depending on reqwest's validation
         // The important thing is that it doesn't panic
     }

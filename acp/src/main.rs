@@ -15,8 +15,8 @@ mod commands;
 #[command(name = "acp")]
 #[command(author, version, about = "Agent Credential Proxy CLI", long_about = None)]
 struct Cli {
-    /// Server URL (default: https://localhost:9443, can be set via SERVER env var)
-    #[arg(long, default_value = "https://localhost:9443")]
+    /// Server URL (default: https://localhost:9080, can be set via SERVER env var)
+    #[arg(long, default_value = "https://localhost:9080")]
     server: String,
 
     #[command(subcommand)]
@@ -288,7 +288,7 @@ mod tests {
     #[test]
     fn test_cli_server_default() {
         let cli = Cli::parse_from(["acp", "status"]);
-        assert_eq!(cli.server, "https://localhost:9443");
+        assert_eq!(cli.server, "https://localhost:9080");
     }
 
     #[test]
