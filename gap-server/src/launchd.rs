@@ -7,15 +7,15 @@
 use std::path::PathBuf;
 
 #[cfg(target_os = "macos")]
-/// Generate LaunchAgent plist XML for acp-server
+/// Generate LaunchAgent plist XML for gap-server
 ///
 /// Creates a plist configuration that:
 /// - Runs at login (RunAtLoad)
 /// - Keeps the service alive (KeepAlive)
-/// - Logs stdout/stderr to ~/.acp/logs/
+/// - Logs stdout/stderr to ~/.gap/logs/
 ///
 /// # Arguments
-/// * `binary_path` - Absolute path to the acp-server binary
+/// * `binary_path` - Absolute path to the gap-server binary
 ///
 /// # Returns
 /// Valid plist XML as a String
@@ -29,7 +29,7 @@ pub fn generate_plist(binary_path: &str) -> String {
 <plist version="1.0">
 <dict>
   <key>Label</key>
-  <string>com.acp.server</string>
+  <string>com.gap.server</string>
   <key>Program</key>
   <string>{}</string>
   <key>ProgramArguments</key>
@@ -42,9 +42,9 @@ pub fn generate_plist(binary_path: &str) -> String {
   <key>KeepAlive</key>
   <true/>
   <key>StandardOutPath</key>
-  <string>{}/acp-server.log</string>
+  <string>{}/gap-server.log</string>
   <key>StandardErrorPath</key>
-  <string>{}/acp-server.err</string>
+  <string>{}/gap-server.err</string>
 </dict>
 </plist>
 "#,
@@ -55,40 +55,40 @@ pub fn generate_plist(binary_path: &str) -> String {
 #[cfg(target_os = "macos")]
 /// Get the default plist path for the LaunchAgent
 ///
-/// Returns ~/Library/LaunchAgents/com.acp.server.plist
+/// Returns ~/Library/LaunchAgents/com.gap.server.plist
 pub fn get_plist_path() -> PathBuf {
     let home_dir = dirs::home_dir().expect("Could not determine home directory");
     home_dir
         .join("Library")
         .join("LaunchAgents")
-        .join("com.acp.server.plist")
+        .join("com.gap.server.plist")
 }
 
 #[cfg(target_os = "macos")]
 /// Get the log directory path
 ///
-/// Returns ~/.acp/logs/
+/// Returns ~/.gap/logs/
 pub fn get_log_dir() -> PathBuf {
     let home_dir = dirs::home_dir().expect("Could not determine home directory");
-    home_dir.join(".acp").join("logs")
+    home_dir.join(".gap").join("logs")
 }
 
 #[cfg(target_os = "macos")]
 /// Get the ACP data directory path
 ///
-/// Returns ~/.acp/
-pub fn get_acp_dir() -> PathBuf {
+/// Returns ~/.gap/
+pub fn get_gap_dir() -> PathBuf {
     let home_dir = dirs::home_dir().expect("Could not determine home directory");
-    home_dir.join(".acp")
+    home_dir.join(".gap")
 }
 
 #[cfg(target_os = "macos")]
-/// Install the acp-server as a LaunchAgent
+/// Install the gap-server as a LaunchAgent
 ///
 /// This function:
 /// - Gets the current executable path
 /// - Creates the LaunchAgents directory if it doesn't exist
-/// - Creates the log directory (~/.acp/logs/)
+/// - Creates the log directory (~/.gap/logs/)
 /// - Generates the plist file
 /// - Loads the service with launchctl
 /// - Starts the service immediately
@@ -111,7 +111,7 @@ pub fn install() -> anyhow::Result<()> {
     // Check if plist already exists
     if plist_path.exists() {
         anyhow::bail!(
-            "Service already installed at {}.\nRun 'acp-server uninstall' first.",
+            "Service already installed at {}.\nRun 'gap-server uninstall' first.",
             plist_path.display()
         );
     }
@@ -148,7 +148,7 @@ pub fn install() -> anyhow::Result<()> {
     // Start the service immediately
     let output = Command::new("launchctl")
         .arg("start")
-        .arg("com.acp.server")
+        .arg("com.gap.server")
         .output()?;
 
     if !output.status.success() {
@@ -156,17 +156,17 @@ pub fn install() -> anyhow::Result<()> {
         anyhow::bail!("Failed to start service: {}", stderr);
     }
 
-    println!("Started service com.acp.server");
+    println!("Started service com.gap.server");
     println!("\nService installed successfully!");
     println!("Logs will be written to:");
-    println!("  stdout: {}/acp-server.log", log_dir.display());
-    println!("  stderr: {}/acp-server.err", log_dir.display());
+    println!("  stdout: {}/gap-server.log", log_dir.display());
+    println!("  stderr: {}/gap-server.err", log_dir.display());
 
     Ok(())
 }
 
 #[cfg(target_os = "macos")]
-/// Check the status of the acp-server service
+/// Check the status of the gap-server service
 ///
 /// This function checks if:
 /// - The plist file exists
@@ -184,7 +184,7 @@ pub fn status() {
 
     // Run launchctl list to check if the service is running
     let output = Command::new("launchctl")
-        .args(["list", "com.acp.server"])
+        .args(["list", "com.gap.server"])
         .output();
 
     match output {
@@ -194,12 +194,12 @@ pub fn status() {
                 let stdout = String::from_utf8_lossy(&output.stdout);
                 // launchctl list output format:
                 // PID    Status  Label
-                // 12345  0       com.acp.server
+                // 12345  0       com.gap.server
                 // or just the label if not running
 
                 // Look for lines containing the label
                 for line in stdout.lines() {
-                    if line.contains("com.acp.server") {
+                    if line.contains("com.gap.server") {
                         let parts: Vec<&str> = line.split_whitespace().collect();
                         if parts.len() >= 3 {
                             // First part is PID (or "-" if not running)
@@ -225,16 +225,16 @@ pub fn status() {
 }
 
 #[cfg(target_os = "macos")]
-/// Uninstall the acp-server LaunchAgent
+/// Uninstall the gap-server LaunchAgent
 ///
 /// This function:
 /// - Stops the service (ignoring errors if not running)
 /// - Unloads the LaunchAgent (ignoring errors if not loaded)
 /// - Removes the plist file
-/// - Optionally removes ~/.acp/ directory if purge is true
+/// - Optionally removes ~/.gap/ directory if purge is true
 ///
 /// # Arguments
-/// * `purge` - If true, also remove the ~/.acp/ directory
+/// * `purge` - If true, also remove the ~/.gap/ directory
 ///
 /// # Returns
 /// Ok(()) on success, or an error if critical operations fail
@@ -245,13 +245,13 @@ pub fn uninstall(purge: bool) -> anyhow::Result<()> {
 
     // Check if installed
     if !plist_path.exists() {
-        println!("acp-server is not installed");
+        println!("gap-server is not installed");
         return Ok(());
     }
 
     // Stop the service (ignore errors if not running)
     let _ = Command::new("launchctl")
-        .args(["stop", "com.acp.server"])
+        .args(["stop", "com.gap.server"])
         .output();
 
     // Unload the service (ignore errors if not loaded)
@@ -266,9 +266,9 @@ pub fn uninstall(purge: bool) -> anyhow::Result<()> {
         println!("Removed {}", plist_path.display());
     }
 
-    // If --purge flag is set, remove ~/.acp/ directory
+    // If --purge flag is set, remove ~/.gap/ directory
     if purge {
-        let acp_dir = get_acp_dir();
+        let acp_dir = get_gap_dir();
         if acp_dir.exists() {
             if let Err(e) = std::fs::remove_dir_all(&acp_dir) {
                 eprintln!("Warning: Failed to remove data directory: {}", e);
@@ -278,7 +278,7 @@ pub fn uninstall(purge: bool) -> anyhow::Result<()> {
         }
     }
 
-    println!("acp-server uninstalled successfully");
+    println!("gap-server uninstalled successfully");
     Ok(())
 }
 
@@ -289,7 +289,7 @@ mod tests {
 
     #[test]
     fn test_generate_plist_contains_required_keys() {
-        let binary_path = "/usr/local/bin/acp-server";
+        let binary_path = "/usr/local/bin/gap-server";
         let plist = generate_plist(binary_path);
 
         // Verify XML structure
@@ -299,7 +299,7 @@ mod tests {
 
         // Verify required keys
         assert!(plist.contains("<key>Label</key>"));
-        assert!(plist.contains("<string>com.acp.server</string>"));
+        assert!(plist.contains("<string>com.gap.server</string>"));
 
         assert!(plist.contains("<key>Program</key>"));
         assert!(plist.contains(&format!("<string>{}</string>", binary_path)));
@@ -319,19 +319,19 @@ mod tests {
 
     #[test]
     fn test_generate_plist_uses_correct_log_paths() {
-        let binary_path = "/usr/local/bin/acp-server";
+        let binary_path = "/usr/local/bin/gap-server";
         let plist = generate_plist(binary_path);
         let log_dir = get_log_dir();
         let log_dir_str = log_dir.to_string_lossy();
 
         // Verify log paths contain the log directory
-        assert!(plist.contains(&format!("<string>{}/acp-server.log</string>", log_dir_str)));
-        assert!(plist.contains(&format!("<string>{}/acp-server.err</string>", log_dir_str)));
+        assert!(plist.contains(&format!("<string>{}/gap-server.log</string>", log_dir_str)));
+        assert!(plist.contains(&format!("<string>{}/gap-server.err</string>", log_dir_str)));
     }
 
     #[test]
     fn test_generate_plist_valid_xml_structure() {
-        let binary_path = "/usr/local/bin/acp-server";
+        let binary_path = "/usr/local/bin/gap-server";
         let plist = generate_plist(binary_path);
 
         // Verify it starts and ends correctly
@@ -350,7 +350,7 @@ mod tests {
 
         // Should be in ~/Library/LaunchAgents/
         assert!(path_str.contains("Library/LaunchAgents"));
-        assert!(path_str.ends_with("com.acp.server.plist"));
+        assert!(path_str.ends_with("com.gap.server.plist"));
     }
 
     #[test]
@@ -358,24 +358,24 @@ mod tests {
         let log_dir = get_log_dir();
         let log_dir_str = log_dir.to_string_lossy();
 
-        // Should be ~/.acp/logs/
-        assert!(log_dir_str.contains(".acp"));
+        // Should be ~/.gap/logs/
+        assert!(log_dir_str.contains(".gap"));
         assert!(log_dir_str.ends_with("logs"));
     }
 
     #[test]
     fn test_generate_plist_escapes_special_characters() {
         // Test with a path containing special characters that need XML escaping
-        let binary_path = "/path/with spaces/acp-server";
+        let binary_path = "/path/with spaces/gap-server";
         let plist = generate_plist(binary_path);
 
         // The path should appear in the plist (spaces are allowed in XML strings)
-        assert!(plist.contains("/path/with spaces/acp-server"));
+        assert!(plist.contains("/path/with spaces/gap-server"));
     }
 
     #[test]
     fn test_generate_plist_program_arguments_order() {
-        let binary_path = "/usr/local/bin/acp-server";
+        let binary_path = "/usr/local/bin/gap-server";
         let plist = generate_plist(binary_path);
 
         // Find the ProgramArguments array

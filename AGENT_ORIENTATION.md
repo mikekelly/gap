@@ -1,7 +1,7 @@
 # Agent Orientation
 
 ## What This Is
-ACP (Agent Credential Proxy) lets AI agents access APIs without seeing your credentials. Agents route requests through the proxy with a token; ACP injects stored credentials and forwards to the API. The agent never sees the actual API keys.
+GAP (Generic Agent Proxy) lets AI agents access APIs without seeing your credentials. Agents route requests through the proxy with a token; ACP injects stored credentials and forwards to the API. The agent never sees the actual API keys.
 
 **Security model:**
 - Credentials stored in OS keychain (macOS) or under dedicated service user (Linux)
@@ -11,9 +11,9 @@ ACP (Agent Credential Proxy) lets AI agents access APIs without seeing your cred
 
 ## Structure
 - **Cargo workspace** with 3 crates:
-  - `acp-lib` - Shared library (types, errors)
-  - `acp` - CLI binary
-  - `acp-server` - Server binary
+  - `gap-lib` - Shared library (types, errors)
+  - `gap` - CLI binary
+  - `gap-server` - Server binary
 - `docs/` — Architecture decisions and documentation
 - See `README.md` for quick start
 
@@ -22,8 +22,8 @@ ACP (Agent Credential Proxy) lets AI agents access APIs without seeing your cred
 cargo build          # Build all workspace members
 cargo test           # Run all tests
 cargo clippy         # Lint
-cargo run --bin acp  # Run CLI
-cargo run --bin acp-server  # Run server
+cargo run --bin gap  # Run CLI
+cargo run --bin gap-server  # Run server
 ```
 
 ## Top 5 Critical Gotchas

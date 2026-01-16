@@ -54,7 +54,7 @@ enum Command {
     /// Uninstall the acp-server LaunchAgent (macOS only)
     #[cfg(target_os = "macos")]
     Uninstall {
-        /// Remove all data including ~/.acp/ directory
+        /// Remove all data including ~/.gap/ directory
         #[arg(long)]
         purge: bool,
     },

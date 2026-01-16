@@ -5,8 +5,8 @@ use sha2::{Digest, Sha512};
 
 /// Read password from stdin without echoing
 pub fn read_password(prompt: &str) -> Result<String> {
-    // Internal: ACP_PASSWORD env var for testing (undocumented)
-    if let Ok(password) = std::env::var("ACP_PASSWORD") {
+    // Internal: GAP_PASSWORD env var for testing (undocumented)
+    if let Ok(password) = std::env::var("GAP_PASSWORD") {
         return Ok(password);
     }
     rpassword::prompt_password(prompt).context("Failed to read password")
@@ -14,8 +14,8 @@ pub fn read_password(prompt: &str) -> Result<String> {
 
 /// Read a secret value from stdin without echoing
 pub fn read_secret(prompt: &str) -> Result<String> {
-    // Internal: ACP_CREDENTIAL_VALUE env var for testing (undocumented)
-    if let Ok(value) = std::env::var("ACP_CREDENTIAL_VALUE") {
+    // Internal: GAP_CREDENTIAL_VALUE env var for testing (undocumented)
+    if let Ok(value) = std::env::var("GAP_CREDENTIAL_VALUE") {
         return Ok(value);
     }
     rpassword::prompt_password(prompt).context("Failed to read secret value")
@@ -74,7 +74,7 @@ mod tests {
         assert!(hash.chars().all(|c| c.is_ascii_hexdigit()));
     }
 
-    // Mutex to serialize tests that modify ACP_PASSWORD environment variable
+    // Mutex to serialize tests that modify GAP_PASSWORD environment variable
     // Required because environment variables are process-global
     static ENV_LOCK: Mutex<()> = Mutex::new(());
 
@@ -90,10 +90,10 @@ mod tests {
     fn test_read_password_from_env_variable() {
         // Lock to prevent parallel execution with other env var tests
         let _lock = ENV_LOCK.lock().unwrap();
-        let _guard = EnvGuard("ACP_PASSWORD");
+        let _guard = EnvGuard("GAP_PASSWORD");
 
         let test_password = "testpass123";
-        std::env::set_var("ACP_PASSWORD", test_password);
+        std::env::set_var("GAP_PASSWORD", test_password);
 
         // Should read from environment variable without prompting
         let result = read_password("Enter password: ");
@@ -106,10 +106,10 @@ mod tests {
     fn test_read_password_env_empty_string() {
         // Lock to prevent parallel execution with other env var tests
         let _lock = ENV_LOCK.lock().unwrap();
-        let _guard = EnvGuard("ACP_PASSWORD");
+        let _guard = EnvGuard("GAP_PASSWORD");
 
         // Even an empty password should work if explicitly set
-        std::env::set_var("ACP_PASSWORD", "");
+        std::env::set_var("GAP_PASSWORD", "");
 
         let result = read_password("Enter password: ");
 

@@ -410,10 +410,10 @@ async fn init(
     let ca_path = if let Some(path) = req.data.ca_path {
         path
     } else {
-        // Default to ~/.config/acp/ca.crt
+        // Default to ~/.config/gap/ca.crt
         let home = std::env::var("HOME")
             .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "HOME env var not set".to_string()))?;
-        format!("{}/.config/acp/ca.crt", home)
+        format!("{}/.config/gap/ca.crt", home)
     };
 
     // Export CA certificate to filesystem
@@ -1211,7 +1211,7 @@ mod tests {
 
         // Use temp directory to avoid test isolation issues with macOS Keychain
         let temp_dir = tempfile::tempdir().expect("create temp dir");
-        std::env::set_var("ACP_DATA_DIR", temp_dir.path());
+        std::env::set_var("GAP_DATA_DIR", temp_dir.path());
 
         let (store, registry, _temp_dir) = create_test_storage().await;
 
@@ -1265,7 +1265,7 @@ mod tests {
 
         // Use temp directory to avoid test isolation issues with macOS Keychain
         let temp_dir = tempfile::tempdir().expect("create temp dir");
-        std::env::set_var("ACP_DATA_DIR", temp_dir.path());
+        std::env::set_var("GAP_DATA_DIR", temp_dir.path());
 
         let (store, registry, _temp_dir) = create_test_storage().await;
         let state = ApiState::new(9443, 9080, store, registry);
@@ -1310,7 +1310,7 @@ mod tests {
 
         // Use temp directory to avoid test isolation issues with macOS Keychain
         let temp_dir = tempfile::tempdir().expect("create temp dir");
-        std::env::set_var("ACP_DATA_DIR", temp_dir.path());
+        std::env::set_var("GAP_DATA_DIR", temp_dir.path());
 
         let (store, registry, _temp_dir) = create_test_storage().await;
         let state = ApiState::new(9443, 9080, store, registry);
@@ -1360,7 +1360,7 @@ mod tests {
         use argon2::{Argon2, PasswordHasher};
 
         let temp_dir = tempfile::tempdir().expect("create temp dir");
-        std::env::set_var("ACP_DATA_DIR", temp_dir.path());
+        std::env::set_var("GAP_DATA_DIR", temp_dir.path());
 
         let (store, registry, _temp_dir) = create_test_storage().await;
         let state = ApiState::new(9443, 9080, store.clone(), registry.clone());
@@ -1447,7 +1447,7 @@ mod tests {
 
         // Use temp directory to avoid test isolation issues with macOS Keychain
         let temp_dir = tempfile::tempdir().expect("create temp dir");
-        std::env::set_var("ACP_DATA_DIR", temp_dir.path());
+        std::env::set_var("GAP_DATA_DIR", temp_dir.path());
 
         let (store, registry, _temp_dir) = create_test_storage().await;
         let state = ApiState::new(9443, 9080, store, registry);
@@ -1491,7 +1491,7 @@ mod tests {
 
         // Use temp directory to avoid test isolation issues with macOS Keychain
         let temp_dir = tempfile::tempdir().expect("create temp dir");
-        std::env::set_var("ACP_DATA_DIR", temp_dir.path());
+        std::env::set_var("GAP_DATA_DIR", temp_dir.path());
 
         let (store, registry, _temp_dir) = create_test_storage().await;
         let state = ApiState::new(9443, 9080, store, registry);
@@ -1593,7 +1593,7 @@ mod tests {
         use argon2::{Argon2, PasswordHasher};
 
         let temp_dir = tempfile::tempdir().expect("create temp dir");
-        std::env::set_var("ACP_DATA_DIR", temp_dir.path());
+        std::env::set_var("GAP_DATA_DIR", temp_dir.path());
 
         let (store, registry, _temp_dir) = create_test_storage().await;
         let state = ApiState::new(9443, 9080, store, registry.clone());
@@ -1644,7 +1644,7 @@ mod tests {
         use argon2::{Argon2, PasswordHasher};
 
         let temp_dir = tempfile::tempdir().expect("create temp dir");
-        std::env::set_var("ACP_DATA_DIR", temp_dir.path());
+        std::env::set_var("GAP_DATA_DIR", temp_dir.path());
 
         let (store, registry, _temp_dir) = create_test_storage().await;
         let state = ApiState::new(9443, 9080, store, registry.clone());
@@ -1697,7 +1697,7 @@ mod tests {
         use argon2::{Argon2, PasswordHasher};
 
         let temp_dir = tempfile::tempdir().expect("create temp dir");
-        std::env::set_var("ACP_DATA_DIR", temp_dir.path());
+        std::env::set_var("GAP_DATA_DIR", temp_dir.path());
 
         let (store, registry, _temp_dir) = create_test_storage().await;
         let state = ApiState::new(9443, 9080, store, Arc::clone(&registry));
@@ -1768,7 +1768,7 @@ mod tests {
         use argon2::{Argon2, PasswordHasher};
 
         let temp_dir = tempfile::tempdir().expect("create temp dir");
-        std::env::set_var("ACP_DATA_DIR", temp_dir.path());
+        std::env::set_var("GAP_DATA_DIR", temp_dir.path());
 
         let (store, registry, _temp_dir) = create_test_storage().await;
         let state = ApiState::new(9443, 9080, store, registry.clone());
@@ -1828,7 +1828,7 @@ mod tests {
         use argon2::{Argon2, PasswordHasher};
 
         let temp_dir = tempfile::tempdir().expect("create temp dir");
-        std::env::set_var("ACP_DATA_DIR", temp_dir.path());
+        std::env::set_var("GAP_DATA_DIR", temp_dir.path());
 
         let (store, registry, _temp_dir) = create_test_storage().await;
         let state = ApiState::new(9443, 9080, store, registry.clone());
@@ -1881,7 +1881,7 @@ mod tests {
         use argon2::{Argon2, PasswordHasher};
 
         let temp_dir = tempfile::tempdir().expect("create temp dir");
-        std::env::set_var("ACP_DATA_DIR", temp_dir.path());
+        std::env::set_var("GAP_DATA_DIR", temp_dir.path());
 
         let (store, registry, _temp_dir) = create_test_storage().await;
         let state = ApiState::new(9443, 9080, store.clone(), registry.clone());
@@ -1937,7 +1937,7 @@ mod tests {
         use gap_lib::tls::CertificateAuthority;
 
         let temp_dir = tempfile::tempdir().expect("create temp dir");
-        std::env::set_var("ACP_DATA_DIR", temp_dir.path());
+        std::env::set_var("GAP_DATA_DIR", temp_dir.path());
 
         let (store, registry, _temp_dir) = create_test_storage().await;
 
@@ -1991,7 +1991,7 @@ mod tests {
         use gap_lib::tls::CertificateAuthority;
 
         let temp_dir = tempfile::tempdir().expect("create temp dir");
-        std::env::set_var("ACP_DATA_DIR", temp_dir.path());
+        std::env::set_var("GAP_DATA_DIR", temp_dir.path());
 
         let (store, registry, _temp_dir) = create_test_storage().await;
 
@@ -2047,7 +2047,7 @@ mod tests {
         use argon2::{Argon2, PasswordHasher};
 
         let temp_dir = tempfile::tempdir().expect("create temp dir");
-        std::env::set_var("ACP_DATA_DIR", temp_dir.path());
+        std::env::set_var("GAP_DATA_DIR", temp_dir.path());
 
         let (store, registry, _temp_dir) = create_test_storage().await;
 
@@ -2151,7 +2151,7 @@ mod tests {
         use argon2::{Argon2, PasswordHasher};
 
         let temp_dir = tempfile::tempdir().expect("create temp dir");
-        std::env::set_var("ACP_DATA_DIR", temp_dir.path());
+        std::env::set_var("GAP_DATA_DIR", temp_dir.path());
 
         let (store, registry, _temp_dir) = create_test_storage().await;
 

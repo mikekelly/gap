@@ -215,7 +215,7 @@ impl Default for Config {
         Self {
             proxy_port: 9443,
             api_port: 9080,
-            ca_cert_path: "~/.acp/ca.crt".to_string(),
+            ca_cert_path: "~/.gap/ca.crt".to_string(),
             data_dir: None,
             log_level: "info".to_string(),
         }
@@ -425,11 +425,11 @@ mod tests {
         let config = Config::new()
             .with_proxy_port(8443)
             .with_api_port(8080)
-            .with_data_dir("/var/lib/acp");
+            .with_data_dir("/var/lib/gap");
 
         assert_eq!(config.proxy_port, 8443);
         assert_eq!(config.api_port, 8080);
-        assert_eq!(config.data_dir, Some("/var/lib/acp".to_string()));
+        assert_eq!(config.data_dir, Some("/var/lib/gap".to_string()));
     }
 
     #[test]

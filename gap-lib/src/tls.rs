@@ -719,8 +719,8 @@ mod cert_verify_tests {
         use std::process::Command;
 
         // Load CA
-        let ca_cert = fs::read_to_string("/Users/mike/.config/acp/ca.crt").unwrap();
-        let ca_key = fs::read_to_string("/Users/mike/.config/acp/ca.key").unwrap();
+        let ca_cert = fs::read_to_string("/Users/mike/.config/gap/ca.crt").unwrap();
+        let ca_key = fs::read_to_string("/Users/mike/.config/gap/ca.key").unwrap();
 
         let ca = CertificateAuthority::from_pem(&ca_cert, &ca_key).unwrap();
 
@@ -739,7 +739,7 @@ mod cert_verify_tests {
 
         // Verify the certificate against the CA
         let verify = Command::new("openssl")
-            .args(&["verify", "-CAfile", "/Users/mike/.config/acp/ca.crt", "/tmp/test_cert.pem"])
+            .args(&["verify", "-CAfile", "/Users/mike/.config/gap/ca.crt", "/tmp/test_cert.pem"])
             .output()
             .unwrap();
 

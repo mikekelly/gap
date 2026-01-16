@@ -171,7 +171,7 @@ impl KeychainStore {
     /// Create a new KeychainStore with an access group
     ///
     /// The access group allows keychain items to survive binary re-signing.
-    /// Must be prefixed with Team ID (e.g., "3R44BTH39W.com.acp.secrets").
+    /// Must be prefixed with Team ID (e.g., "3R44BTH39W.com.gap.secrets").
     pub fn new_with_access_group(
         service_name: impl Into<String>,
         access_group: impl Into<String>,
@@ -227,8 +227,8 @@ impl SecretStore for KeychainStore {
 /// * `data_dir` - Optional directory for FileStore. If None on macOS, uses Keychain.
 ///   If None on other platforms, uses a default location.
 pub async fn create_store(data_dir: Option<PathBuf>) -> Result<Box<dyn SecretStore>> {
-    // Check for ACP_DATA_DIR environment variable first (useful for testing)
-    if let Ok(env_path) = std::env::var("ACP_DATA_DIR") {
+    // Check for GAP_DATA_DIR environment variable first (useful for testing)
+    if let Ok(env_path) = std::env::var("GAP_DATA_DIR") {
         let store = FileStore::new(PathBuf::from(env_path)).await?;
         return Ok(Box::new(store));
     }
@@ -245,24 +245,24 @@ pub async fn create_store(data_dir: Option<PathBuf>) -> Result<Box<dyn SecretSto
             {
                 // In test mode, use a test-specific namespace to avoid interfering with production keychain
                 #[cfg(test)]
-                let service_name = format!("com.acp.test.{}", std::process::id());
+                let service_name = format!("com.gap.test.{}", std::process::id());
                 #[cfg(not(test))]
-                let service_name = "com.acp.credentials";
+                let service_name = "com.gap.credentials";
 
                 let store = KeychainStore::new_with_access_group(
                     service_name,
-                    "3R44BTH39W.com.acp.secrets",
+                    "3R44BTH39W.com.gap.secrets",
                 )?;
                 Ok(Box::new(store))
             }
 
             #[cfg(not(target_os = "macos"))]
             {
-                // Use default location: ~/.acp/secrets
+                // Use default location: ~/.gap/secrets
                 let home = std::env::var("HOME")
                     .or_else(|_| std::env::var("USERPROFILE"))
                     .map_err(|_| crate::AcpError::storage("Cannot determine home directory"))?;
-                let path = PathBuf::from(home).join(".acp").join("secrets");
+                let path = PathBuf::from(home).join(".gap").join("secrets");
                 let store = FileStore::new(path).await?;
                 Ok(Box::new(store))
             }
@@ -391,7 +391,7 @@ mod tests {
     #[tokio::test]
     async fn test_keychain_store() {
         // Use a unique service name for testing
-        let service_name = format!("com.acp.test.{}", std::process::id());
+        let service_name = format!("com.gap.test.{}", std::process::id());
         let store = KeychainStore::new(&service_name).expect("create KeychainStore");
 
         // Test basic operations (not list, since KeychainStore.list() returns empty)
@@ -464,8 +464,8 @@ mod tests {
     #[tokio::test]
     async fn test_keychain_store_with_access_group() {
         // Test that KeychainStore can be created with an access group
-        let service_name = format!("com.acp.test.{}", std::process::id());
-        let access_group = "3R44BTH39W.com.acp.secrets";
+        let service_name = format!("com.gap.test.{}", std::process::id());
+        let access_group = "3R44BTH39W.com.gap.secrets";
 
         let store = KeychainStore::new_with_access_group(&service_name, access_group)
             .expect("create KeychainStore with access group");
@@ -496,8 +496,8 @@ mod tests {
         // Verify that create_store(None) uses test namespace when running in test mode
         // This prevents tests from interfering with production keychain
 
-        // Unset ACP_DATA_DIR to ensure we get KeychainStore
-        std::env::remove_var("ACP_DATA_DIR");
+        // Unset GAP_DATA_DIR to ensure we get KeychainStore
+        std::env::remove_var("GAP_DATA_DIR");
 
         let store = create_store(None)
             .await
@@ -511,7 +511,7 @@ mod tests {
 
         // Verify service name starts with test prefix
         assert!(
-            keychain_store.service_name.starts_with("com.acp.test."),
+            keychain_store.service_name.starts_with("com.gap.test."),
             "Service name should use test namespace, got: {}",
             keychain_store.service_name
         );

@@ -19,7 +19,7 @@ services:
     volumes:
       - acp-data:/var/lib/acp
     environment:
-      - RUST_LOG=acp_server=info,acp_lib=info
+      - RUST_LOG=gap_server=info,gap_lib=info
     restart: unless-stopped
     networks:
       - acp-network
@@ -34,7 +34,7 @@ services:
     volumes:
       - acp-data:/var/lib/acp
     environment:
-      - RUST_LOG=acp_server=info,acp_lib=info
+      - RUST_LOG=gap_server=info,gap_lib=info
     restart: unless-stopped
     networks:
       - acp-network
@@ -57,7 +57,7 @@ services:
     volumes:
       - ./smoke-tests/test-docker-integration.sh:/tests/test-docker-integration.sh:ro
     environment:
-      - ACP_SERVER_URL=http://acp-server:9080
+      - GAP_SERVER_URL=http://acp-server:9080
     networks:
       - acp-network
     profiles:

@@ -25,9 +25,9 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
-    /// Initialize ACP server with password and CA certificate
+    /// Initialize GAP server with password and CA certificate
     Init {
-        /// Path to export CA certificate (default: ~/.acp/ca.pem)
+        /// Path to export CA certificate (default: ~/.gap/ca.pem)
         #[arg(long)]
         ca_path: Option<String>,
 
@@ -120,7 +120,7 @@ pub fn get_default_ca_path() -> std::path::PathBuf {
     let home = std::env::var("HOME")
         .or_else(|_| std::env::var("USERPROFILE"))
         .expect("Cannot determine home directory");
-    std::path::PathBuf::from(home).join(".config").join("acp").join("ca.crt")
+    std::path::PathBuf::from(home).join(".config").join("gap").join("ca.crt")
 }
 
 pub fn create_api_client(server_url: &str) -> anyhow::Result<client::ApiClient> {
