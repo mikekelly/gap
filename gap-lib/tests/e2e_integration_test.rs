@@ -330,8 +330,8 @@ async fn test_token_management_flow() {
     let token_id = token_response["id"].as_str().expect("No token ID");
     let token_value = token_response["token"].as_str().expect("No token value");
 
-    // Verify token starts with "acp_"
-    assert!(token_value.starts_with("acp_"));
+    // Verify token starts with "gap_"
+    assert!(token_value.starts_with("gap_"));
 
     // List tokens (uses POST /tokens which is an alias for list)
     let list_body = TestServer::auth_body(password, json!({}));
@@ -438,7 +438,7 @@ async fn test_complete_integration_flow() {
     assert_eq!(status["api_port"], server.api_port);
 
     // Verify we got a valid token
-    assert!(token_value.starts_with("acp_"));
+    assert!(token_value.starts_with("gap_"));
     assert!(token_value.len() > 20);
 }
 

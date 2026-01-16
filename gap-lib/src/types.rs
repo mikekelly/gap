@@ -175,7 +175,7 @@ impl AgentToken {
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_millis();
-        let token = format!("acp_{:x}", timestamp);
+        let token = format!("gap_{:x}", timestamp);
         let prefix = token.chars().take(8).collect();
 
         Self {
@@ -386,7 +386,7 @@ mod tests {
         assert!(!token.id.is_empty());
         assert_eq!(token.name, "Test Agent");
         assert_eq!(token.prefix.len(), 8);
-        assert!(token.token.starts_with("acp_"));
+        assert!(token.token.starts_with("gap_"));
     }
 
     #[test]

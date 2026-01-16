@@ -1781,7 +1781,7 @@ mod tests {
         state.set_password_hash(password_hash).await;
 
         // Add a token to the registry directly
-        let token_value = "acp_test_token_12345".to_string();
+        let token_value = "gap_test_token_12345".to_string();
         let token_entry = TokenEntry {
             token_value: token_value.clone(),
             name: "test-token".to_string(),
@@ -1818,7 +1818,7 @@ mod tests {
         assert_eq!(tokens_response.tokens.len(), 1);
         assert_eq!(tokens_response.tokens[0].id, token_value);
         assert_eq!(tokens_response.tokens[0].name, "test-token");
-        assert_eq!(tokens_response.tokens[0].prefix, "acp_test");
+        assert_eq!(tokens_response.tokens[0].prefix, "gap_test");
     }
 
     #[tokio::test]

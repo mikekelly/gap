@@ -328,7 +328,7 @@ mod tests {
 
         let mut tokens = HashMap::new();
         tokens.insert(
-            "acp_abc123".to_string(),
+            "gap_abc123".to_string(),
             TokenMetadata {
                 name: "test-token".to_string(),
                 created_at: DateTime::parse_from_rfc3339("2024-01-15T10:30:00Z")
@@ -358,7 +358,7 @@ mod tests {
         // Serialize to JSON
         let json = serde_json::to_string(&data).expect("serialization should succeed");
         assert!(json.contains("\"version\":1"));
-        assert!(json.contains("\"acp_abc123\""));
+        assert!(json.contains("\"gap_abc123\""));
         assert!(json.contains("\"name\":\"exa\""));
 
         // Deserialize back
@@ -366,7 +366,7 @@ mod tests {
             serde_json::from_str(&json).expect("deserialization should succeed");
         assert_eq!(parsed.version, 1);
         assert_eq!(parsed.tokens.len(), 1);
-        assert_eq!(parsed.tokens.get("acp_abc123").unwrap().name, "test-token");
+        assert_eq!(parsed.tokens.get("gap_abc123").unwrap().name, "test-token");
         assert_eq!(parsed.plugins.len(), 1);
         assert_eq!(parsed.plugins[0].name, "exa");
         assert_eq!(parsed.credentials.len(), 1);
@@ -392,12 +392,12 @@ mod tests {
     #[test]
     fn test_token_entry_fields() {
         let token = TokenEntry {
-            token_value: "acp_test123".to_string(),
+            token_value: "gap_test123".to_string(),
             name: "my-agent".to_string(),
             created_at: Utc::now(),
         };
 
-        assert_eq!(token.token_value, "acp_test123");
+        assert_eq!(token.token_value, "gap_test123");
         assert_eq!(token.name, "my-agent");
     }
 
@@ -459,7 +459,7 @@ mod tests {
         // Create test data
         let mut tokens = HashMap::new();
         tokens.insert(
-            "acp_test123".to_string(),
+            "gap_test123".to_string(),
             TokenMetadata {
                 name: "test-token".to_string(),
                 created_at: Utc::now(),
@@ -494,7 +494,7 @@ mod tests {
         let loaded = registry.load().await.expect("load should succeed");
         assert_eq!(loaded.version, data.version);
         assert_eq!(loaded.tokens.len(), 1);
-        assert_eq!(loaded.tokens.get("acp_test123").unwrap().name, "test-token");
+        assert_eq!(loaded.tokens.get("gap_test123").unwrap().name, "test-token");
         assert_eq!(loaded.plugins.len(), 1);
         assert_eq!(loaded.plugins[0].name, "exa");
         assert_eq!(loaded.credentials.len(), 1);
@@ -515,7 +515,7 @@ mod tests {
         // Save initial data
         let mut tokens1 = HashMap::new();
         tokens1.insert(
-            "acp_token1".to_string(),
+            "gap_token1".to_string(),
             TokenMetadata {
                 name: "first".to_string(),
                 created_at: Utc::now(),
@@ -534,14 +534,14 @@ mod tests {
         // Overwrite with new data
         let mut tokens2 = HashMap::new();
         tokens2.insert(
-            "acp_token1".to_string(),
+            "gap_token1".to_string(),
             TokenMetadata {
                 name: "first".to_string(),
                 created_at: Utc::now(),
             }
         );
         tokens2.insert(
-            "acp_token2".to_string(),
+            "gap_token2".to_string(),
             TokenMetadata {
                 name: "second".to_string(),
                 created_at: Utc::now(),
@@ -560,8 +560,8 @@ mod tests {
         // Load and verify it was overwritten
         let loaded = registry.load().await.expect("load should succeed");
         assert_eq!(loaded.tokens.len(), 2);
-        assert!(loaded.tokens.contains_key("acp_token2"));
-        assert_eq!(loaded.tokens.get("acp_token2").unwrap().name, "second");
+        assert!(loaded.tokens.contains_key("gap_token2"));
+        assert_eq!(loaded.tokens.get("gap_token2").unwrap().name, "second");
     }
 
     #[tokio::test]
@@ -607,7 +607,7 @@ mod tests {
         let registry = Registry::new(Arc::new(store));
 
         let token = TokenEntry {
-            token_value: "acp_abc123".to_string(),
+            token_value: "gap_abc123".to_string(),
             name: "test-token".to_string(),
             created_at: Utc::now(),
         };
@@ -618,7 +618,7 @@ mod tests {
         // Verify token is in registry
         let tokens = registry.list_tokens().await.expect("list should succeed");
         assert_eq!(tokens.len(), 1);
-        assert_eq!(tokens[0].token_value, "acp_abc123");
+        assert_eq!(tokens[0].token_value, "gap_abc123");
         assert_eq!(tokens[0].name, "test-token");
     }
 
@@ -635,12 +635,12 @@ mod tests {
 
         // Add two tokens
         let token1 = TokenEntry {
-            token_value: "acp_abc123".to_string(),
+            token_value: "gap_abc123".to_string(),
             name: "token1".to_string(),
             created_at: Utc::now(),
         };
         let token2 = TokenEntry {
-            token_value: "acp_def456".to_string(),
+            token_value: "gap_def456".to_string(),
             name: "token2".to_string(),
             created_at: Utc::now(),
         };
@@ -649,14 +649,14 @@ mod tests {
 
         // Remove first token by value
         registry
-            .remove_token("acp_abc123")
+            .remove_token("gap_abc123")
             .await
             .expect("remove should succeed");
 
         // Verify only second token remains
         let tokens = registry.list_tokens().await.expect("list should succeed");
         assert_eq!(tokens.len(), 1);
-        assert_eq!(tokens[0].token_value, "acp_def456");
+        assert_eq!(tokens[0].token_value, "gap_def456");
     }
 
     #[tokio::test]
@@ -676,12 +676,12 @@ mod tests {
 
         // Add tokens
         let token1 = TokenEntry {
-            token_value: "acp_abc123".to_string(),
+            token_value: "gap_abc123".to_string(),
             name: "token1".to_string(),
             created_at: Utc::now(),
         };
         let token2 = TokenEntry {
-            token_value: "acp_def456".to_string(),
+            token_value: "gap_def456".to_string(),
             name: "token2".to_string(),
             created_at: Utc::now(),
         };
@@ -933,7 +933,7 @@ mod tests {
         let registry = Registry::new(Arc::new(store));
 
         let token = TokenEntry {
-            token_value: "acp_test123".to_string(),
+            token_value: "gap_test123".to_string(),
             name: "test-token".to_string(),
             created_at: Utc::now(),
         };
@@ -944,7 +944,7 @@ mod tests {
         // Verify token is in registry
         let tokens = registry.list_tokens().await.expect("list should succeed");
         assert_eq!(tokens.len(), 1);
-        assert_eq!(tokens[0].token_value, "acp_test123");
+        assert_eq!(tokens[0].token_value, "gap_test123");
         assert_eq!(tokens[0].name, "test-token");
     }
 
@@ -962,7 +962,7 @@ mod tests {
 
         // Add token
         let token = TokenEntry {
-            token_value: "acp_test123".to_string(),
+            token_value: "gap_test123".to_string(),
             name: "test-token".to_string(),
             created_at: Utc::now(),
         };
@@ -970,7 +970,7 @@ mod tests {
 
         // Remove by value
         registry
-            .remove_token("acp_test123")
+            .remove_token("gap_test123")
             .await
             .expect("remove should succeed");
 
@@ -997,7 +997,7 @@ mod tests {
 
         let mut tokens = HashMap::new();
         tokens.insert(
-            "acp_abc123".to_string(),
+            "gap_abc123".to_string(),
             TokenMetadata {
                 name: "test-token".to_string(),
                 created_at: DateTime::parse_from_rfc3339("2024-01-15T10:30:00Z")
@@ -1016,7 +1016,7 @@ mod tests {
 
         // Serialize to JSON
         let json = serde_json::to_string(&data).expect("serialization should succeed");
-        assert!(json.contains("\"acp_abc123\""));
+        assert!(json.contains("\"gap_abc123\""));
         assert!(json.contains("\"test-token\""));
 
         // Deserialize back
@@ -1024,7 +1024,7 @@ mod tests {
             serde_json::from_str(&json).expect("deserialization should succeed");
         assert_eq!(parsed.version, 1);
         assert_eq!(parsed.tokens.len(), 1);
-        assert_eq!(parsed.tokens.get("acp_abc123").unwrap().name, "test-token");
+        assert_eq!(parsed.tokens.get("gap_abc123").unwrap().name, "test-token");
     }
 
     // RED: Test for HashMap-based credentials in RegistryData
@@ -1076,12 +1076,12 @@ mod tests {
             name: "test-agent".to_string(),
             created_at: Utc::now(),
         };
-        registry.add_token_with_metadata("acp_abc123", &metadata)
+        registry.add_token_with_metadata("gap_abc123", &metadata)
             .await
             .expect("add should succeed");
 
         // Get token by value - should be O(1) lookup
-        let result = registry.get_token("acp_abc123")
+        let result = registry.get_token("gap_abc123")
             .await
             .expect("get should succeed");
         assert!(result.is_some());
