@@ -1,6 +1,6 @@
-//! ACP CLI - Agent Credential Proxy command-line interface
+//! GAP CLI - Gated Agent Proxy command-line interface
 //!
-//! This binary provides the CLI for managing the ACP server,
+//! This binary provides the CLI for managing the GAP server,
 //! including initialization, plugin management, credential storage,
 //! and agent token management.
 
@@ -13,7 +13,7 @@ mod commands;
 
 #[derive(Parser)]
 #[command(name = "gap")]
-#[command(author, version, about = "Agent Credential Proxy CLI", long_about = None)]
+#[command(author, version, about = "GAP CLI", long_about = None)]
 struct Cli {
     /// Server URL (default: https://localhost:9080, can be set via SERVER env var)
     #[arg(long, default_value = "https://localhost:9080")]

@@ -87,7 +87,7 @@ impl CertificateAuthority {
         // Set distinguished name
         let mut dn = DistinguishedName::new();
         dn.push(DnType::CommonName, "ACP Certificate Authority");
-        dn.push(DnType::OrganizationName, "Agent Credential Proxy");
+        dn.push(DnType::OrganizationName, "GAP");
         params.distinguished_name = dn;
 
         // Set validity period (10 years)
@@ -294,7 +294,7 @@ impl CertificateAuthority {
         let mut ca_params = CertificateParams::default();
         let mut ca_dn = DistinguishedName::new();
         ca_dn.push(DnType::CommonName, "ACP Certificate Authority");
-        ca_dn.push(DnType::OrganizationName, "Agent Credential Proxy");
+        ca_dn.push(DnType::OrganizationName, "GAP");
         ca_params.distinguished_name = ca_dn;
         ca_params.is_ca = rcgen::IsCa::Ca(rcgen::BasicConstraints::Unconstrained);
         ca_params.key_usages = vec![

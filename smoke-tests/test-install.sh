@@ -40,49 +40,49 @@ if command -v cargo &> /dev/null; then
 
     # Install to test prefix
     mkdir -p "$TEMP_PREFIX/bin"
-    cp target/release/acp "$TEMP_PREFIX/bin/acp"
-    cp target/release/acp-server "$TEMP_PREFIX/bin/acp-server"
-    chmod +x "$TEMP_PREFIX/bin/acp" "$TEMP_PREFIX/bin/acp-server"
+    cp target/release/gap "$TEMP_PREFIX/bin/gap"
+    cp target/release/gap-server "$TEMP_PREFIX/bin/gap-server"
+    chmod +x "$TEMP_PREFIX/bin/gap" "$TEMP_PREFIX/bin/gap-server"
 
     log_pass "Binaries installed to test prefix"
 
     # Verify binaries exist
-    if [ -f "$TEMP_PREFIX/bin/acp" ]; then
-        log_pass "acp binary exists"
+    if [ -f "$TEMP_PREFIX/bin/gap" ]; then
+        log_pass "gap binary exists"
     else
-        log_fail "acp binary not found"
+        log_fail "gap binary not found"
     fi
 
-    if [ -f "$TEMP_PREFIX/bin/acp-server" ]; then
-        log_pass "acp-server binary exists"
+    if [ -f "$TEMP_PREFIX/bin/gap-server" ]; then
+        log_pass "gap-server binary exists"
     else
-        log_fail "acp-server binary not found"
+        log_fail "gap-server binary not found"
     fi
 
     # Verify binaries are executable
-    if [ -x "$TEMP_PREFIX/bin/acp" ]; then
-        log_pass "acp binary is executable"
+    if [ -x "$TEMP_PREFIX/bin/gap" ]; then
+        log_pass "gap binary is executable"
     else
-        log_fail "acp binary is not executable"
+        log_fail "gap binary is not executable"
     fi
 
-    if [ -x "$TEMP_PREFIX/bin/acp-server" ]; then
-        log_pass "acp-server binary is executable"
+    if [ -x "$TEMP_PREFIX/bin/gap-server" ]; then
+        log_pass "gap-server binary is executable"
     else
-        log_fail "acp-server binary is not executable"
+        log_fail "gap-server binary is not executable"
     fi
 
     # Verify binaries run
-    if "$TEMP_PREFIX/bin/acp" --version &> /dev/null; then
-        log_pass "acp --version works"
+    if "$TEMP_PREFIX/bin/gap" --version &> /dev/null; then
+        log_pass "gap --version works"
     else
-        log_fail "acp --version failed"
+        log_fail "gap --version failed"
     fi
 
-    if "$TEMP_PREFIX/bin/acp-server" --version &> /dev/null; then
-        log_pass "acp-server --version works"
+    if "$TEMP_PREFIX/bin/gap-server" --version &> /dev/null; then
+        log_pass "gap-server --version works"
     else
-        log_fail "acp-server --version failed"
+        log_fail "gap-server --version failed"
     fi
 
     # Test CLI plugin commands (requires server to be running)
@@ -92,13 +92,13 @@ if command -v cargo &> /dev/null; then
 
     # Start server in background for CLI testing
     export HOME="$TEMP_PREFIX"
-    export ACP_PASSWORD="test-password-$(date +%s)"
+    export GAP_PASSWORD="test-password-$(date +%s)"
 
     # Create data directory
-    mkdir -p "$TEMP_PREFIX/.config/acp"
+    mkdir -p "$TEMP_PREFIX/.config/gap"
 
     # Start server in background with temp data dir
-    "$TEMP_PREFIX/bin/acp-server" --data-dir "$TEMP_PREFIX/.config/acp" --proxy-port 19443 --api-port 19080 > "$TEMP_PREFIX/server.log" 2>&1 &
+    "$TEMP_PREFIX/bin/gap-server" --data-dir "$TEMP_PREFIX/.config/gap" --proxy-port 19443 --api-port 19080 > "$TEMP_PREFIX/server.log" 2>&1 &
     SERVER_PID=$!
 
     # Wait for server to start
@@ -111,27 +111,27 @@ if command -v cargo &> /dev/null; then
 
     log_pass "Test server started (PID $SERVER_PID)"
 
-    # Initialize ACP
-    PASSWORD_HASH=$(echo -n "$ACP_PASSWORD" | sha512sum | cut -d' ' -f1)
+    # Initialize GAP
+    PASSWORD_HASH=$(echo -n "$GAP_PASSWORD" | sha512sum | cut -d' ' -f1)
     INIT_RESULT=$(curl -s -X POST http://localhost:19080/init \
         -H "Content-Type: application/json" \
-        -d "{\"password_hash\": \"$PASSWORD_HASH\", \"ca_path\": \"$TEMP_PREFIX/.config/acp/ca.crt\"}")
+        -d "{\"password_hash\": \"$PASSWORD_HASH\", \"ca_path\": \"$TEMP_PREFIX/.config/gap/ca.crt\"}")
 
     if echo "$INIT_RESULT" | grep -q '"ca_path"'; then
-        log_pass "ACP initialized via API"
+        log_pass "GAP initialized via API"
     else
-        log_fail "Failed to initialize ACP: $INIT_RESULT"
+        log_fail "Failed to initialize GAP: $INIT_RESULT"
     fi
 
     # Test plugin installation via CLI (requires network access)
     # Note: This will fail if GitHub is unreachable, but that's expected
-    if "$TEMP_PREFIX/bin/acp" --server http://localhost:19080 install mikekelly/exa-acp 2>&1 | tee "$TEMP_PREFIX/install.log"; then
-        log_pass "acp install command executed"
+    if "$TEMP_PREFIX/bin/gap" --server http://localhost:19080 install mikekelly/exa-acp 2>&1 | tee "$TEMP_PREFIX/install.log"; then
+        log_pass "gap install command executed"
 
         # Test plugin listing via CLI
-        PLUGINS_OUTPUT=$("$TEMP_PREFIX/bin/acp" --server http://localhost:19080 plugins 2>&1)
+        PLUGINS_OUTPUT=$("$TEMP_PREFIX/bin/gap" --server http://localhost:19080 plugins 2>&1)
         if echo "$PLUGINS_OUTPUT" | grep -q "exa"; then
-            log_pass "acp plugins command shows installed plugin"
+            log_pass "gap plugins command shows installed plugin"
 
             # Verify metadata is shown (hosts and credentials)
             if echo "$PLUGINS_OUTPUT" | grep -q -i "host"; then
@@ -202,7 +202,7 @@ echo ""
 echo "Test 3: Help output"
 echo "==================="
 
-if /Users/mike/code/agent-credential-proxy/install.sh --help | grep -q "ACP Installation Script"; then
+if /Users/mike/code/agent-credential-proxy/install.sh --help | grep -q "GAP"; then
     log_pass "Help output works"
 else
     log_fail "Help output failed"

@@ -8,7 +8,7 @@ use crate::plugin_matcher::find_matching_plugin;
 use crate::plugin_runtime::PluginRuntime;
 use crate::registry::Registry;
 use crate::storage::SecretStore;
-use crate::types::ACPCredentials;
+use crate::types::GAPCredentials;
 use tracing::{debug, warn};
 
 /// Load all credential fields for a plugin from Registry
@@ -19,8 +19,8 @@ async fn load_plugin_credentials<S: SecretStore + ?Sized>(
     plugin_name: &str,
     _store: &S,
     registry: &Registry,
-) -> Result<ACPCredentials> {
-    let mut credentials = ACPCredentials::new();
+) -> Result<GAPCredentials> {
+    let mut credentials = GAPCredentials::new();
 
     // Get credentials directly from registry (they're stored there now)
     if let Some(plugin_creds) = registry.get_plugin_credentials(plugin_name).await? {

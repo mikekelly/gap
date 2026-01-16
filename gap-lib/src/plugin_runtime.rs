@@ -8,7 +8,7 @@
 //! - Sandbox restrictions (no fetch, eval, etc.)
 
 use crate::storage::SecretStore;
-use crate::types::{ACPCredentials, ACPPlugin, ACPRequest};
+use crate::types::{GAPCredentials, GAPPlugin, GAPRequest};
 use crate::{AcpError, Result};
 use base64::Engine;
 use boa_engine::{Context, JsArgs, JsNativeError, JsResult, JsString, JsValue, NativeFunction, Source};
@@ -21,7 +21,7 @@ use std::time::Duration;
 /// JavaScript runtime for plugin execution
 pub struct PluginRuntime {
     context: Context,
-    plugins: HashMap<String, ACPPlugin>,
+    plugins: HashMap<String, GAPPlugin>,
 }
 
 impl PluginRuntime {
@@ -554,8 +554,8 @@ impl PluginRuntime {
     /// * `code` - JavaScript code to execute
     ///
     /// # Returns
-    /// The loaded ACPPlugin with metadata
-    pub fn load_plugin_from_code(&mut self, name: &str, code: &str) -> Result<ACPPlugin> {
+    /// The loaded GAPPlugin with metadata
+    pub fn load_plugin_from_code(&mut self, name: &str, code: &str) -> Result<GAPPlugin> {
         // Execute the plugin code
         self.execute(code)?;
 
@@ -578,8 +578,8 @@ impl PluginRuntime {
     /// * `store` - SecretStore to retrieve plugin code from
     ///
     /// # Returns
-    /// The loaded ACPPlugin with metadata
-    pub async fn load_plugin<S: SecretStore>(&mut self, name: &str, store: &S) -> Result<ACPPlugin> {
+    /// The loaded GAPPlugin with metadata
+    pub async fn load_plugin<S: SecretStore>(&mut self, name: &str, store: &S) -> Result<GAPPlugin> {
         // Retrieve plugin code from store
         let key = format!("plugin:{}", name);
         let code = store.get(&key).await?
@@ -602,8 +602,8 @@ impl PluginRuntime {
     /// * `canonical_name` - The canonical plugin identifier (e.g., "mikekelly/exa-acp")
     ///
     /// # Returns
-    /// ACPPlugin with extracted metadata
-    pub fn extract_plugin_metadata(&mut self, canonical_name: &str) -> Result<ACPPlugin> {
+    /// GAPPlugin with extracted metadata
+    pub fn extract_plugin_metadata(&mut self, canonical_name: &str) -> Result<GAPPlugin> {
         // Get the plugin object from global scope
         let global = self.context.global_object();
         let plugin_key = JsString::from("plugin");
@@ -710,7 +710,7 @@ impl PluginRuntime {
         // is in the JS context and will be called directly
         let transform = "function transform(request, credentials) { /* loaded from store */ }".to_string();
 
-        Ok(ACPPlugin {
+        Ok(GAPPlugin {
             name,
             match_patterns,
             credential_schema,
@@ -730,9 +730,9 @@ impl PluginRuntime {
     pub fn execute_transform(
         &mut self,
         plugin_name: &str,
-        request: ACPRequest,
-        credentials: &ACPCredentials,
-    ) -> Result<ACPRequest> {
+        request: GAPRequest,
+        credentials: &GAPCredentials,
+    ) -> Result<GAPRequest> {
         // Get the plugin
         let _plugin = self.plugins.get(plugin_name)
             .ok_or_else(|| AcpError::plugin(format!("Plugin '{}' not loaded", plugin_name)))?;
@@ -762,7 +762,7 @@ impl PluginRuntime {
             &mut self.context
         ).map_err(|e| AcpError::plugin(format!("Transform execution error: {}", e)))?;
 
-        // Convert result back to ACPRequest
+        // Convert result back to GAPRequest
         self.js_to_request(&result)
     }
 
@@ -782,10 +782,10 @@ impl PluginRuntime {
     pub async fn execute_transform_with_timeout(
         &mut self,
         plugin_name: &str,
-        request: ACPRequest,
-        credentials: &ACPCredentials,
+        request: GAPRequest,
+        credentials: &GAPCredentials,
         timeout: Duration,
-    ) -> Result<ACPRequest> {
+    ) -> Result<GAPRequest> {
         use std::time::Instant;
 
         let start = Instant::now();
@@ -805,8 +805,8 @@ impl PluginRuntime {
         Ok(result)
     }
 
-    /// Convert ACPRequest to JavaScript object
-    fn request_to_js(&mut self, request: &ACPRequest) -> Result<JsValue> {
+    /// Convert GAPRequest to JavaScript object
+    fn request_to_js(&mut self, request: &GAPRequest) -> Result<JsValue> {
         // Create request object
         let code = format!(
             r#"(function() {{
@@ -852,8 +852,8 @@ impl PluginRuntime {
         Ok(obj)
     }
 
-    /// Convert ACPCredentials to JavaScript object
-    fn credentials_to_js(&mut self, credentials: &ACPCredentials) -> Result<JsValue> {
+    /// Convert GAPCredentials to JavaScript object
+    fn credentials_to_js(&mut self, credentials: &GAPCredentials) -> Result<JsValue> {
         // Create empty object
         let obj = self.context.eval(Source::from_bytes("({})"))
             .map_err(|e| AcpError::plugin(format!("Failed to create credentials object: {}", e)))?;
@@ -874,8 +874,8 @@ impl PluginRuntime {
         Ok(obj)
     }
 
-    /// Convert JavaScript object to ACPRequest
-    fn js_to_request(&mut self, value: &JsValue) -> Result<ACPRequest> {
+    /// Convert JavaScript object to GAPRequest
+    fn js_to_request(&mut self, value: &JsValue) -> Result<GAPRequest> {
         let obj = value.as_object()
             .ok_or_else(|| AcpError::plugin("Transform result is not an object"))?;
 
@@ -929,7 +929,7 @@ impl PluginRuntime {
         let body = js_value_to_bytes(&body_value, &mut self.context)
             .map_err(|e| AcpError::plugin(format!("Failed to convert body: {}", e)))?;
 
-        Ok(ACPRequest {
+        Ok(GAPRequest {
             method,
             url,
             headers,
@@ -1275,10 +1275,10 @@ mod tests {
         // Manually cache the plugin since we didn't use load_plugin
         runtime.plugins.insert(plugin.name.clone(), plugin);
 
-        let request = ACPRequest::new("GET", "https://api.example.com/users")
+        let request = GAPRequest::new("GET", "https://api.example.com/users")
             .with_header("Content-Type", "application/json");
 
-        let mut credentials = ACPCredentials::new();
+        let mut credentials = GAPCredentials::new();
         credentials.set("api_key", "secret123");
 
         let transformed = runtime.execute_transform("test-plugin", request, &credentials).unwrap();
@@ -1311,9 +1311,9 @@ mod tests {
         let plugin = runtime.extract_plugin_metadata("rewriter").unwrap();
         runtime.plugins.insert(plugin.name.clone(), plugin);
 
-        let request = ACPRequest::new("GET", "https://old.example.com/api");
+        let request = GAPRequest::new("GET", "https://old.example.com/api");
 
-        let transformed = runtime.execute_transform("rewriter", request, &ACPCredentials::new()).unwrap();
+        let transformed = runtime.execute_transform("rewriter", request, &GAPCredentials::new()).unwrap();
 
         assert_eq!(transformed.method, "POST");
         assert_eq!(transformed.url, "https://new.example.com/api");
@@ -1345,10 +1345,10 @@ mod tests {
         let plugin = runtime.extract_plugin_metadata("body-transformer").unwrap();
         runtime.plugins.insert(plugin.name.clone(), plugin);
 
-        let request = ACPRequest::new("POST", "https://api.example.com/data")
+        let request = GAPRequest::new("POST", "https://api.example.com/data")
             .with_body(b"original".to_vec());
 
-        let transformed = runtime.execute_transform("body-transformer", request, &ACPCredentials::new()).unwrap();
+        let transformed = runtime.execute_transform("body-transformer", request, &GAPCredentials::new()).unwrap();
 
         assert_eq!(transformed.body, b"original - transformed");
     }
@@ -1357,8 +1357,8 @@ mod tests {
     fn test_execute_transform_plugin_not_loaded() {
         let mut runtime = PluginRuntime::new().unwrap();
 
-        let request = ACPRequest::new("GET", "https://api.example.com");
-        let result = runtime.execute_transform("nonexistent", request, &ACPCredentials::new());
+        let request = GAPRequest::new("GET", "https://api.example.com");
+        let result = runtime.execute_transform("nonexistent", request, &GAPCredentials::new());
 
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("not loaded"));
@@ -1368,7 +1368,7 @@ mod tests {
     fn test_request_to_js_and_back() {
         let mut runtime = PluginRuntime::new().unwrap();
 
-        let original = ACPRequest::new("POST", "https://api.example.com/test")
+        let original = GAPRequest::new("POST", "https://api.example.com/test")
             .with_header("Content-Type", "application/json")
             .with_header("Authorization", "Bearer token123")
             .with_body(b"test body".to_vec());
@@ -1386,7 +1386,7 @@ mod tests {
     fn test_credentials_to_js() {
         let mut runtime = PluginRuntime::new().unwrap();
 
-        let mut credentials = ACPCredentials::new();
+        let mut credentials = GAPCredentials::new();
         credentials.set("api_key", "secret123");
         credentials.set("region", "us-west-2");
 
@@ -1537,12 +1537,12 @@ mod tests {
         let plugin = runtime.extract_plugin_metadata("fast-plugin").unwrap();
         runtime.plugins.insert(plugin.name.clone(), plugin);
 
-        let request = ACPRequest::new("GET", "https://api.example.com/test");
+        let request = GAPRequest::new("GET", "https://api.example.com/test");
 
         let result = runtime.execute_transform_with_timeout(
             "fast-plugin",
             request,
-            &ACPCredentials::new(),
+            &GAPCredentials::new(),
             Duration::from_secs(5)
         ).await;
 
@@ -1579,13 +1579,13 @@ mod tests {
         let plugin = runtime.extract_plugin_metadata("slow-plugin").unwrap();
         runtime.plugins.insert(plugin.name.clone(), plugin);
 
-        let request = ACPRequest::new("GET", "https://api.example.com/test");
+        let request = GAPRequest::new("GET", "https://api.example.com/test");
 
         // Use a very short timeout to catch the slow operation
         let result = runtime.execute_transform_with_timeout(
             "slow-plugin",
             request,
-            &ACPCredentials::new(),
+            &GAPCredentials::new(),
             Duration::from_millis(10)
         ).await;
 

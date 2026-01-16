@@ -648,7 +648,7 @@ fn parse_plugin_name(name: &str) -> std::result::Result<String, (StatusCode, Str
 async fn clone_and_validate_plugin(
     state: &ApiState,
     plugin_name: &str,
-) -> std::result::Result<(gap_lib::types::ACPPlugin, String), (StatusCode, String)> {
+) -> std::result::Result<(gap_lib::types::GAPPlugin, String), (StatusCode, String)> {
     use gap_lib::plugin_runtime::PluginRuntime;
     use git2::{build::RepoBuilder, Cred, FetchOptions, RemoteCallbacks};
     use tempfile::tempdir;

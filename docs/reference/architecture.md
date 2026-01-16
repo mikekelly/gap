@@ -1,6 +1,6 @@
 # Architecture Reference
 
-This document provides detailed technical reference for the ACP (Agent Credential Proxy) architecture.
+This document provides detailed technical reference for the GAP (Gated Agent Proxy) architecture.
 
 ## Patterns
 
@@ -18,7 +18,7 @@ Use `AcpError::storage("msg")` rather than `AcpError::Storage("msg".to_string())
 Centralized metadata storage at key "_registry" solves listing issues on platforms like macOS Keychain. Registry tracks what exists (metadata), while actual values remain at individual keys. `Registry.load()` returns empty `RegistryData` if not found (not an error).
 
 ### Credential Storage Pattern
-Management API stores credentials as `credential:{plugin}:{field_name}` (e.g., `credential:exa:api_key`). ProxyServer loads ALL fields for a plugin by listing keys with prefix `credential:{plugin}:` and builds an `ACPCredentials` object.
+Management API stores credentials as `credential:{plugin}:{field_name}` (e.g., `credential:exa:api_key`). ProxyServer loads ALL fields for a plugin by listing keys with prefix `credential:{plugin}:` and builds a `GAPCredentials` object.
 
 ### Token Storage Pattern
 Tokens stored as `token:{token_value}` → `{name, created_at}` in SecretStore, enabling direct lookup by token value without caching layer.

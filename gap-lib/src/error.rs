@@ -1,4 +1,4 @@
-//! Error types for the Agent Credential Proxy
+//! Error types for GAP
 //!
 //! Provides a unified error type that covers all failure modes across
 //! the proxy, storage, plugin runtime, and management API.

@@ -268,12 +268,12 @@ pub fn uninstall(purge: bool) -> anyhow::Result<()> {
 
     // If --purge flag is set, remove ~/.gap/ directory
     if purge {
-        let acp_dir = get_gap_dir();
-        if acp_dir.exists() {
-            if let Err(e) = std::fs::remove_dir_all(&acp_dir) {
+        let gap_dir = get_gap_dir();
+        if gap_dir.exists() {
+            if let Err(e) = std::fs::remove_dir_all(&gap_dir) {
                 eprintln!("Warning: Failed to remove data directory: {}", e);
             } else {
-                println!("Removed {}", acp_dir.display());
+                println!("Removed {}", gap_dir.display());
             }
         }
     }
@@ -354,7 +354,7 @@ mod tests {
     }
 
     #[test]
-    fn test_get_log_dir_returns_acp_logs() {
+    fn test_get_log_dir_returns_gap_logs() {
         let log_dir = get_log_dir();
         let log_dir_str = log_dir.to_string_lossy();
 

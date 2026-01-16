@@ -1,6 +1,6 @@
 # Integration Tests
 
-This directory contains integration tests for the Agent Credential Proxy system.
+This directory contains integration tests for the GAP system.
 
 ## Test Files
 
@@ -58,7 +58,7 @@ All tests run without manual intervention.
 
 ### TestServer Helper
 The E2E tests use a `TestServer` struct that:
-- Spawns `acp-server` binary in a subprocess
+- Spawns `gap-server` binary in a subprocess
 - Uses dynamic ports to avoid conflicts
 - Creates isolated temporary directories
 - Automatically cleans up on drop
@@ -109,7 +109,7 @@ For comprehensive testing including proxy functionality, see:
 ### Tests timeout
 Increase the timeout in the test code or check if the server binary is built:
 ```bash
-cargo build --bin acp-server
+cargo build --bin gap-server
 ```
 
 ### Keychain access denied (macOS)
@@ -121,5 +121,5 @@ The test is trying to access macOS Keychain. Either:
 Tests use dynamic port allocation, but if you see bind errors:
 ```bash
 # Kill any lingering test servers
-pkill -f acp-server
+pkill -f gap-server
 ```

@@ -1,7 +1,7 @@
-/// Agent Credential Proxy - Shared Library
+/// GAP - Shared Library
 ///
 /// This library contains core types, error handling, and shared logic
-/// used by both the `acp` CLI and `acp-server` daemon.
+/// used by both the `gap` CLI and `gap-server` daemon.
 pub mod error;
 pub mod http_utils;
 #[cfg(target_os = "macos")]
@@ -25,4 +25,4 @@ pub use storage::{create_store, FileStore, SecretStore};
 #[cfg(target_os = "macos")]
 pub use storage::KeychainStore;
 pub use tls::CertificateAuthority;
-pub use types::{ACPCredentials, ACPPlugin, ACPRequest, AgentToken, Config};
+pub use types::{GAPCredentials, GAPPlugin, GAPRequest, AgentToken, Config};

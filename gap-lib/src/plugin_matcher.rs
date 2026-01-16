@@ -6,7 +6,7 @@ use crate::error::Result;
 use crate::plugin_runtime::PluginRuntime;
 use crate::registry::Registry;
 use crate::storage::SecretStore;
-use crate::types::ACPPlugin;
+use crate::types::GAPPlugin;
 
 /// Check if a host pattern matches a given host
 ///
@@ -54,7 +54,7 @@ pub async fn find_matching_plugin<S: SecretStore + ?Sized>(
     host: &str,
     store: &S,
     registry: &Registry,
-) -> Result<Option<ACPPlugin>> {
+) -> Result<Option<GAPPlugin>> {
     // Get all plugin entries from registry
     let plugin_entries = registry.list_plugins().await?;
 

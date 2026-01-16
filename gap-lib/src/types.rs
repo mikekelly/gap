@@ -1,4 +1,4 @@
-//! Core types for the Agent Credential Proxy
+//! Core types for GAP
 //!
 //! Defines the data structures used throughout the proxy:
 //! - Request/response handling
@@ -15,7 +15,7 @@ use std::collections::HashMap;
 ///
 /// Contains all information needed to forward and transform an HTTP request.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct ACPRequest {
+pub struct GAPRequest {
     /// HTTP method (GET, POST, etc.)
     pub method: String,
     /// Full URL including scheme, host, path, query
@@ -27,7 +27,7 @@ pub struct ACPRequest {
     pub body: Vec<u8>,
 }
 
-impl ACPRequest {
+impl GAPRequest {
     /// Create a new request
     pub fn new(method: impl Into<String>, url: impl Into<String>) -> Self {
         Self {
@@ -61,12 +61,12 @@ impl ACPRequest {
 /// String key-value map that plugins can use to access secrets.
 /// Scoped to a single plugin - keys are namespaced in storage.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
-pub struct ACPCredentials {
+pub struct GAPCredentials {
     /// Credential key-value pairs
     pub credentials: HashMap<String, String>,
 }
 
-impl ACPCredentials {
+impl GAPCredentials {
     /// Create empty credentials
     pub fn new() -> Self {
         Self::default()
@@ -97,7 +97,7 @@ impl ACPCredentials {
 ///
 /// Describes a JavaScript plugin that transforms requests for specific hosts.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct ACPPlugin {
+pub struct GAPPlugin {
     /// Unique plugin name (e.g., "exa", "aws-s3")
     pub name: String,
     /// Host patterns to match (supports wildcards like "*.s3.amazonaws.com")
@@ -108,7 +108,7 @@ pub struct ACPPlugin {
     pub transform: String,
 }
 
-impl ACPPlugin {
+impl GAPPlugin {
     /// Create a new plugin
     pub fn new(
         name: impl Into<String>,
@@ -289,7 +289,7 @@ mod tests {
 
     #[test]
     fn test_acp_request_creation() {
-        let req = ACPRequest::new("GET", "https://api.example.com/users")
+        let req = GAPRequest::new("GET", "https://api.example.com/users")
             .with_header("Authorization", "Bearer token")
             .with_body(b"test body".to_vec());
 
@@ -301,19 +301,19 @@ mod tests {
 
     #[test]
     fn test_acp_request_serialization() {
-        let req = ACPRequest::new("POST", "https://api.example.com/data")
+        let req = GAPRequest::new("POST", "https://api.example.com/data")
             .with_header("Content-Type", "application/json")
             .with_body(b"{\"test\":true}".to_vec());
 
         let json = serde_json::to_string(&req).unwrap();
-        let deserialized: ACPRequest = serde_json::from_str(&json).unwrap();
+        let deserialized: GAPRequest = serde_json::from_str(&json).unwrap();
 
         assert_eq!(req, deserialized);
     }
 
     #[test]
     fn test_credentials_operations() {
-        let mut creds = ACPCredentials::new();
+        let mut creds = GAPCredentials::new();
         assert!(!creds.contains_key("api_key"));
 
         creds.set("api_key", "secret123");
@@ -327,14 +327,14 @@ mod tests {
         map.insert("access_key".to_string(), "AKIA123".to_string());
         map.insert("secret_key".to_string(), "secret456".to_string());
 
-        let creds = ACPCredentials::from_map(map);
+        let creds = GAPCredentials::from_map(map);
         assert_eq!(creds.get("access_key"), Some(&"AKIA123".to_string()));
         assert_eq!(creds.get("secret_key"), Some(&"secret456".to_string()));
     }
 
     #[test]
     fn test_plugin_exact_host_match() {
-        let plugin = ACPPlugin::new(
+        let plugin = GAPPlugin::new(
             "test-plugin",
             vec!["api.example.com".to_string()],
             vec!["api_key".to_string()],
@@ -348,7 +348,7 @@ mod tests {
 
     #[test]
     fn test_plugin_wildcard_host_match() {
-        let plugin = ACPPlugin::new(
+        let plugin = GAPPlugin::new(
             "s3-plugin",
             vec!["*.s3.amazonaws.com".to_string()],
             vec!["access_key".to_string(), "secret_key".to_string()],
@@ -363,7 +363,7 @@ mod tests {
 
     #[test]
     fn test_plugin_multiple_patterns() {
-        let plugin = ACPPlugin::new(
+        let plugin = GAPPlugin::new(
             "multi-plugin",
             vec![
                 "api.example.com".to_string(),

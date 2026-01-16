@@ -1,12 +1,12 @@
 //! HTTP utilities for parsing and serializing HTTP requests
 //!
-//! Provides functions to convert between raw HTTP bytes and ACPRequest structs.
+//! Provides functions to convert between raw HTTP bytes and GAPRequest structs.
 
 use crate::error::{AcpError, Result};
-use crate::types::ACPRequest;
+use crate::types::GAPRequest;
 use std::collections::HashMap;
 
-/// Parse raw HTTP request bytes into an ACPRequest
+/// Parse raw HTTP request bytes into an GAPRequest
 ///
 /// Extracts method, path, headers, and body from HTTP/1.1 format.
 /// Constructs full URL from Host header and request path.
@@ -15,8 +15,8 @@ use std::collections::HashMap;
 /// * `bytes` - Raw HTTP request bytes
 ///
 /// # Returns
-/// Parsed ACPRequest struct
-pub fn parse_http_request(bytes: &[u8]) -> Result<ACPRequest> {
+/// Parsed GAPRequest struct
+pub fn parse_http_request(bytes: &[u8]) -> Result<GAPRequest> {
     let request_str = std::str::from_utf8(bytes)
         .map_err(|e| AcpError::protocol(format!("Invalid UTF-8 in HTTP request: {}", e)))?;
 
@@ -80,7 +80,7 @@ pub fn parse_http_request(bytes: &[u8]) -> Result<ACPRequest> {
         Vec::new()
     };
 
-    Ok(ACPRequest {
+    Ok(GAPRequest {
         method,
         url,
         headers,
@@ -88,16 +88,16 @@ pub fn parse_http_request(bytes: &[u8]) -> Result<ACPRequest> {
     })
 }
 
-/// Serialize ACPRequest back to raw HTTP bytes
+/// Serialize GAPRequest back to raw HTTP bytes
 ///
-/// Converts ACPRequest into HTTP/1.1 format suitable for forwarding.
+/// Converts GAPRequest into HTTP/1.1 format suitable for forwarding.
 ///
 /// # Arguments
-/// * `request` - ACPRequest to serialize
+/// * `request` - GAPRequest to serialize
 ///
 /// # Returns
 /// Raw HTTP bytes
-pub fn serialize_http_request(request: &ACPRequest) -> Result<Vec<u8>> {
+pub fn serialize_http_request(request: &GAPRequest) -> Result<Vec<u8>> {
     let mut result = Vec::new();
 
     // Extract path from URL
@@ -183,7 +183,7 @@ mod tests {
 
     #[test]
     fn test_serialize_simple_request() {
-        let req = ACPRequest::new("GET", "https://example.com/test")
+        let req = GAPRequest::new("GET", "https://example.com/test")
             .with_header("Host", "example.com");
 
         let serialized = serialize_http_request(&req).unwrap();
@@ -195,7 +195,7 @@ mod tests {
 
     #[test]
     fn test_serialize_request_with_body() {
-        let req = ACPRequest::new("POST", "https://example.com/data")
+        let req = GAPRequest::new("POST", "https://example.com/data")
             .with_header("Host", "example.com")
             .with_body(b"test".to_vec());
 

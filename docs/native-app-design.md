@@ -613,7 +613,7 @@ sudo mv gap gap-server /usr/local/bin/
 # Create systemd service
 sudo tee /etc/systemd/system/gap-server.service > /dev/null <<EOF
 [Unit]
-Description=Agent Credential Proxy
+Description=GAP
 After=network.target
 
 [Service]
