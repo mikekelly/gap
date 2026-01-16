@@ -12,7 +12,7 @@ mod client;
 mod commands;
 
 #[derive(Parser)]
-#[command(name = "acp")]
+#[command(name = "gap")]
 #[command(author, version, about = "Agent Credential Proxy CLI", long_about = None)]
 struct Cli {
     /// Server URL (default: https://localhost:9080, can be set via SERVER env var)
@@ -137,9 +137,9 @@ pub fn create_api_client(server_url: &str) -> anyhow::Result<client::ApiClient> 
             client::ApiClient::with_ca_cert(server_url, &ca_pem)
                 .map_err(|e| anyhow::anyhow!("Failed to create HTTPS client: {}. Ensure the CA certificate at {} is valid.", e, ca_path.display()))
         } else {
-            // CA cert doesn't exist - likely need to run `acp init` first
+            // CA cert doesn't exist - likely need to run `gap init` first
             Err(anyhow::anyhow!(
-                "CA certificate not found at {}. Please run `acp init` first to initialize the server and download the CA certificate.",
+                "CA certificate not found at {}. Please run `gap init` first to initialize the server and download the CA certificate.",
                 ca_path.display()
             ))
         }
@@ -185,12 +185,12 @@ mod tests {
 
     #[test]
     fn test_cli_init_parses() {
-        let _cli = Cli::parse_from(["acp", "init"]);
+        let _cli = Cli::parse_from(["gap", "init"]);
     }
 
     #[test]
     fn test_cli_init_with_ca_path() {
-        let cli = Cli::parse_from(["acp", "init", "--ca-path", "/tmp/ca.pem"]);
+        let cli = Cli::parse_from(["gap", "init", "--ca-path", "/tmp/ca.pem"]);
         match cli.command {
             Commands::Init { ca_path, management_sans: _ } => {
                 assert_eq!(ca_path.as_deref(), Some("/tmp/ca.pem"));
@@ -201,17 +201,17 @@ mod tests {
 
     #[test]
     fn test_cli_status_parses() {
-        let _cli = Cli::parse_from(["acp", "status"]);
+        let _cli = Cli::parse_from(["gap", "status"]);
     }
 
     #[test]
     fn test_cli_plugins_parses() {
-        let _cli = Cli::parse_from(["acp", "plugins"]);
+        let _cli = Cli::parse_from(["gap", "plugins"]);
     }
 
     #[test]
     fn test_cli_install_parses() {
-        let cli = Cli::parse_from(["acp", "install", "exa"]);
+        let cli = Cli::parse_from(["gap", "install", "exa"]);
         match cli.command {
             Commands::Install { name } => {
                 assert_eq!(name, "exa");
@@ -222,7 +222,7 @@ mod tests {
 
     #[test]
     fn test_cli_uninstall_parses() {
-        let cli = Cli::parse_from(["acp", "uninstall", "exa"]);
+        let cli = Cli::parse_from(["gap", "uninstall", "exa"]);
         match cli.command {
             Commands::Uninstall { name } => {
                 assert_eq!(name, "exa");
@@ -233,7 +233,7 @@ mod tests {
 
     #[test]
     fn test_cli_set_parses() {
-        let cli = Cli::parse_from(["acp", "set", "exa:api_key"]);
+        let cli = Cli::parse_from(["gap", "set", "exa:api_key"]);
         match cli.command {
             Commands::Set { key } => {
                 assert_eq!(key, "exa:api_key");
@@ -244,12 +244,12 @@ mod tests {
 
     #[test]
     fn test_cli_token_list_parses() {
-        let _cli = Cli::parse_from(["acp", "token", "list"]);
+        let _cli = Cli::parse_from(["gap", "token", "list"]);
     }
 
     #[test]
     fn test_cli_token_create_parses() {
-        let cli = Cli::parse_from(["acp", "token", "create", "test-token"]);
+        let cli = Cli::parse_from(["gap", "token", "create", "test-token"]);
         match cli.command {
             Commands::Token(TokenCommands::Create { name }) => {
                 assert_eq!(name, "test-token");
@@ -260,7 +260,7 @@ mod tests {
 
     #[test]
     fn test_cli_token_revoke_parses() {
-        let cli = Cli::parse_from(["acp", "token", "revoke", "abc123"]);
+        let cli = Cli::parse_from(["gap", "token", "revoke", "abc123"]);
         match cli.command {
             Commands::Token(TokenCommands::Revoke { id }) => {
                 assert_eq!(id, "abc123");
@@ -271,12 +271,12 @@ mod tests {
 
     #[test]
     fn test_cli_activity_parses() {
-        let _cli = Cli::parse_from(["acp", "activity"]);
+        let _cli = Cli::parse_from(["gap", "activity"]);
     }
 
     #[test]
     fn test_cli_activity_follow_parses() {
-        let cli = Cli::parse_from(["acp", "activity", "--follow"]);
+        let cli = Cli::parse_from(["gap", "activity", "--follow"]);
         match cli.command {
             Commands::Activity { follow } => {
                 assert!(follow);
@@ -287,20 +287,20 @@ mod tests {
 
     #[test]
     fn test_cli_server_default() {
-        let cli = Cli::parse_from(["acp", "status"]);
+        let cli = Cli::parse_from(["gap", "status"]);
         assert_eq!(cli.server, "https://localhost:9080");
     }
 
     #[test]
     fn test_cli_server_override() {
-        let cli = Cli::parse_from(["acp", "--server", "http://custom:8080", "status"]);
+        let cli = Cli::parse_from(["gap", "--server", "http://custom:8080", "status"]);
         assert_eq!(cli.server, "http://custom:8080");
     }
 
     #[test]
     fn test_cli_init_with_management_sans() {
         let cli = Cli::parse_from([
-            "acp",
+            "gap",
             "init",
             "--management-sans",
             "DNS:localhost,IP:127.0.0.1",
@@ -322,7 +322,7 @@ mod tests {
     #[test]
     fn test_cli_new_management_cert_parses() {
         let cli = Cli::parse_from([
-            "acp",
+            "gap",
             "new-management-cert",
             "--sans",
             "DNS:localhost,IP:127.0.0.1",
@@ -338,7 +338,7 @@ mod tests {
     #[test]
     fn test_cli_new_management_cert_multiple_sans() {
         let cli = Cli::parse_from([
-            "acp",
+            "gap",
             "new-management-cert",
             "--sans",
             "DNS:localhost,DNS:example.com,IP:127.0.0.1,IP:192.168.1.1",
