@@ -11,4 +11,4 @@ Raw thoughts, not yet evaluated.
 - Plugins that can initiate and handle OAuth dance when installed
     - Look at most popular mcp servers with OAuth to see how much variance in implementation there is (generic implementation vs per plugin implementation)
 - Plugin authoring guide documentation
-- Drop-in wrappers for common http libraries that handle ACP proxying transparently (exa-mcp-server fork would be a good test candidate)
+- Drop-in wrappers for common http libraries that handle GAP proxying transparently (exa-mcp-server fork would be a good test candidate)

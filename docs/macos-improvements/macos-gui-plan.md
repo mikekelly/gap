@@ -2,11 +2,11 @@
 
 ## Overview
 
-Build a native macOS menu bar app that provides a visual interface to ACP. The GUI uses the **exact same management API as the CLI** — no special code paths.
+Build a native macOS menu bar app that provides a visual interface to GAP. The GUI uses the **exact same management API as the CLI** — no special code paths.
 
 ## Threat Model (Critical Context)
 
-The shared secret exists to prevent **agents from modifying ACP configuration**:
+The shared secret exists to prevent **agents from modifying GAP configuration**:
 
 | Actor | Can do | Cannot do |
 |-------|--------|-----------|
@@ -14,9 +14,9 @@ The shared secret exists to prevent **agents from modifying ACP configuration**:
 | **Agent on machine** | Run CLI commands, read files | Provide shared secret (doesn't know it, can't intercept secure stdin) |
 
 **The shared secret is a user presence check**, not an auth mechanism for storage access. Without it, an agent could:
-- `acp install malicious-plugin` — exfiltrate data through rogue plugins
-- `acp token create backdoor` — create tokens for unauthorized access
-- `acp set plugin:credential` — overwrite credentials
+- `gap install malicious-plugin` — exfiltrate data through rogue plugins
+- `gap token create backdoor` — create tokens for unauthorized access
+- `gap set plugin:credential` — overwrite credentials
 
 The GUI must preserve this security property.
 
@@ -46,7 +46,7 @@ The GUI must preserve this security property.
                                                   │
                                     ┌─────────────▼───────┐
                                     │  Management API     │
-                                    │  (acp-server:9080)  │
+                                    │  (gap-server:9080)  │
                                     │  Same as CLI uses   │
                                     └─────────────────────┘
 ```
@@ -145,7 +145,7 @@ Previous versions of this plan incorrectly proposed:
 - ❌ Cache invalidation endpoints for cross-process coordination
 - ❌ Code signing as an authentication mechanism
 
-These were based on a misunderstanding of the threat model. The shared secret is not about Keychain access — it's about proving user presence to prevent agents from modifying ACP configuration.
+These were based on a misunderstanding of the threat model. The shared secret is not about Keychain access — it's about proving user presence to prevent agents from modifying GAP configuration.
 
 ---
 

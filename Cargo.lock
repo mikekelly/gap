@@ -3,87 +3,6 @@
 version = 4
 
 [[package]]
-name = "acp"
-version = "0.3.1"
-dependencies = [
- "acp-lib",
- "anyhow",
- "clap",
- "hex",
- "reqwest",
- "rpassword",
- "serde",
- "serde_json",
- "sha2",
- "tokio",
- "tracing",
- "tracing-subscriber",
- "urlencoding",
-]
-
-[[package]]
-name = "acp-lib"
-version = "0.3.1"
-dependencies = [
- "anyhow",
- "async-trait",
- "base64",
- "boa_engine",
- "chrono",
- "core-foundation 0.9.4",
- "core-foundation-sys",
- "hex",
- "hmac",
- "httparse",
- "portpicker",
- "rcgen",
- "reqwest",
- "rustls",
- "rustls-native-certs",
- "rustls-pemfile",
- "security-framework 2.11.1",
- "security-framework-sys",
- "serde",
- "serde_json",
- "sha2",
- "tempfile",
- "thiserror 2.0.17",
- "time",
- "tokio",
- "tokio-rustls",
- "tracing",
- "webpki-roots 0.26.11",
-]
-
-[[package]]
-name = "acp-server"
-version = "0.3.1"
-dependencies = [
- "acp-lib",
- "anyhow",
- "argon2",
- "axum",
- "axum-server",
- "chrono",
- "clap",
- "dirs",
- "git2",
- "hyper",
- "rustls",
- "serde",
- "serde_json",
- "serial_test",
- "sha2",
- "tempfile",
- "tokio",
- "tower",
- "tower-http",
- "tracing",
- "tracing-subscriber",
- "urlencoding",
-]
-
-[[package]]
 name = "ahash"
 version = "0.8.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -901,6 +820,87 @@ dependencies = [
  "pin-project-lite",
  "pin-utils",
  "slab",
+]
+
+[[package]]
+name = "gap"
+version = "0.3.1"
+dependencies = [
+ "anyhow",
+ "clap",
+ "gap-lib",
+ "hex",
+ "reqwest",
+ "rpassword",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+ "urlencoding",
+]
+
+[[package]]
+name = "gap-lib"
+version = "0.3.1"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "base64",
+ "boa_engine",
+ "chrono",
+ "core-foundation 0.9.4",
+ "core-foundation-sys",
+ "hex",
+ "hmac",
+ "httparse",
+ "portpicker",
+ "rcgen",
+ "reqwest",
+ "rustls",
+ "rustls-native-certs",
+ "rustls-pemfile",
+ "security-framework 2.11.1",
+ "security-framework-sys",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "thiserror 2.0.17",
+ "time",
+ "tokio",
+ "tokio-rustls",
+ "tracing",
+ "webpki-roots 0.26.11",
+]
+
+[[package]]
+name = "gap-server"
+version = "0.3.1"
+dependencies = [
+ "anyhow",
+ "argon2",
+ "axum",
+ "axum-server",
+ "chrono",
+ "clap",
+ "dirs",
+ "gap-lib",
+ "git2",
+ "hyper",
+ "rustls",
+ "serde",
+ "serde_json",
+ "serial_test",
+ "sha2",
+ "tempfile",
+ "tokio",
+ "tower",
+ "tower-http",
+ "tracing",
+ "tracing-subscriber",
+ "urlencoding",
 ]
 
 [[package]]

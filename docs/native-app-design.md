@@ -1,4 +1,4 @@
-# ACP - Agent Credential Proxy
+# GAP - Generic Agent Proxy
 
 A credential proxy that lets AI agents make authenticated API calls without exposing secrets.
 
@@ -32,7 +32,7 @@ The agent never sees credentials—they're isolated in the proxy's secure storag
                               │ HTTPS via proxy (:9443)
                               ▼
 ┌─────────────────────────────────────────────────────────────────┐
-│                      acp-server (Rust)                           │
+│                      gap-server (Rust)                           │
 │                                                                  │
 │   ┌─────────────┐  ┌─────────────┐  ┌─────────────────────────┐ │
 │   │HTTPS Proxy  │  │ Management  │  │    Boa JS Runtime       │ │
@@ -53,12 +53,12 @@ The agent never sees credentials—they're isolated in the proxy's secure storag
         │ HTTPS (with creds)      │ HTTP + admin token
         ▼                         │
 ┌───────────────────┐    ┌────────────────────────────────────────┐
-│   Upstream API    │    │              acp (CLI)                  │
+│   Upstream API    │    │              gap (CLI)                  │
 │   (api.exa.ai)    │    │                                        │
-└───────────────────┘    │  acp status                            │
-                         │  acp plugin install user/repo          │
-                         │  acp service configure exa             │
-                         │  acp token create claude-code          │
+└───────────────────┘    │  gap status                            │
+                         │  gap plugin install user/repo          │
+                         │  gap service configure exa             │
+                         │  gap token create claude-code          │
                          └────────────────────────────────────────┘
 ```
 
@@ -70,9 +70,9 @@ The agent never sees credentials—they're isolated in the proxy's secure storag
 |--------|------------|
 | Agent reads credentials from env/files | Credentials in secure storage, not filesystem |
 | Agent accesses secure storage directly | macOS: Keychain ACL. Linux: different user owns secrets. |
-| Agent attaches debugger to acp-server | macOS: SIP blocks debugging signed apps. Linux: different user. |
+| Agent attaches debugger to gap-server | macOS: SIP blocks debugging signed apps. Linux: different user. |
 | Agent installs malicious plugin | Password required for install, entered interactively |
-| Agent modifies existing plugin | Plugins in secure storage (Keychain / acp user's directory) |
+| Agent modifies existing plugin | Plugins in secure storage (Keychain / gap user's directory) |
 | Malicious plugin exfiltrates creds | Boa sandbox blocks network/filesystem access |
 | Plugin accesses other plugin's creds | Credential scoping - plugins only receive their own namespaced credentials |
 | Plugin requests non-declared hosts | Proxy enforces plugin's declared `match` hosts |
@@ -84,8 +84,8 @@ The agent never sees credentials—they're isolated in the proxy's secure storag
 | Platform | Mechanism | What's Stored | Isolation |
 |----------|-----------|---------------|-----------|
 | **macOS** | Keychain via `security-framework` | Password hash, CA key/cert, plugins, credentials, tokens, registry | OS-level Keychain protection |
-| **Linux** | File (`/var/lib/acp/`) | Password hash, CA key/cert, plugins, credentials, tokens, registry | Unix permissions - files owned by running user, mode 0600 |
-| **Docker** | File (`/var/lib/acp/`) | Password hash, CA key/cert, plugins, credentials, tokens, registry | Container isolation + volume encryption |
+| **Linux** | File (`/var/lib/gap/`) | Password hash, CA key/cert, plugins, credentials, tokens, registry | Unix permissions - files owned by running user, mode 0600 |
+| **Docker** | File (`/var/lib/gap/`) | Password hash, CA key/cert, plugins, credentials, tokens, registry | Container isolation + volume encryption |
 
 **Implementation:**
 - `SecretStore` trait with `FileStore` and `KeychainStore` implementations
@@ -99,13 +99,13 @@ The agent never sees credentials—they're isolated in the proxy's secure storag
 - Integration with macOS security model
 - Agents running as your user cannot access Keychain entries without user approval
 
-**Linux desktop:** Everything in `/var/lib/acp/` when running as systemd service:
-- Files owned by `acp` system user
+**Linux desktop:** Everything in `/var/lib/gap/` when running as systemd service:
+- Files owned by `gap` system user
 - Mode 0600 (owner read/write only)
-- Agents running as your user cannot access `acp` user's files
+- Agents running as your user cannot access `gap` user's files
 
-**Linux container:** Everything in `/var/lib/acp/` (volume mount):
-- Container runs as non-root user `acp` (UID 1000)
+**Linux container:** Everything in `/var/lib/gap/` (volume mount):
+- Container runs as non-root user `gap` (UID 1000)
 - Files have mode 0600
 - Volume must be mounted (enforced at startup)
 - Infrastructure provides encryption at rest
@@ -125,7 +125,7 @@ CONNECT api.exa.ai:443 HTTP/1.1
 Proxy-Authorization: Bearer <agent-token>
 ```
 
-- User generates tokens via CLI: `acp token create claude-code`
+- User generates tokens via CLI: `gap token create claude-code`
 - Proxy validates token on each CONNECT request
 - Enables per-agent audit logging
 
@@ -136,14 +136,14 @@ Token storage is out of scope—agents receive tokens via environment variables,
 Plugins only receive credentials that were explicitly set for them. This prevents a malicious or compromised plugin from accessing credentials belonging to other plugins.
 
 **Storage:** Credentials are namespaced by plugin name:
-- `acp set mikekelly/exa-acp:apiKey` → stored as `credential:mikekelly/exa-acp:apiKey`
-- `acp set aws-s3:secretAccessKey` → stored as `credential:aws-s3:secretAccessKey`
+- `gap set mikekelly/exa-gap:apiKey` → stored as `credential:mikekelly/exa-gap:apiKey`
+- `gap set aws-s3:secretAccessKey` → stored as `credential:aws-s3:secretAccessKey`
 
 **At runtime:** When the proxy runs `plugin.transform(request, credentials)`, the `credentials` object only contains keys set for that specific plugin:
 
 ```javascript
-// mikekelly/exa-acp plugin receives:
-credentials = { apiKey: "..." }  // Only mikekelly/exa-acp:* values
+// mikekelly/exa-gap plugin receives:
+credentials = { apiKey: "..." }  // Only mikekelly/exa-gap:* values
 
 // aws-s3 plugin receives:
 credentials = { accessKeyId: "...", secretAccessKey: "...", region: "..." }  // Only aws-s3:* values
@@ -153,27 +153,27 @@ A plugin cannot access another plugin's credentials, even if it tries to request
 
 ### Management API Authentication
 
-The CLI uses a **shared secret** (password) set during `acp init`. This password:
-- Is stored in secure storage (Keychain on macOS, `acp` user's file on Linux)
+The CLI uses a **shared secret** (password) set during `gap init`. This password:
+- Is stored in secure storage (Keychain on macOS, `gap` user's file on Linux)
 - Is never written to user-accessible disk
 - Must be entered interactively for protected operations
 - Cannot be accessed by agents
 
 ```bash
 # First-time setup (sets the password)
-$ acp init
+$ gap init
 Password: ••••••••••••
 Confirm:  ••••••••••••
 ✓ Server initialized
 
 # Protected operations require password entry
-$ acp plugins
+$ gap plugins
 Password: ••••••••••••
-  mikekelly/exa-acp  (a1b2c3d4)  api.exa.ai
+  mikekelly/exa-gap  (a1b2c3d4)  api.exa.ai
 
 # Only status is unauthenticated
-$ acp status
-ACP running on :9443
+$ gap status
+GAP running on :9443
 ```
 
 ## Plugin System
@@ -189,7 +189,7 @@ ACP running on :9443
 ### Plugin Interface
 
 ```typescript
-interface ACPPlugin {
+interface GAPPlugin {
   name: string;
 
   // Which hosts this plugin handles (ENFORCED by proxy)
@@ -206,17 +206,17 @@ interface ACPPlugin {
   };
 
   // Transform request before sending upstream
-  transform(request: ACPRequest, credentials: ACPCredentials): ACPRequest;
+  transform(request: GAPRequest, credentials: GAPCredentials): GAPRequest;
 }
 
-interface ACPRequest {
+interface GAPRequest {
   method: "GET" | "POST" | "PUT" | "DELETE" | "PATCH" | "HEAD" | "OPTIONS";
   url: string;
   headers: Record<string, string>;
   body?: Uint8Array;
 }
 
-interface ACPCredentials {
+interface GAPCredentials {
   [key: string]: string;
 }
 ```
@@ -260,12 +260,12 @@ export default {
   },
 
   transform(request, credentials) {
-    const date = ACP.util.amzDate();
-    const signature = ACP.crypto.signAwsV4(request, credentials, date);
+    const date = GAP.util.amzDate();
+    const signature = GAP.crypto.signAwsV4(request, credentials, date);
 
     request.headers["Authorization"] = signature;
     request.headers["x-amz-date"] = date;
-    request.headers["x-amz-content-sha256"] = ACP.crypto.sha256Hex(request.body || "");
+    request.headers["x-amz-content-sha256"] = GAP.crypto.sha256Hex(request.body || "");
     return request;
   }
 };
@@ -276,7 +276,7 @@ export default {
 Plugins run with pre-loaded crypto libraries. No imports or bundling needed.
 
 ```javascript
-globalThis.ACP = {
+globalThis.GAP = {
   crypto: {
     // Hashing (@noble/hashes, bundled)
     sha256: (data: string | Uint8Array) => Uint8Array,
@@ -329,15 +329,15 @@ Standard HTTP CONNECT proxy with bearer token authentication:
 ```
 1. Agent: CONNECT api.exa.ai:443 HTTP/1.1
           Proxy-Authorization: Bearer <agent-token>
-2. ACP:   HTTP/1.1 200 Connection Established
-3. Agent: <TLS handshake with ACP>
+2. GAP:   HTTP/1.1 200 Connection Established
+3. Agent: <TLS handshake with GAP>
 4. Agent: POST /search HTTP/1.1
-5. ACP:   <host check - is api.exa.ai in a plugin's match[]?>
-6. ACP:   <load credentials scoped to matching plugin only>
-7. ACP:   <run plugin.transform(request, scoped_credentials)>
-8. ACP:   <TLS handshake with upstream>
-9. ACP:   <forward request with injected credentials>
-10. ACP:  <return response to agent>
+5. GAP:   <host check - is api.exa.ai in a plugin's match[]?>
+6. GAP:   <load credentials scoped to matching plugin only>
+7. GAP:   <run plugin.transform(request, scoped_credentials)>
+8. GAP:   <TLS handshake with upstream>
+9. GAP:   <forward request with injected credentials>
+10. GAP:  <return response to agent>
 ```
 
 ### Host Enforcement
@@ -352,19 +352,19 @@ This prevents agents from using the proxy to reach arbitrary endpoints.
 
 ### TLS Handling
 
-ACP performs MITM to inspect/modify HTTPS requests:
+GAP performs MITM to inspect/modify HTTPS requests:
 
-1. Agent connects to ACP proxy
-2. ACP presents a certificate for the target host (signed by ACP's CA)
-3. Agent validates certificate (must trust ACP's CA)
-4. ACP establishes separate TLS connection to upstream
-5. ACP can read/modify HTTP traffic between agent and upstream
+1. Agent connects to GAP proxy
+2. GAP presents a certificate for the target host (signed by GAP's CA)
+3. Agent validates certificate (must trust GAP's CA)
+4. GAP establishes separate TLS connection to upstream
+5. GAP can read/modify HTTP traffic between agent and upstream
 
 **Certificate setup:**
-- On first run, `acp-server init` generates a local CA
+- On first run, `gap-server init` generates a local CA
 - CA private key stored in secure storage
-- CA public cert written to `~/.config/acp/ca.crt` (or configurable path)
-- Agent must trust this CA: `NODE_EXTRA_CA_CERTS=~/.config/acp/ca.crt`
+- CA public cert written to `~/.config/gap/ca.crt` (or configurable path)
+- Agent must trust this CA: `NODE_EXTRA_CA_CERTS=~/.config/gap/ca.crt`
 
 ### Ports
 
@@ -411,12 +411,12 @@ Single binary, same repo as server.
 
 ### Authentication Model
 
-All commands except `status` require the shared secret (password) set during `acp init`:
+All commands except `status` require the shared secret (password) set during `gap init`:
 
 ```bash
-$ acp plugins
+$ gap plugins
 Password: ••••••••••••
-  mikekelly/exa-acp  (a1b2c3d4)  api.exa.ai
+  mikekelly/exa-gap  (a1b2c3d4)  api.exa.ai
 ```
 
 The password is:
@@ -428,33 +428,33 @@ The password is:
 
 ```
 # No password required
-acp status                          Check if server is running
+gap status                          Check if server is running
 
 # Password required - Setup
-acp init                            First-time setup (set password, generate CA)
-                                    CA written to ~/.config/acp/ca.crt
+gap init                            First-time setup (set password, generate CA)
+                                    CA written to ~/.config/gap/ca.crt
 
 # Password required - Plugins
-acp plugins                         List installed plugins
-acp install <user/repo>             Install plugin from GitHub (e.g., mikekelly/exa-acp)
-acp uninstall <name>                Remove plugin
+gap plugins                         List installed plugins
+gap install <user/repo>             Install plugin from GitHub (e.g., mikekelly/exa-gap)
+gap uninstall <name>                Remove plugin
 
 # Password required - Credentials
-acp set <plugin>:<key>              Set credential (interactive value input)
+gap set <plugin>:<key>              Set credential (interactive value input)
 
 # Password required - Agent Tokens
-acp token                           Manage agent tokens (subcommand)
-  acp token create <name>           Create new agent token
-  acp token list                    List agent tokens (shows prefixes only)
-  acp token delete <id>             Delete agent token
+gap token                           Manage agent tokens (subcommand)
+  gap token create <name>           Create new agent token
+  gap token list                    List agent tokens (shows prefixes only)
+  gap token delete <id>             Delete agent token
 
 # Password required - Monitoring
-acp activity                        View activity logs
+gap activity                        View activity logs
 ```
 
 ### Plugin Naming
 
-- `user/repo` - GitHub install (e.g., `mikekelly/exa-acp`)
+- `user/repo` - GitHub install (e.g., `mikekelly/exa-gap`)
 - `alphanumeric` - Local install via `--name` (e.g., `myapi`)
 
 The `/` distinguishes GitHub plugins from local plugins.
@@ -463,7 +463,7 @@ The `/` distinguishes GitHub plugins from local plugins.
 
 ```bash
 # === FIRST-TIME SETUP ===
-$ acp init
+$ gap init
     _    ____ ____
    / \  / ___|  _ \
   / _ \| |   | |_) |
@@ -474,37 +474,37 @@ Password: ••••••••••••
 Confirm:  ••••••••••••
 
 ✓ Server initialized
-✓ CA certificate: ~/.config/acp/ca.crt
+✓ CA certificate: ~/.config/gap/ca.crt
 
 # Or with custom cert path
-$ acp init --ca-path /path/to/ca.crt
+$ gap init --ca-path /path/to/ca.crt
 
 # === INSTALL PLUGIN ===
-$ acp install mikekelly/exa-acp
+$ gap install mikekelly/exa-gap
 
-Fetching mikekelly/exa-acp...
+Fetching mikekelly/exa-gap...
 
-  Plugin:  exa-acp
+  Plugin:  exa-gap
   Version: a1b2c3d4
   Hosts:   api.exa.ai
 
 Password: ••••••••••••
 
-✓ Installed mikekelly/exa-acp
+✓ Installed mikekelly/exa-gap
 
 Get your API key from: https://exa.ai/settings/api
-Then run: acp set mikekelly/exa-acp:apiKey
+Then run: gap set mikekelly/exa-gap:apiKey
 
 # === SET CREDENTIAL ===
-$ acp set mikekelly/exa-acp:apiKey
+$ gap set mikekelly/exa-gap:apiKey
 
 Value:    •••••••••••••••••••••
 Password: ••••••••••••
 
-✓ Saved mikekelly/exa-acp:apiKey
+✓ Saved mikekelly/exa-gap:apiKey
 
 # === CREATE AGENT TOKEN ===
-$ acp token create claude-code
+$ gap token create claude-code
 
 Password: ••••••••••••
 
@@ -512,25 +512,25 @@ Password: ••••••••••••
 
 Save this token - it won't be shown again.
 
-  ACP_TOKEN=acp_a1b2c3d4e5f6...
+  GAP_TOKEN=gap_a1b2c3d4e5f6...
 
 Configure your agent:
   export HTTPS_PROXY=http://127.0.0.1:9443
-  export NODE_EXTRA_CA_CERTS=~/.config/acp/ca.crt
-  export ACP_TOKEN=<token above>
+  export NODE_EXTRA_CA_CERTS=~/.config/gap/ca.crt
+  export GAP_TOKEN=<token above>
 ```
 
 ### Remote Server
 
 ```bash
 # Override server location
-$ acp --server http://192.168.1.100:9080 status
+$ gap --server http://192.168.1.100:9080 status
 
 # Environment variable
-$ ACP_SERVER=http://192.168.1.100:9080 acp status
+$ GAP_SERVER=http://192.168.1.100:9080 gap status
 ```
 
-Only `ACP_SERVER` can be set via environment. The password is always entered interactively.
+Only `GAP_SERVER` can be set via environment. The password is always entered interactively.
 
 ## Installation
 
@@ -538,31 +538,31 @@ Only `ACP_SERVER` can be set via environment. The password is always entered int
 
 ```bash
 # Install via Homebrew
-brew tap mikekelly/acp
-brew install acp-server
+brew tap mikekelly/gap
+brew install gap-server
 
 # Start as background service
-brew services start acp-server
+brew services start gap-server
 
 # Initialize (generates CA, sets password)
-acp init
+gap init
 
 # Check status
-acp status
+gap status
 ```
 
 **Manual installation:**
 ```bash
 # Download binary (adjust version and arch as needed)
-curl -LO https://github.com/mikekelly/agent-credential-proxy/releases/latest/download/acp-darwin-arm64.tar.gz
-tar -xzf acp-darwin-arm64.tar.gz
-sudo mv acp acp-server /usr/local/bin/
+curl -LO https://github.com/mikekelly/agent-credential-proxy/releases/latest/download/gap-darwin-arm64.tar.gz
+tar -xzf gap-darwin-arm64.tar.gz
+sudo mv gap gap-server /usr/local/bin/
 
 # Run server in background
-acp-server &
+gap-server &
 
 # Initialize
-acp init
+gap init
 ```
 
 ### Linux
@@ -579,18 +579,18 @@ chmod +x install.sh
 sudo ./install.sh
 
 # Start the service
-sudo systemctl start acp-server
-sudo systemctl enable acp-server
+sudo systemctl start gap-server
+sudo systemctl enable gap-server
 
 # Initialize
-acp init
+gap init
 ```
 
 **The installer:**
 1. Detects architecture (x86_64 or aarch64)
 2. Downloads binaries from GitHub releases OR builds from source
-3. Creates 'acp' system user (no login shell)
-4. Creates `/var/lib/acp/` with restricted permissions (0700)
+3. Creates 'gap' system user (no login shell)
+4. Creates `/var/lib/gap/` with restricted permissions (0700)
 5. Installs binaries to `/usr/local/bin/`
 6. Creates systemd service file
 7. Enables and starts the service
@@ -598,30 +598,30 @@ acp init
 **Manual installation:**
 ```bash
 # Create system user
-sudo useradd --system --no-create-home --shell /usr/sbin/nologin acp
+sudo useradd --system --no-create-home --shell /usr/sbin/nologin gap
 
 # Create data directory
-sudo mkdir -p /var/lib/acp
-sudo chown acp:acp /var/lib/acp
-sudo chmod 700 /var/lib/acp
+sudo mkdir -p /var/lib/gap
+sudo chown gap:gap /var/lib/gap
+sudo chmod 700 /var/lib/gap
 
 # Download and install binaries
-curl -LO https://github.com/mikekelly/agent-credential-proxy/releases/latest/download/acp-linux-amd64.tar.gz
-tar -xzf acp-linux-amd64.tar.gz
-sudo mv acp acp-server /usr/local/bin/
+curl -LO https://github.com/mikekelly/agent-credential-proxy/releases/latest/download/gap-linux-amd64.tar.gz
+tar -xzf gap-linux-amd64.tar.gz
+sudo mv gap gap-server /usr/local/bin/
 
 # Create systemd service
-sudo tee /etc/systemd/system/acp-server.service > /dev/null <<EOF
+sudo tee /etc/systemd/system/gap-server.service > /dev/null <<EOF
 [Unit]
 Description=Agent Credential Proxy
 After=network.target
 
 [Service]
 Type=simple
-User=acp
-Group=acp
-Environment=ACP_DATA_DIR=/var/lib/acp
-ExecStart=/usr/local/bin/acp-server
+User=gap
+Group=gap
+Environment=GAP_DATA_DIR=/var/lib/gap
+ExecStart=/usr/local/bin/gap-server
 Restart=on-failure
 RestartSec=5
 
@@ -630,7 +630,7 @@ NoNewPrivileges=yes
 ProtectSystem=strict
 ProtectHome=yes
 PrivateTmp=yes
-ReadWritePaths=/var/lib/acp
+ReadWritePaths=/var/lib/gap
 
 [Install]
 WantedBy=multi-user.target
@@ -638,10 +638,10 @@ EOF
 
 # Enable and start service
 sudo systemctl daemon-reload
-sudo systemctl enable --now acp-server
+sudo systemctl enable --now gap-server
 
 # Initialize (as your user, not root)
-acp init
+gap init
 ```
 
 ### Container
@@ -652,26 +652,26 @@ See the [README](../README.md#docker-for-containerized-agents) for detailed Dock
 ```bash
 # Run with persistent volume (REQUIRED - will fail without it)
 docker run -d \
-  --name acp-server \
-  -v acp-data:/var/lib/acp \
+  --name gap-server \
+  -v gap-data:/var/lib/gap \
   -p 9443:9443 \
   -p 9080:9080 \
-  mikekelly321/acp:latest
+  mikekelly321/gap:latest
 
 # Initialize (first time only)
-docker exec -it acp-server acp init
+docker exec -it gap-server gap init
 
-# Or from host if acp CLI is installed
-acp init
+# Or from host if gap CLI is installed
+gap init
 ```
 
 **Docker Compose (recommended):**
 ```yaml
 services:
-  acp-server:
-    image: mikekelly321/acp:latest
+  gap-server:
+    image: mikekelly321/gap:latest
     volumes:
-      - acp-data:/var/lib/acp
+      - gap-data:/var/lib/gap
     ports:
       - "9443:9443"
       - "9080:9080"
@@ -687,28 +687,28 @@ services:
   my-agent:
     image: your-agent-image
     environment:
-      - HTTP_PROXY=http://acp-server:9443
-      - HTTPS_PROXY=http://acp-server:9443
+      - HTTP_PROXY=http://gap-server:9443
+      - HTTPS_PROXY=http://gap-server:9443
     networks:
       - agent-network
     depends_on:
-      acp-server:
+      gap-server:
         condition: service_healthy
 
 volumes:
-  acp-data:
+  gap-data:
 
 networks:
   agent-network:
 ```
 
 **Volume enforcement:**
-- Container REQUIRES a volume mount for `/var/lib/acp`
+- Container REQUIRES a volume mount for `/var/lib/gap`
 - Without volume, secrets would be lost on container restart
-- For testing only, bypass with: `ACP_ALLOW_EPHEMERAL=I-understand-secrets-will-be-lost`
+- For testing only, bypass with: `GAP_ALLOW_EPHEMERAL=I-understand-secrets-will-be-lost`
 
 **Security notes:**
-- Runs as non-root user `acp` (UID 1000)
+- Runs as non-root user `gap` (UID 1000)
 - All files have 0600 permissions
 - Use infrastructure-level encryption in production (encrypted EBS, etc.)
 - Only suitable when agents also run in containers (isolation boundary)
@@ -718,8 +718,8 @@ networks:
 ### Server Config
 
 ```yaml
-# /var/lib/acp/config.yaml (Linux)
-# ~/Library/Application Support/ACP/config.yaml (macOS)
+# /var/lib/gap/config.yaml (Linux)
+# ~/Library/Application Support/GAP/config.yaml (macOS)
 
 proxy:
   host: 127.0.0.1
@@ -730,8 +730,8 @@ api:
   port: 9080
 
 tls:
-  ca_cert: /var/lib/acp/ca.crt
-  ca_key: keychain:acp-ca-key  # macOS; file path on Linux
+  ca_cert: /var/lib/gap/ca.crt
+  ca_key: keychain:gap-ca-key  # macOS; file path on Linux
 
 secrets:
   # "keychain" on macOS, "file" on Linux
@@ -742,14 +742,14 @@ logging:
   requests: true  # Log request URLs (not bodies/credentials)
 
 plugins:
-  directory: /var/lib/acp/plugins
+  directory: /var/lib/gap/plugins
 ```
 
 ### File Locations
 
 **macOS:**
 ```
-~/.config/acp/
+~/.config/gap/
 └── ca.crt                # CA cert (copy for agents to trust)
 
 # Everything else in Keychain (not filesystem):
@@ -765,10 +765,10 @@ plugins:
 
 **Linux (systemd service):**
 ```
-~/.config/acp/
+~/.config/gap/
 └── ca.crt                # CA cert (copy for agents to trust)
 
-/var/lib/acp/             # Owned by acp:acp, mode 0600 per file
+/var/lib/gap/             # Owned by gap:gap, mode 0600 per file
 ├── _registry             # Central metadata (JSON)
 ├── password_hash         # Argon2 hash
 ├── ca_private_key        # CA private key (PEM)
@@ -783,7 +783,7 @@ plugins:
 
 **Docker:**
 ```
-/var/lib/acp/             # Mounted volume (required)
+/var/lib/gap/             # Mounted volume (required)
 ├── _registry             # Central metadata (JSON)
 ├── password_hash
 ├── ca_private_key
@@ -792,7 +792,7 @@ plugins:
 ├── credential:{plugin}:{field}
 └── token:{id}
 
-# Run as non-root user 'acp' (UID 1000)
+# Run as non-root user 'gap' (UID 1000)
 # Files have 0600 permissions
 ```
 
@@ -801,12 +801,12 @@ plugins:
 ```
 agent-credential-proxy/
 ├── Cargo.toml                  # Workspace manifest
-├── acp-lib/                    # Shared library
+├── gap-lib/                    # Shared library
 │   ├── src/
 │   │   ├── lib.rs
 │   │   ├── config.rs
 │   │   ├── error.rs
-│   │   ├── types.rs            # ACPRequest, ACPCredentials, etc.
+│   │   ├── types.rs            # GAPRequest, GAPCredentials, etc.
 │   │   ├── plugin_runtime.rs   # Boa integration
 │   │   ├── secret_store.rs     # SecretStore trait
 │   │   ├── file_store.rs       # File-based storage
@@ -817,7 +817,7 @@ agent-credential-proxy/
 │   └── tests/
 │       ├── integration_test.rs
 │       └── e2e_integration_test.rs
-├── acp-server/                 # Server binary
+├── gap-server/                 # Server binary
 │   └── src/
 │       ├── main.rs             # Server entrypoint
 │       ├── proxy_server.rs     # MITM proxy
@@ -825,7 +825,7 @@ agent-credential-proxy/
 │       ├── http_utils.rs       # HTTP parsing
 │       ├── plugin_matcher.rs   # Host matching
 │       └── proxy_transforms.rs # Transform pipeline
-├── acp/                        # CLI binary
+├── gap/                        # CLI binary
 │   └── src/
 │       ├── main.rs             # CLI entrypoint
 │       └── commands/           # CLI subcommands
@@ -851,9 +851,9 @@ cargo test
 cargo test -- --ignored
 
 # Test specific crate
-cargo test -p acp-lib
-cargo test -p acp-server
-cargo test -p acp
+cargo test -p gap-lib
+cargo test -p gap-server
+cargo test -p gap
 
 # Run with output
 cargo test -- --nocapture
@@ -861,8 +861,8 @@ cargo test -- --nocapture
 
 **Test organization:**
 - Unit tests: Inline with source code (`#[cfg(test)]` modules)
-- Integration tests: `acp-lib/tests/integration_test.rs` (plugin pipeline)
-- E2E tests: `acp-lib/tests/e2e_integration_test.rs` (full server lifecycle)
+- Integration tests: `gap-lib/tests/integration_test.rs` (plugin pipeline)
+- E2E tests: `gap-lib/tests/e2e_integration_test.rs` (full server lifecycle)
 - Test plugin: `plugins/test-api.js`
 
 **Test suite status:** 120 tests, 117 passing, 3 ignored on macOS (Keychain prompts)
@@ -874,7 +874,7 @@ cargo test -- --nocapture
 docker compose --profile test up --build --abort-on-container-exit
 
 # This runs:
-# 1. acp-server (in container)
+# 1. gap-server (in container)
 # 2. mock-api (httpbin for testing)
 # 3. test-runner (bash script with API calls)
 ```
@@ -901,17 +901,17 @@ docker compose --profile test up --build --abort-on-container-exit
 ```bash
 # Build and run server
 cargo build --release
-./target/release/acp-server &
+./target/release/gap-server &
 
 # Initialize and configure
-./target/release/acp init
-./target/release/acp install mikekelly/exa-acp
-./target/release/acp set mikekelly/exa-acp:apiKey
-./target/release/acp token create test-agent
+./target/release/gap init
+./target/release/gap install mikekelly/exa-gap
+./target/release/gap set mikekelly/exa-gap:apiKey
+./target/release/gap token create test-agent
 
 # Test with curl through proxy
 curl -x http://127.0.0.1:9443 \
-     --cacert ~/.config/acp/ca.crt \
+     --cacert ~/.config/gap/ca.crt \
      --proxy-header "Proxy-Authorization: Bearer <token>" \
      -H "Content-Type: application/json" \
      -d '{"query": "test", "numResults": 1}' \
@@ -935,7 +935,7 @@ curl -x http://127.0.0.1:9443 \
 
 ### Phase 2: Enhanced Usability (In Progress)
 
-**Goal:** Make ACP easier to use and more discoverable
+**Goal:** Make GAP easier to use and more discoverable
 
 - [ ] **Native GUI applications**
   - macOS: Swift/SwiftUI menu bar app with Keychain integration
@@ -946,7 +946,7 @@ curl -x http://127.0.0.1:9443 \
   - Search and browse by API/service
   - One-click installation
 - [ ] **Improved activity logging**
-  - Real-time streaming (`acp activity --follow`)
+  - Real-time streaming (`gap activity --follow`)
   - Export to JSON/CSV
   - Filter by time range, agent, or host
 - [ ] **Better documentation**
@@ -1012,7 +1012,7 @@ curl -x http://127.0.0.1:9443 \
 
 ### Current Status (v0.1.x)
 
-ACP is production-ready for individual developers and small teams. The core platform is complete:
+GAP is production-ready for individual developers and small teams. The core platform is complete:
 
 1. **Full isolation** - Credentials stored in OS-level secure storage (Keychain/files), never exposed to agents
 2. **Password protection** - Interactive password input required for all admin operations
@@ -1044,7 +1044,7 @@ ACP is production-ready for individual developers and small teams. The core plat
 | Password via interactive input | Never stored on user-accessible disk, not in shell history |
 | File-based storage on Linux | Simple. Desktop: dedicated user. Container: infrastructure encryption. |
 | No app-level encryption | Co-located key is security theater. Real isolation from user separation or infra. |
-| `/var/lib/acp/` on Linux | FHS standard, same as PostgreSQL, Docker, Redis |
+| `/var/lib/gap/` on Linux | FHS standard, same as PostgreSQL, Docker, Redis |
 | `--data-dir` for containers | No install needed, infrastructure handles encryption |
 | Boa JS runtime | Pure Rust, ES2022+, simple sandbox |
 | Pre-loaded crypto globals | Plugin authors write plain JS, no bundling |

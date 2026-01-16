@@ -1,7 +1,7 @@
 # Agent Orientation
 
 ## What This Is
-GAP (Generic Agent Proxy) lets AI agents access APIs without seeing your credentials. Agents route requests through the proxy with a token; ACP injects stored credentials and forwards to the API. The agent never sees the actual API keys.
+GAP (Generic Agent Proxy) lets AI agents access APIs without seeing your credentials. Agents route requests through the proxy with a token; GAP injects stored credentials and forwards to the API. The agent never sees the actual API keys.
 
 **Security model:**
 - Credentials stored in OS keychain (macOS) or under dedicated service user (Linux)
@@ -48,7 +48,7 @@ For comprehensive details, see:
 ## Quick Type Reference
 
 Key types you'll use frequently:
-- `ACPRequest`, `ACPCredentials`, `ACPPlugin` - HTTP and plugin types
+- `GAPRequest`, `GAPCredentials`, `GAPPlugin` - HTTP and plugin types
 - `AgentToken` - Bearer token (`.token` is a field, not a method)
 - `SecretStore` trait - Storage abstraction (`FileStore`, `KeychainStore`)
 - `PluginRuntime` - Sandboxed Boa JS runtime for plugins

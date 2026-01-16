@@ -2,10 +2,10 @@
 
 ## Current State
 
-The ACP project is a Rust workspace with three components:
-- `acp-lib/` - Core library with types, registry, secret storage
-- `acp-server/` - Server daemon exposing Management API on port 9080 (HTTPS)
-- `acp/` - CLI tool that communicates with the Management API
+The GAP project is a Rust workspace with three components:
+- `gap-lib/` - Core library with types, registry, secret storage
+- `gap-server/` - Server daemon exposing Management API on port 9080 (HTTPS)
+- `gap/` - CLI tool that communicates with the Management API
 
 The Management API already supports all operations the GUI needs. The GUI will be a pure API client.
 
@@ -13,12 +13,12 @@ The Management API already supports all operations the GUI needs. The GUI will b
 
 ```
 macos-gui/
-├── ACP.xcodeproj/
-├── ACP/
-│   ├── ACPApp.swift              # App entry point, menu bar setup
+├── GAP.xcodeproj/
+├── GAP/
+│   ├── GAPApp.swift              # App entry point, menu bar setup
 │   ├── AppState.swift            # Global state (password hash, connection status)
 │   ├── API/
-│   │   ├── ACPClient.swift       # URLSession wrapper for Management API
+│   │   ├── GAPClient.swift       # URLSession wrapper for Management API
 │   │   ├── Models.swift          # Codable structs matching API responses
 │   │   └── PasswordHash.swift    # SHA512 hashing (must match CLI exactly)
 │   ├── Views/
@@ -32,9 +32,9 @@ macos-gui/
 │   ├── Resources/
 │   │   └── Assets.xcassets/      # Menu bar icons
 │   └── Info.plist
-├── ACPTests/
+├── GAPTests/
 │   ├── PasswordHashTests.swift   # Verify hash matches CLI output
-│   └── ACPClientTests.swift      # API client unit tests
+│   └── GAPClientTests.swift      # API client unit tests
 └── README.md
 ```
 
@@ -84,7 +84,7 @@ Create Xcode project, app structure, and core utilities.
 ### Phase 2: API Client (Sequential, depends on Phase 1)
 Build the network layer.
 
-4. **Implement ACPClient** - URLSession wrapper with:
+4. **Implement GAPClient** - URLSession wrapper with:
    - Base URL configuration (https://localhost:9080)
    - TLS certificate trust (self-signed CA)
    - JSON encoding/decoding
@@ -153,7 +153,7 @@ Build the main window views. These can be developed in parallel.
 
 | Risk | Mitigation |
 |------|------------|
-| TLS trust for self-signed CA | Use URLSessionDelegate to trust the ACP CA certificate |
+| TLS trust for self-signed CA | Use URLSessionDelegate to trust the GAP CA certificate |
 | Hash mismatch with CLI | Unit tests comparing Swift output to known CLI output |
 | Menu bar app complexity | Use well-documented SwiftUI patterns for LSUIElement apps |
 | Accessibility automation vulnerability | Document limitation; Touch ID enhancement can be added later |
@@ -163,7 +163,7 @@ Build the main window views. These can be developed in parallel.
 - [ ] App launches as menu bar icon (no dock icon)
 - [ ] Password prompt shown on launch
 - [ ] Password hash matches CLI output exactly
-- [ ] Can connect to acp-server over HTTPS
+- [ ] Can connect to gap-server over HTTPS
 - [ ] Can view installed plugins
 - [ ] Can install/update/uninstall plugins
 - [ ] Can view tokens (name, prefix, date)

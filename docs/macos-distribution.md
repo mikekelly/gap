@@ -1,6 +1,6 @@
 # macOS Distribution Guide
 
-This document covers signing, notarizing, and distributing ACP binaries via Homebrew.
+This document covers signing, notarizing, and distributing GAP binaries via Homebrew.
 
 ## Prerequisites
 
@@ -49,12 +49,12 @@ grep 'version = ' Cargo.toml
 cargo build --release
 
 # Verify version is correct
-./target/release/acp --version
-./target/release/acp-server --version
+./target/release/gap --version
+./target/release/gap-server --version
 ```
 Binaries are created at:
-- `target/release/acp`
-- `target/release/acp-server`
+- `target/release/gap`
+- `target/release/gap-server`
 
 ### 3. Sign with Developer ID
 ```bash
@@ -77,10 +77,10 @@ This script:
 ```bash
 # Create zip and submit for notarization
 cd target/release
-zip ../../dist/acp-binaries.zip acp acp-server
+zip ../../dist/gap-binaries.zip gap gap-server
 cd ../..
 
-xcrun notarytool submit dist/acp-binaries.zip \
+xcrun notarytool submit dist/gap-binaries.zip \
   --keychain-profile "notarytool-profile" \
   --wait
 ```
@@ -95,9 +95,9 @@ This:
 ### 5. Package Release Tarball
 ```bash
 cd target/release
-tar -czvf ../../dist/acp-darwin-arm64.tar.gz acp acp-server
+tar -czvf ../../dist/gap-darwin-arm64.tar.gz gap gap-server
 cd ../..
-shasum -a 256 dist/acp-darwin-arm64.tar.gz
+shasum -a 256 dist/gap-darwin-arm64.tar.gz
 ```
 
 Record the SHA256 - you'll need it for the Homebrew formula.
@@ -116,44 +116,44 @@ git push origin vX.Y.Z
 gh release create vX.Y.Z \
   --title "vX.Y.Z - Description" \
   --notes "Release notes here" \
-  dist/acp-darwin-arm64.tar.gz
+  dist/gap-darwin-arm64.tar.gz
 ```
 
 ### 8. Update Homebrew Formula
-Edit `~/code/homebrew-acp/Formula/acp-server.rb`:
+Edit `~/code/homebrew-gap/Formula/gap-server.rb`:
 - Update `version`
 - Update `url` to point to new release
 - Update `sha256` with the checksum from step 5
 
 ```bash
-cd ~/code/homebrew-acp
-git add Formula/acp-server.rb
+cd ~/code/homebrew-gap
+git add Formula/gap-server.rb
 git commit -m "Update to v0.1.0"
 git push
 ```
 
 ## Homebrew Tap Structure
 
-Repository: https://github.com/mikekelly/homebrew-acp
+Repository: https://github.com/mikekelly/homebrew-gap
 
 ```
-homebrew-acp/
+homebrew-gap/
 ├── README.md
 └── Formula/
-    └── acp-server.rb
+    └── gap-server.rb
 ```
 
 ### Formula Template
 ```ruby
-class AcpServer < Formula
-  desc "Agent Credential Proxy - secure credential management for AI agents"
-  homepage "https://github.com/mikekelly/acp"
+class GapServer < Formula
+  desc "Generic Agent Proxy - secure credential management for AI agents"
+  homepage "https://github.com/mikekelly/gap"
   version "0.1.0"
   license "MIT"
 
   on_macos do
     if Hardware::CPU.arm?
-      url "https://github.com/mikekelly/acp/releases/download/v0.1.0/acp-darwin-arm64.tar.gz"
+      url "https://github.com/mikekelly/gap/releases/download/v0.1.0/gap-darwin-arm64.tar.gz"
       sha256 "SHA256_HERE"
     else
       odie "Intel Mac binary not yet available. Please build from source."
@@ -161,19 +161,19 @@ class AcpServer < Formula
   end
 
   def install
-    bin.install "acp"
-    bin.install "acp-server"
+    bin.install "gap"
+    bin.install "gap-server"
   end
 
   service do
-    run [opt_bin/"acp-server"]
+    run [opt_bin/"gap-server"]
     keep_alive true
-    log_path var/"log/acp-server.log"
-    error_log_path var/"log/acp-server.err"
+    log_path var/"log/gap-server.log"
+    error_log_path var/"log/gap-server.err"
   end
 
   test do
-    system "#{bin}/acp-server", "--version"
+    system "#{bin}/gap-server", "--version"
   end
 end
 ```
@@ -181,14 +181,14 @@ end
 ## User Installation
 
 ```bash
-brew tap mikekelly/acp
-brew install acp-server
+brew tap mikekelly/gap
+brew install gap-server
 
 # Start as background service
-brew services start acp-server
+brew services start gap-server
 
 # Or run directly
-acp-server
+gap-server
 ```
 
 ## Troubleshooting
@@ -209,7 +209,7 @@ The binary needs the `disable-library-validation` entitlement. Re-sign with:
 codesign --sign "Developer ID Application" \
   --force --options runtime --timestamp \
   --entitlements entitlements.plist \
-  target/release/acp-server
+  target/release/gap-server
 ```
 
 Where `entitlements.plist` contains:

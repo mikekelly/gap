@@ -1,4 +1,4 @@
-//! ACP Server - Agent Credential Proxy daemon
+//! GAP Server - Generic Agent Proxy daemon
 //!
 //! This binary runs the proxy server and management API.
 //! It handles:
@@ -18,8 +18,8 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 #[derive(Parser)]
-#[command(name = "acp-server")]
-#[command(author, version, about = "Agent Credential Proxy Server", long_about = None)]
+#[command(name = "gap-server")]
+#[command(author, version, about = "Generic Agent Proxy Server", long_about = None)]
 struct Args {
     #[command(subcommand)]
     command: Option<Command>,
@@ -43,15 +43,15 @@ struct Args {
 
 #[derive(Subcommand)]
 enum Command {
-    /// Check if the acp-server service is running (macOS only)
+    /// Check if the gap-server service is running (macOS only)
     #[cfg(target_os = "macos")]
     Status,
 
-    /// Install the acp-server as a LaunchAgent (macOS only)
+    /// Install the gap-server as a LaunchAgent (macOS only)
     #[cfg(target_os = "macos")]
     Install,
 
-    /// Uninstall the acp-server LaunchAgent (macOS only)
+    /// Uninstall the gap-server LaunchAgent (macOS only)
     #[cfg(target_os = "macos")]
     Uninstall {
         /// Remove all data including ~/.gap/ directory
@@ -99,7 +99,7 @@ async fn main() -> anyhow::Result<()> {
         config
     };
 
-    tracing::info!("Starting ACP Server");
+    tracing::info!("Starting GAP Server");
     tracing::info!("Proxy port: {}", config.proxy_port);
     tracing::info!("API port: {}", config.api_port);
 
@@ -260,7 +260,7 @@ mod tests {
 
     #[test]
     fn test_args_parsing() {
-        let args = Args::parse_from(["acp-server"]);
+        let args = Args::parse_from(["gap-server"]);
         assert_eq!(args.proxy_port, 9443);
         assert_eq!(args.api_port, 9080);
     }
@@ -323,42 +323,42 @@ mod tests {
 
     #[test]
     fn test_args_custom_ports() {
-        let args = Args::parse_from(["acp-server", "--proxy-port", "8443", "--api-port", "8080"]);
+        let args = Args::parse_from(["gap-server", "--proxy-port", "8443", "--api-port", "8080"]);
         assert_eq!(args.proxy_port, 8443);
         assert_eq!(args.api_port, 8080);
     }
 
     #[test]
     fn test_args_data_dir() {
-        let args = Args::parse_from(["acp-server", "--data-dir", "/var/lib/acp"]);
-        assert_eq!(args.data_dir, Some("/var/lib/acp".to_string()));
+        let args = Args::parse_from(["gap-server", "--data-dir", "/var/lib/gap"]);
+        assert_eq!(args.data_dir, Some("/var/lib/gap".to_string()));
     }
 
     #[test]
     #[cfg(target_os = "macos")]
     fn test_status_subcommand_parses() {
-        let args = Args::parse_from(["acp-server", "status"]);
+        let args = Args::parse_from(["gap-server", "status"]);
         assert!(matches!(args.command, Some(Command::Status)));
     }
 
     #[test]
     #[cfg(target_os = "macos")]
     fn test_install_subcommand_parses() {
-        let args = Args::parse_from(["acp-server", "install"]);
+        let args = Args::parse_from(["gap-server", "install"]);
         assert!(matches!(args.command, Some(Command::Install)));
     }
 
     #[test]
     #[cfg(target_os = "macos")]
     fn test_uninstall_subcommand_parses() {
-        let args = Args::parse_from(["acp-server", "uninstall"]);
+        let args = Args::parse_from(["gap-server", "uninstall"]);
         assert!(matches!(args.command, Some(Command::Uninstall { purge: false })));
     }
 
     #[test]
     #[cfg(target_os = "macos")]
     fn test_uninstall_subcommand_with_purge_flag() {
-        let args = Args::parse_from(["acp-server", "uninstall", "--purge"]);
+        let args = Args::parse_from(["gap-server", "uninstall", "--purge"]);
         assert!(matches!(args.command, Some(Command::Uninstall { purge: true })));
     }
 }

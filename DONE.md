@@ -19,12 +19,12 @@ Renamed all Rust crates from ACP (Agent Credential Proxy) to GAP (Gated Agent Pr
 Implemented TLS encryption for CLI → management API communication. Management API now serves HTTPS with certificates signed by the existing CA infrastructure. Includes support for configurable Subject Alternative Names (SANs) at init time and live certificate rotation without server restart.
 
 **Features:**
-- Management certificate generation during `acp init` with default SANs (localhost, 127.0.0.1, ::1)
+- Management certificate generation during `gap init` with default SANs (localhost, 127.0.0.1, ::1)
 - `--management-sans` flag for custom SANs in remote management scenarios
 - Server serves HTTPS on management API port with certificate verification
 - CLI configured with CA trust bundle for secure connections to `https://localhost:9080`
 - `POST /v1/management-cert` endpoint for live certificate rotation
-- `acp new-management-cert` CLI command to trigger cert regeneration
+- `gap new-management-cert` CLI command to trigger cert regeneration
 - Tests updated for HTTPS communication
 
 **Commits:**
@@ -44,7 +44,7 @@ Converted tokens/credentials from arrays to HashMaps. Tokens now keyed by token 
 Removed TokenCache abstraction, tokens now stored directly as `token:{token_value}` → `{name, created_at}` for direct lookup. Fixed plugin matching to properly find matching plugins.
 
 ## Homebrew Formula
-Homebrew tap for macOS distribution via `brew tap mikekelly/acp`.
+Homebrew tap for macOS distribution via `brew tap mikekelly/gap`.
 
 ## Registry Refactor
 Centralized registry for tokens, plugins, and credentials. Fixes KeychainStore listing on macOS.

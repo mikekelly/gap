@@ -74,7 +74,7 @@ pub fn get_log_dir() -> PathBuf {
 }
 
 #[cfg(target_os = "macos")]
-/// Get the ACP data directory path
+/// Get the GAP data directory path
 ///
 /// Returns ~/.gap/
 pub fn get_gap_dir() -> PathBuf {

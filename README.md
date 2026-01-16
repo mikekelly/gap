@@ -1,4 +1,4 @@
-# Agent Credential Proxy (ACP)
+# GAP (Generic Agent Proxy)
 
 **Give AI agents secure access to your APIs - without sharing your credentials.**
 
@@ -10,13 +10,13 @@ Today's approach is not ideal - agents are entrusted with access to API credenti
 
 ## The Solution
 
-ACP lets you grant agents authenticated API access without giving them your credentials.
+GAP lets you grant agents authenticated API access without giving them your credentials.
 
 Agents **opt in** by routing requests through the proxy. You give them a proxy token - not your API keys. When they make a request to an API you've authorized, ACP injects your credentials at the network layer. The agent never sees them.
 
 ```
 ┌─────────────┐      ┌─────────────┐      ┌─────────────┐
-│   AI Agent  │ ──── │     ACP     │ ──── │   Exa API   │
+│   AI Agent  │ ──── │     GAP     │ ──── │   Exa API   │
 │             │      │  (proxy)    │      │             │
 │  has: proxy │      │  has: your  │      │  sees: your │
 │  token only │      │  API keys   │      │  API key    │
@@ -26,54 +26,54 @@ Agents **opt in** by routing requests through the proxy. You give them a proxy t
 **Why this matters:**
 - **Prompt injection can't leak credentials** - The agent doesn't have them. A malicious prompt can't trick the agent into revealing what it doesn't possess.
 - **Credentials never leave your machine** - Stored in your OS keychain (macOS) or under a dedicated service user (Linux). The proxy injects them into requests on your behalf.
-- **Stolen tokens are useless off-machine** - Prompt injection could exfiltrate an ACP token, but the proxy only listens on localhost. The token only works on your machine.
-- **One-way credential flow** - Credentials go into ACP and never come back out. There's no API to retrieve them, no export function. The only path out is privilege escalation on your machine.
+- **Stolen tokens are useless off-machine** - Prompt injection could exfiltrate a GAP token, but the proxy only listens on localhost. The token only works on your machine.
+- **One-way credential flow** - Credentials go into GAP and never come back out. There's no API to retrieve them, no export function. The only path out is privilege escalation on your machine.
 - **Scoped access** - Agents only get access to APIs you explicitly authorize via plugins
-- **Works with any agent or software stack** - If it can use an HTTP proxy, it works with ACP
+- **Works with any agent or software stack** - If it can use an HTTP proxy, it works with GAP
 - **CLI protects secrets from shell history** - Credentials are entered via secure prompts, never as command arguments that could end up in shell logs (accessible to agents)
 
 ## Get Started
 
 ### macOS Quick Start
 
-Install and setup ACP:
+Install and setup GAP:
 ```bash
 # Install via Homebrew
-brew tap mikekelly/acp
-brew install acp-server
+brew tap mikekelly/gap
+brew install gap-server
 
 # Start the background service
-brew services start acp-server
+brew services start gap-server
 
 # Initialize with a password (you'll need this for admin operations)
-acp init
+gap init
 ```
 
-Install an ACP plugin for a given service (eg. Exa) and set credentials:
+Install a GAP plugin for a given service (eg. Exa) and set credentials:
 ```bash
 # Install a plugin (e.g. Exa search API)
-acp install mikekelly/exa-acp
+gap install mikekelly/exa-gap
 
 # Set your API key for the plugin
-acp set mikekelly/exa-acp:apiKey
+gap set mikekelly/exa-gap:apiKey
 ```
 
-Assign an ACP token to an agent (eg. Claude Code)
+Assign a GAP token to an agent (eg. Claude Code)
 ```bash
-acp token create my-agent
-# outputs: acp_xxxxxxxxxxxx
+gap token create my-agent
+# outputs: gap_xxxxxxxxxxxx
 
 cd /path/to/your/project
 
-echo "ACP_TOKEN=acp_xxxxxxxxxxxx" >> .env
+echo "GAP_TOKEN=gap_xxxxxxxxxxxx" >> .env
 ```
 
-Install ACP enabled tools (eg. this ACP-enabled fork of exa-mcp-server):
+Install GAP enabled tools (eg. this GAP-enabled fork of exa-mcp-server):
 ```
-claude mcp add exa -- npx -y exa-acp-mcp
+claude mcp add exa -- npx -y exa-gap-mcp
 ```
 
-The agent can now talk to Exa without direct API credentials - ACP injects them automatically.
+The agent can now talk to Exa without direct API credentials - GAP injects them automatically.
 
 ### Linux Quick Start
 
@@ -81,37 +81,37 @@ The agent can now talk to Exa without direct API credentials - ACP injects them 
 
 ```bash
 # Download the latest release (adjust version and arch as needed)
-curl -LO https://github.com/mikekelly/acp/releases/latest/download/acp-linux-amd64.tar.gz
-tar -xzf acp-linux-amd64.tar.gz
-sudo mv acp acp-server /usr/local/bin/
+curl -LO https://github.com/mikekelly/gap/releases/latest/download/gap-linux-amd64.tar.gz
+tar -xzf gap-linux-amd64.tar.gz
+sudo mv gap gap-server /usr/local/bin/
 ```
 
 #### 2. Create a dedicated user and directories
 
 ```bash
-# Create acp user (no login shell, no home directory)
-sudo useradd --system --no-create-home --shell /usr/sbin/nologin acp
+# Create gap user (no login shell, no home directory)
+sudo useradd --system --no-create-home --shell /usr/sbin/nologin gap
 
 # Create data directory with restricted permissions
-sudo mkdir -p /var/lib/acp
-sudo chown acp:acp /var/lib/acp
-sudo chmod 700 /var/lib/acp
+sudo mkdir -p /var/lib/gap
+sudo chown gap:gap /var/lib/gap
+sudo chmod 700 /var/lib/gap
 ```
 
 #### 3. Create systemd service
 
 ```bash
-sudo tee /etc/systemd/system/acp-server.service > /dev/null <<EOF
+sudo tee /etc/systemd/system/gap-server.service > /dev/null <<EOF
 [Unit]
-Description=Agent Credential Proxy
+Description=Generic Agent Proxy
 After=network.target
 
 [Service]
 Type=simple
-User=acp
-Group=acp
-Environment=ACP_DATA_DIR=/var/lib/acp
-ExecStart=/usr/local/bin/acp-server
+User=gap
+Group=gap
+Environment=GAP_DATA_DIR=/var/lib/gap
+ExecStart=/usr/local/bin/gap-server
 Restart=on-failure
 RestartSec=5
 
@@ -120,7 +120,7 @@ NoNewPrivileges=yes
 ProtectSystem=strict
 ProtectHome=yes
 PrivateTmp=yes
-ReadWritePaths=/var/lib/acp
+ReadWritePaths=/var/lib/gap
 
 [Install]
 WantedBy=multi-user.target
@@ -131,35 +131,35 @@ EOF
 
 ```bash
 sudo systemctl daemon-reload
-sudo systemctl enable acp-server
-sudo systemctl start acp-server
+sudo systemctl enable gap-server
+sudo systemctl start gap-server
 
 # Check status
-sudo systemctl status acp-server
+sudo systemctl status gap-server
 ```
 
 #### 5. Initialize and configure
 
 ```bash
 # Initialize with a password
-acp init
+gap init
 
 # Install a plugin
-acp install mikekelly/exa-acp
+gap install mikekelly/exa-gap
 
 # Set your API key
-acp set mikekelly/exa-acp:apiKey
+gap set mikekelly/exa-gap:apiKey
 
 # Create a token for your agent
-acp token create my-agent
+gap token create my-agent
 ```
 
 #### 6. Use the proxy
 
 ```bash
 curl -x http://localhost:9443 \
-     --cacert ~/.config/acp/ca.crt \
-     --proxy-header "Proxy-Authorization: Bearer acp_xxxxxxxxxxxx" \
+     --cacert ~/.config/gap/ca.crt \
+     --proxy-header "Proxy-Authorization: Bearer gap_xxxxxxxxxxxx" \
      -H "Content-Type: application/json" \
      -d '{"query": "latest AI news", "numResults": 3}' \
      https://api.exa.ai/search
@@ -170,7 +170,7 @@ curl -x http://localhost:9443 \
 > **Security note:** The Docker deployment is designed for environments where **agents also run in containers**. If your agent runs directly on the host machine, use the native macOS/Linux installation instead - a host-based agent could potentially access the Docker volume and read credentials directly, bypassing the proxy's protection.
 
 The Docker image is ideal for:
-- Sandboxed agent environments (agent and ACP both containerized)
+- Sandboxed agent environments (agent and GAP both containerized)
 - Kubernetes deployments
 - CI/CD pipelines with ephemeral agents
 
@@ -179,21 +179,21 @@ The Docker image is ideal for:
 ```bash
 # Run with persistent storage (required)
 docker run -d \
-  --name acp-server \
-  -v acp-data:/var/lib/acp \
+  --name gap-server \
+  -v gap-data:/var/lib/gap \
   -p 9443:9443 \
   -p 9080:9080 \
-  mikekelly321/acp:latest
+  mikekelly321/gap:latest
 ```
 
 #### Docker Compose (recommended for containerized agents)
 
 ```yaml
 services:
-  acp-server:
-    image: mikekelly321/acp:latest
+  gap-server:
+    image: mikekelly321/gap:latest
     volumes:
-      - acp-data:/var/lib/acp
+      - gap-data:/var/lib/gap
     ports:
       - "9443:9443"
       - "9080:9080"
@@ -203,30 +203,30 @@ services:
   my-agent:
     image: your-agent-image
     environment:
-      - HTTP_PROXY=http://acp-server:9443
-      - HTTPS_PROXY=http://acp-server:9443
+      - HTTP_PROXY=http://gap-server:9443
+      - HTTPS_PROXY=http://gap-server:9443
     networks:
       - agent-network
 
 volumes:
-  acp-data:
+  gap-data:
 
 networks:
   agent-network:
 ```
 
-This isolates credentials from the agent - the agent container cannot access the `acp-data` volume.
+This isolates credentials from the agent - the agent container cannot access the `gap-data` volume.
 
 #### Volume requirement
 
-The container **requires** a volume mount for `/var/lib/acp`. Without it, secrets would be lost when the container stops:
+The container **requires** a volume mount for `/var/lib/gap`. Without it, secrets would be lost when the container stops:
 
 ```bash
 # This will fail with a helpful error
-docker run mikekelly321/acp:latest
+docker run mikekelly321/gap:latest
 
 # For testing only, you can bypass with:
-docker run -e ACP_ALLOW_EPHEMERAL=I-understand-secrets-will-be-lost mikekelly321/acp:latest
+docker run -e GAP_ALLOW_EPHEMERAL=I-understand-secrets-will-be-lost mikekelly321/gap:latest
 ```
 
 ### Build from Source
@@ -234,59 +234,59 @@ docker run -e ACP_ALLOW_EPHEMERAL=I-understand-secrets-will-be-lost mikekelly321
 #### 1. Build and start the server
 
 ```bash
-git clone https://github.com/mikekelly/agent-credential-proxy.git
-cd agent-credential-proxy
+git clone https://github.com/mikekelly/gap.git
+cd gap
 cargo build --release
 
 # Start the server
-./target/release/acp-server &
+./target/release/gap-server &
 ```
 
 #### 2. Initialize and install a plugin
 
 ```bash
 # Initialize with a password (you'll need this for admin operations)
-./target/release/acp init
+./target/release/gap init
 
 # Install the Exa search plugin
-./target/release/acp install mikekelly/exa-acp
+./target/release/gap install mikekelly/exa-gap
 
 # Set your Exa API key
-./target/release/acp set "mikekelly/exa-acp:apiKey"
+./target/release/gap set "mikekelly/exa-gap:apiKey"
 ```
 
 #### 3. Create an agent token
 
 ```bash
 # Create a token that can use the Exa plugin
-./target/release/acp token create my-agent --plugins mikekelly/exa-acp
+./target/release/gap token create my-agent --plugins mikekelly/exa-gap
 ```
 
-This outputs a token like `acp_19ba8e89e25` - give this to your agent.
+This outputs a token like `gap_19ba8e89e25` - give this to your agent.
 
 #### 4. Configure your agent to use the proxy
 
-Point your agent's HTTP traffic through ACP:
+Point your agent's HTTP traffic through GAP:
 
 ```bash
 # The proxy runs on localhost:9443
-# Your agent needs to trust the CA certificate at ~/.config/acp/ca.crt
+# Your agent needs to trust the CA certificate at ~/.config/gap/ca.crt
 
 # Example with curl:
 curl --proxy http://127.0.0.1:9443 \
-     --cacert ~/.config/acp/ca.crt \
-     --proxy-header "Proxy-Authorization: Bearer acp_19ba8e89e25" \
+     --cacert ~/.config/gap/ca.crt \
+     --proxy-header "Proxy-Authorization: Bearer gap_19ba8e89e25" \
      -X POST https://api.exa.ai/search \
      -H "Content-Type: application/json" \
      -d '{"query":"latest AI news","numResults":3}'
 ```
 
-The agent sends the request without any API key - ACP injects it automatically.
+The agent sends the request without any API key - GAP injects it automatically.
 
 ## How It Works
 
 1. **Agent makes request** through the proxy with its bearer token
-2. **ACP authenticates** the agent and checks which plugins it can use
+2. **GAP authenticates** the agent and checks which plugins it can use
 3. **Plugin matches** the target hostname (e.g., `api.exa.ai`)
 4. **Credentials loaded** from secure storage (Keychain on macOS, service user on Linux)
 5. **JavaScript transform** injects credentials into the request
@@ -304,13 +304,13 @@ This is a fundamentally different security posture than giving credentials to an
 
 **Agent tokens:** Tokens are for **tracking and audit**, not strong authentication. Any process that can read the token (other agents, scripts, humans with shell access) can use it. The real security boundary is the credential store - tokens just help you see which agent made which request.
 
-**CLI attack surface:** When you use the CLI to manage credentials (`acp set`, `acp init`), you enter secrets interactively via secure terminal input (no echo, never stored). The CLI immediately hashes these with SHA512 before transmitting to the management API. The plaintext exists in the CLI process memory only briefly (milliseconds). Current transport from CLI to management API is HTTP on localhost. HTTPS using the existing `ca.crt` is on the roadmap for defense in depth. Remaining attack vectors all require host compromise: memory scraping during the brief plaintext window, or keylogger/terminal interception. These are edge cases requiring privilege escalation - and if an attacker has that level of access, they could access the credential store directly anyway.
+**CLI attack surface:** When you use the CLI to manage credentials (`gap set`, `gap init`), you enter secrets interactively via secure terminal input (no echo, never stored). The CLI immediately hashes these with SHA512 before transmitting to the management API. The plaintext exists in the CLI process memory only briefly (milliseconds). Current transport from CLI to management API is HTTP on localhost. HTTPS using the existing `ca.crt` is on the roadmap for defense in depth. Remaining attack vectors all require host compromise: memory scraping during the brief plaintext window, or keylogger/terminal interception. These are edge cases requiring privilege escalation - and if an attacker has that level of access, they could access the credential store directly anyway.
 
 Plugins are simple JavaScript:
 
 ```javascript
 export default {
-  name: "exa-acp",
+  name: "exa-gap",
   match: ["api.exa.ai"],
 
   credentialSchema: {
@@ -334,17 +334,17 @@ No. The agent never receives your credentials - they're injected at the network 
 
 **Q: What if someone steals the agent token?**
 
-Agent tokens control which APIs can be accessed, but not which credentials are used. A stolen token lets someone make requests on your behalf to authorized APIs - similar to API key theft, but scoped to specific services. You can revoke tokens instantly via `acp token delete`.
+Agent tokens control which APIs can be accessed, but not which credentials are used. A stolen token lets someone make requests on your behalf to authorized APIs - similar to API key theft, but scoped to specific services. You can revoke tokens instantly via `gap token delete`.
 
 **Q: How is this different from giving my API keys to the agent?**
 
-With ACP: credentials stay in secure storage, agent gets scoped access via token, you control which APIs, you can revoke instantly.
+With GAP: credentials stay in secure storage, agent gets scoped access via token, you control which APIs, you can revoke instantly.
 
 With direct API keys: credentials in chat logs, sent to LLM providers, vulnerable to prompt injection, no revocation without rotating keys everywhere.
 
 **Q: Can I use this with Claude Code, Cursor, or other IDEs?**
 
-Yes, if the IDE supports HTTP proxy configuration. Point it to `http://localhost:9443` and provide the CA certificate at `~/.config/acp/ca.crt`. Each IDE has different proxy settings - check their documentation.
+Yes, if the IDE supports HTTP proxy configuration. Point it to `http://localhost:9443` and provide the CA certificate at `~/.config/gap/ca.crt`. Each IDE has different proxy settings - check their documentation.
 
 **Q: Do I need to trust the agent framework?**
 
@@ -386,9 +386,9 @@ The CLI works, but managing credentials should be as easy as a password manager.
 
 Contributions welcome! See the codebase structure:
 
-- `acp-lib/` - Core library (proxy, plugins, storage)
-- `acp-server/` - Server daemon
-- `acp/` - CLI tool
+- `gap-lib/` - Core library (proxy, plugins, storage)
+- `gap-server/` - Server daemon
+- `gap/` - CLI tool
 
 ```bash
 cargo test        # Run tests
