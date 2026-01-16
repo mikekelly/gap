@@ -39,11 +39,11 @@ Agents **opt in** by routing requests through the proxy. You give them a proxy t
 Install and setup GAP:
 ```bash
 # Install via Homebrew
-brew tap mikekelly/gap
-brew install gap-server
+brew tap mikekelly/tap
+brew install gap
 
 # Start the background service
-brew services start gap-server
+brew services start gap
 
 # Initialize with a password (you'll need this for admin operations)
 gap init
@@ -70,7 +70,7 @@ echo "GAP_TOKEN=gap_xxxxxxxxxxxx" >> .env
 
 Install GAP enabled tools (eg. this GAP-enabled fork of exa-mcp-server):
 ```
-claude mcp add exa -- npx -y exa-gap-mcp
+claude mcp add exa -- npx -y exa-gapped-mcp
 ```
 
 The agent can now talk to Exa without direct API credentials - GAP injects them automatically.
