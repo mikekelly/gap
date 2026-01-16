@@ -41,11 +41,11 @@ API_PORT=19080
 PROXY_PORT=19443
 
 # CLI binary paths
-ACP="$WORKSPACE_ROOT/target/release/acp"
-ACP_SERVER="$WORKSPACE_ROOT/target/release/acp-server"
+ACP="$WORKSPACE_ROOT/target/release/gap"
+GAP_SERVER="$WORKSPACE_ROOT/target/release/gap-server"
 
 # Export password for CLI (undocumented env var for testing)
-export ACP_PASSWORD="$TEST_PASSWORD"
+export GAP_PASSWORD="$TEST_PASSWORD"
 
 log_info "====================================="
 log_info "ACP Comprehensive Smoke Test"
@@ -83,8 +83,8 @@ cleanup() {
 trap cleanup EXIT
 
 # 1.3: Start server
-log_step "Phase 1.3: Starting acp-server"
-ACP_DATA_DIR="$TEMP_DIR" "$ACP_SERVER" \
+log_step "Phase 1.3: Starting gap-server"
+GAP_DATA_DIR="$TEMP_DIR" "$GAP_SERVER" \
     --api-port $API_PORT \
     --proxy-port $PROXY_PORT \
     --log-level warn > "$TEMP_DIR/server.log" 2>&1 &
@@ -207,7 +207,7 @@ log_step "Phase 4.1: Installing plugin with 'acp install mikekelly/test-acp'"
 INSTALL_OUTPUT=$("$ACP" --server "http://localhost:$API_PORT" install mikekelly/test-acp 2>&1)
 
 if echo "$INSTALL_OUTPUT" | grep -q "installed successfully"; then
-    log_success "Plugin installed: mikekelly/test-acp"
+    log_success "Plugin installed: mikekelly/test-gap"
 else
     log_error "Plugin installation failed: $INSTALL_OUTPUT"
     exit 1
@@ -217,10 +217,10 @@ fi
 log_step "Phase 4.2: Listing plugins with 'acp plugins'"
 PLUGINS_OUTPUT=$("$ACP" --server "http://localhost:$API_PORT" plugins 2>&1)
 
-if echo "$PLUGINS_OUTPUT" | grep -q "mikekelly/test-acp"; then
+if echo "$PLUGINS_OUTPUT" | grep -q "mikekelly/test-gap"; then
     log_success "Plugin appears in list"
     # Show plugin details
-    echo "$PLUGINS_OUTPUT" | grep -A5 "mikekelly/test-acp" | head -6
+    echo "$PLUGINS_OUTPUT" | grep -A5 "mikekelly/test-gap" | head -6
 else
     log_error "Plugin not found in list: $PLUGINS_OUTPUT"
     exit 1
@@ -232,7 +232,7 @@ log_step "Phase 4.3: Installing second plugin with 'acp install mikekelly/exa-ac
 INSTALL_EXA_OUTPUT=$("$ACP" --server "http://localhost:$API_PORT" install mikekelly/exa-acp 2>&1)
 
 if echo "$INSTALL_EXA_OUTPUT" | grep -q "installed successfully"; then
-    log_success "Plugin installed: mikekelly/exa-acp"
+    log_success "Plugin installed: mikekelly/exa-gap"
 else
     log_error "Plugin installation failed: $INSTALL_EXA_OUTPUT"
     exit 1
@@ -242,14 +242,14 @@ fi
 log_step "Phase 4.4: Verifying both plugins appear in list"
 PLUGINS_BOTH=$("$ACP" --server "http://localhost:$API_PORT" plugins 2>&1)
 
-if echo "$PLUGINS_BOTH" | grep -q "mikekelly/test-acp"; then
+if echo "$PLUGINS_BOTH" | grep -q "mikekelly/test-gap"; then
     log_success "First plugin still in list"
 else
     log_error "First plugin not found: $PLUGINS_BOTH"
     exit 1
 fi
 
-if echo "$PLUGINS_BOTH" | grep -q "mikekelly/exa-acp"; then
+if echo "$PLUGINS_BOTH" | grep -q "mikekelly/exa-gap"; then
     log_success "Second plugin in list"
 else
     log_error "Second plugin not found: $PLUGINS_BOTH"
@@ -278,7 +278,7 @@ log_step "Phase 4.6: Uninstalling plugin with 'acp uninstall mikekelly/exa-acp'"
 UNINSTALL_OUTPUT=$("$ACP" --server "http://localhost:$API_PORT" uninstall mikekelly/exa-acp 2>&1)
 
 if echo "$UNINSTALL_OUTPUT" | grep -qi "uninstalled successfully\|removed successfully\|deleted successfully"; then
-    log_success "Plugin uninstalled: mikekelly/exa-acp"
+    log_success "Plugin uninstalled: mikekelly/exa-gap"
 else
     log_error "Plugin uninstall failed: $UNINSTALL_OUTPUT"
     exit 1
@@ -288,7 +288,7 @@ fi
 log_step "Phase 4.7: Verifying plugin removed from list"
 PLUGINS_AFTER_UNINSTALL=$("$ACP" --server "http://localhost:$API_PORT" plugins 2>&1)
 
-if echo "$PLUGINS_AFTER_UNINSTALL" | grep -q "mikekelly/exa-acp"; then
+if echo "$PLUGINS_AFTER_UNINSTALL" | grep -q "mikekelly/exa-gap"; then
     log_error "Plugin still appears after uninstall"
     exit 1
 else
@@ -300,7 +300,7 @@ log_step "Phase 4.8: Re-installing plugin with 'acp install mikekelly/exa-acp'"
 REINSTALL_OUTPUT=$("$ACP" --server "http://localhost:$API_PORT" install mikekelly/exa-acp 2>&1)
 
 if echo "$REINSTALL_OUTPUT" | grep -q "installed successfully"; then
-    log_success "Plugin re-installed: mikekelly/exa-acp"
+    log_success "Plugin re-installed: mikekelly/exa-gap"
 else
     log_error "Plugin re-installation failed: $REINSTALL_OUTPUT"
     exit 1
@@ -310,7 +310,7 @@ fi
 log_step "Phase 4.9: Verifying re-installed plugin in list"
 PLUGINS_AFTER_REINSTALL=$("$ACP" --server "http://localhost:$API_PORT" plugins 2>&1)
 
-if echo "$PLUGINS_AFTER_REINSTALL" | grep -q "mikekelly/exa-acp"; then
+if echo "$PLUGINS_AFTER_REINSTALL" | grep -q "mikekelly/exa-gap"; then
     log_success "Re-installed plugin appears in list"
 else
     log_error "Re-installed plugin not found: $PLUGINS_AFTER_REINSTALL"
@@ -338,7 +338,7 @@ echo "-----------------------------------"
 # 5.1: Set apiKey credential
 log_step "Phase 5.1: Setting credential with 'acp set mikekelly/test-acp:apiKey'"
 TEST_API_KEY="test-api-key-$(date +%s)"
-export ACP_CREDENTIAL_VALUE="$TEST_API_KEY"
+export GAP_CREDENTIAL_VALUE="$TEST_API_KEY"
 
 SET_OUTPUT=$("$ACP" --server "http://localhost:$API_PORT" set "mikekelly/test-acp:apiKey" 2>&1)
 
@@ -352,7 +352,7 @@ fi
 # 5.2: Set clientId credential
 log_step "Phase 5.2: Setting credential with 'acp set mikekelly/test-acp:clientId'"
 TEST_CLIENT_ID="test-client-id-$(date +%s)"
-export ACP_CREDENTIAL_VALUE="$TEST_CLIENT_ID"
+export GAP_CREDENTIAL_VALUE="$TEST_CLIENT_ID"
 
 SET_OUTPUT=$("$ACP" --server "http://localhost:$API_PORT" set "mikekelly/test-acp:clientId" 2>&1)
 
@@ -443,7 +443,7 @@ log_info "====================================="
 echo ""
 echo "Summary:"
 echo "  ✓ Phase 1: Setup (build, start server, health check)"
-echo "  ✓ Phase 2: Initialization (acp init, acp status)"
+echo "  ✓ Phase 2: Initialization (acp init, gap status)"
 echo "  ✓ Phase 3: Token Management (acp token create/list/revoke)"
 echo "  ✓ Phase 4: Plugin Management (acp install/update/uninstall/reinstall, duplicate rejection)"
 echo "  ✓ Phase 5: Credential Management (acp set apiKey, clientId)"

@@ -12,7 +12,7 @@ This document provides detailed technical reference for the GAP (Gated Agent Pro
 All types use `.with_*()` methods for fluent construction.
 
 ### Error Context
-Use `AcpError::storage("msg")` rather than `AcpError::Storage("msg".to_string())`.
+Use `GapError::storage("msg")` rather than `GapError::Storage("msg".to_string())`.
 
 ### Registry Pattern
 Centralized metadata storage at key "_registry" solves listing issues on platforms like macOS Keychain. Registry tracks what exists (metadata), while actual values remain at individual keys. `Registry.load()` returns empty `RegistryData` if not found (not an error).
@@ -104,11 +104,11 @@ REST API for configuration and monitoring.
 
 ## CLI
 
-Command-line interface for ACP management.
+Command-line interface for GAP management.
 
 ### Password Handling
 - Uses `rpassword` crate for hidden password input (no echo)
-- `ACP_PASSWORD` env var bypasses interactive prompt for testing/automation
+- `GAP_PASSWORD` env var bypasses interactive prompt for testing/automation
 - Client-side SHA512 hashing via `sha2` crate before sending to API
 
 ### HTTP Client
@@ -168,12 +168,12 @@ Deployment options and configuration.
 ### Docker
 - **Dockerfile**: Multi-stage build with dependency caching layer
 - Uses `rustlang/rust:nightly-slim` (required for edition2024 support)
-- Runtime uses non-root user `acp` on Debian Bookworm
+- Runtime uses non-root user `gap` on Debian Bookworm
 - Includes curl for healthcheck
 
 ### Docker Testing
 - **Dockerfile.test-runner**: Test runner image with curl, jq, and coreutils
-- **docker-compose.yml**: Complete test environment with ACP server, mock API, test-runner service (profile: test), and persistent volumes
+- **docker-compose.yml**: Complete test environment with GAP server, mock API, test-runner service (profile: test), and persistent volumes
 - **smoke-tests/test-docker-integration.sh**: Integration tests covering init, token creation, credential management, and API access
 
 ### Configuration
@@ -182,12 +182,12 @@ Deployment options and configuration.
   - 9080: Management API
   - 8080: Mock API (internal)
 - **Data directory**:
-  - Docker: `/var/lib/acp`
-  - Host: `~/.config/acp/` or `$XDG_CONFIG_HOME/acp/`
+  - Docker: `/var/lib/gap`
+  - Host: `~/.config/gap/` or `$XDG_CONFIG_HOME/gap/`
 - **Health check**: Management API `/status` endpoint
 
 ### Binaries
-- Release binaries at `target/release/acp` and `target/release/acp-server`
+- Release binaries at `target/release/gap` and `target/release/gap-server`
 - Size: 5-6MB each
 
 ### Important Notes

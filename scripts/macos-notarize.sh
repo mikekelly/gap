@@ -27,12 +27,12 @@
 #   ./macos-notarize.sh --help
 #
 # EXAMPLES:
-#   # Notarize acp-server binary:
+#   # Notarize gap-server binary:
 #   export NOTARIZE_KEYCHAIN_PROFILE="notarytool-profile"
-#   ./macos-notarize.sh target/release/acp-server
+#   ./macos-notarize.sh target/release/gap-server
 #
 #   # Notarize both ACP binaries:
-#   for binary in target/release/acp target/release/acp-server; do
+#   for binary in target/release/acp target/release/gap-server; do
 #     ./macos-notarize.sh "$binary" --keychain-profile "notarytool-profile"
 #   done
 #
@@ -71,7 +71,7 @@ show_usage() {
     echo ""
     echo "Examples:"
     echo "  export NOTARIZE_KEYCHAIN_PROFILE=\"notarytool-profile\""
-    echo "  $0 target/release/acp-server"
+    echo "  $0 target/release/gap-server"
     echo ""
     echo "  $0 target/release/acp --keychain-profile \"notarytool-profile\""
     echo ""

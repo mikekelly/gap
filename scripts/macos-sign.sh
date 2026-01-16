@@ -34,7 +34,7 @@ if [[ "$(uname)" != "Darwin" ]]; then
 fi
 
 # Check if binaries exist
-if [[ ! -f "target/release/acp-server" ]] || [[ ! -f "target/release/acp" ]]; then
+if [[ ! -f "target/release/gap-server" ]] || [[ ! -f "target/release/gap" ]]; then
     log_info "Building release binaries..."
     cargo build --release
 fi
@@ -140,13 +140,13 @@ if [[ "$PRODUCTION_MODE" == true ]]; then
 </plist>
 ENTITLEMENTS
 
-    log_info "Signing acp-server..."
+    log_info "Signing gap-server..."
     codesign --sign "$CERT_NAME" \
         --force \
         --options runtime \
         --timestamp \
         --entitlements "$ENTITLEMENTS_FILE" \
-        target/release/acp-server
+        target/release/gap-server
 
     log_info "Signing acp..."
     codesign --sign "$CERT_NAME" \
@@ -163,11 +163,11 @@ else
     # all loaded libraries to have matching team IDs. Since we may link against
     # Homebrew's OpenSSL, this could fail. Hardened runtime is only needed for
     # notarization/distribution - for local Keychain access, a basic signature works.
-    log_info "Signing acp-server..."
+    log_info "Signing gap-server..."
     codesign --sign "$CERT_NAME" \
         --force \
         --timestamp=none \
-        target/release/acp-server
+        target/release/gap-server
 
     log_info "Signing acp..."
     codesign --sign "$CERT_NAME" \
@@ -178,7 +178,7 @@ fi
 
 # Verify signatures
 log_info "Verifying signatures..."
-codesign --verify --verbose target/release/acp-server
+codesign --verify --verbose target/release/gap-server
 codesign --verify --verbose target/release/acp
 
 # Enhanced verification for production builds
@@ -186,27 +186,27 @@ if [[ "$PRODUCTION_MODE" == true ]]; then
     log_info "Performing detailed signature verification..."
 
     echo ""
-    log_info "acp-server signature details:"
-    codesign --display --verbose=4 target/release/acp-server
+    log_info "gap-server signature details:"
+    codesign --display --verbose=4 target/release/gap-server
 
     echo ""
-    log_info "acp signature details:"
+    log_info "gap signature details:"
     codesign --display --verbose=4 target/release/acp
 
     # Verify hardened runtime is enabled
     echo ""
     log_info "Verifying hardened runtime..."
-    if codesign --display --verbose target/release/acp-server 2>&1 | grep -q "runtime"; then
-        log_info "✓ Hardened runtime enabled on acp-server"
+    if codesign --display --verbose target/release/gap-server 2>&1 | grep -q "runtime"; then
+        log_info "✓ Hardened runtime enabled on gap-server"
     else
-        log_error "✗ Hardened runtime NOT enabled on acp-server"
+        log_error "✗ Hardened runtime NOT enabled on gap-server"
         exit 1
     fi
 
     if codesign --display --verbose target/release/acp 2>&1 | grep -q "runtime"; then
-        log_info "✓ Hardened runtime enabled on acp"
+        log_info "✓ Hardened runtime enabled on gap"
     else
-        log_error "✗ Hardened runtime NOT enabled on acp"
+        log_error "✗ Hardened runtime NOT enabled on gap"
         exit 1
     fi
 fi
@@ -222,16 +222,16 @@ if [[ "$PRODUCTION_MODE" == true ]]; then
     echo "  1. Notarize the binaries:"
     echo "     xcrun notarytool submit <archive.zip> --keychain-profile \"notarytool-profile\" --wait"
     echo "  2. Staple the notarization ticket:"
-    echo "     xcrun stapler staple target/release/acp-server"
-    echo "     xcrun stapler staple target/release/acp"
+    echo "     xcrun stapler staple target/release/gap-server"
+    echo "     xcrun stapler staple target/release/gap"
     echo "  3. Verify notarization:"
-    echo "     spctl -a -v target/release/acp-server"
+    echo "     spctl -a -v target/release/gap-server"
     echo ""
 else
     echo "Development build signed with self-signed certificate."
     echo ""
     echo "Next steps:"
-    echo "  1. Run: ./target/release/acp-server --data-dir /tmp/acp-test"
+    echo "  1. Run: ./target/release/gap-server --data-dir /tmp/acp-test"
     echo "  2. If blocked by Gatekeeper:"
     echo "     - Go to System Settings → Privacy & Security"
     echo "     - Click 'Open Anyway' next to the blocked app message"

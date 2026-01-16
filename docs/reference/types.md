@@ -1,28 +1,28 @@
 # Core Types Reference
 
-This document provides a comprehensive reference for the core types in ACP (`acp-lib` crate).
+This document provides a comprehensive reference for the core types in GAP (`gap-lib` crate).
 
 ## HTTP & Request Types
 
-### ACPRequest
+### GAPRequest
 HTTP request with method, url, headers, body.
 
 Used throughout the proxy pipeline to represent incoming HTTP requests that need credential injection.
 
-### ACPCredentials
+### GAPCredentials
 String key-value map for plugin credentials.
 
 Represents the credentials that plugins need to transform requests (e.g., `{"api_key": "sk-xxx", "secret": "yyy"}`).
 
 ## Plugin System
 
-### ACPPlugin
+### GAPPlugin
 Plugin definition with host matching.
 
 Supports wildcards like `*.s3.amazonaws.com` for matching multiple hosts. See [Patterns](../AGENT_ORIENTATION.md#patterns) for wildcard matching rules.
 
 ### PluginRuntime
-Sandboxed Boa JS runtime with ACP.crypto, ACP.util, ACP.log, TextEncoder/TextDecoder, URL/URLSearchParams.
+Sandboxed Boa JS runtime with GAP.crypto, GAP.util, GAP.log, TextEncoder/TextDecoder, URL/URLSearchParams.
 
 Provides a secure JavaScript execution environment for running plugin transform functions. Each runtime instance can load and execute plugins while maintaining isolation from the host system.
 
@@ -38,7 +38,7 @@ The `token` field is public for direct access (e.g., `agent_token.token`). See [
 ## Configuration
 
 ### Config
-Runtime configuration for the ACP server and CLI.
+Runtime configuration for the GAP server and CLI.
 
 ## Storage
 
@@ -113,12 +113,12 @@ Implements HTTP CONNECT tunnel with dual TLS (agent-side and upstream). Authenti
 
 ## Error Handling
 
-### AcpError
+### GapError
 Unified error type with context helpers.
 
 Includes Network and Protocol variants for handling connection and HTTP-related errors.
 
-**Best practice:** Use `AcpError::storage("msg")` rather than `AcpError::Storage("msg".to_string())` for better ergonomics.
+**Best practice:** Use `GapError::storage("msg")` rather than `GapError::Storage("msg".to_string())` for better ergonomics.
 
 ## Related Documentation
 

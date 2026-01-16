@@ -1,6 +1,6 @@
 # Gotchas
 
-This document contains important implementation caveats, limitations, and non-obvious behaviors you should be aware of when working with ACP.
+This document contains important implementation caveats, limitations, and non-obvious behaviors you should be aware of when working with GAP.
 
 ## Pattern Matching
 
@@ -12,7 +12,7 @@ The pattern `*.s3.amazonaws.com` matches `bucket.s3.amazonaws.com` but rejects b
 ## Storage & Keychain
 
 ### Keychain access groups
-Use low-level SecItem* APIs for access group support. High-level `security_framework::passwords` API doesn't support access groups. See `keychain_impl.rs` for proper implementation using CFMutableDictionary and direct SecItem* calls. Access groups require Team ID prefix (e.g., "3R44BTH39W.com.acp.secrets").
+Use low-level SecItem* APIs for access group support. High-level `security_framework::passwords` API doesn't support access groups. See `keychain_impl.rs` for proper implementation using CFMutableDictionary and direct SecItem* calls. Access groups require Team ID prefix (e.g., "3R44BTH39W.com.gap.secrets").
 
 **Why:** Access groups enable credential sharing between related apps on macOS/iOS, but require direct Core Foundation APIs to configure.
 
@@ -46,7 +46,7 @@ When using Boa engine, must import `JsArgs` trait for `.get_or_undefined()`, use
 **Why:** Rust trait methods are only available when the trait is in scope. Boa's API design requires explicit imports.
 
 ### Boa closures with state
-`NativeFunction::from_fn_ptr()` only accepts pure function pointers, not closures that capture variables. To maintain state, use JavaScript globals or context properties instead. Example: Store logs in `__acp_logs` JavaScript array rather than Rust Rc<RefCell<Vec<String>>>.
+`NativeFunction::from_fn_ptr()` only accepts pure function pointers, not closures that capture variables. To maintain state, use JavaScript globals or context properties instead. Example: Store logs in `__gap_logs` JavaScript array rather than Rust Rc<RefCell<Vec<String>>>.
 
 **Why:** Function pointers have a different type than closures in Rust. Boa's FFI boundary requires stable function pointers.
 
@@ -130,7 +130,7 @@ Tests modifying environment variables must use a static Mutex to serialize execu
 **Why:** Rust test harness runs tests in parallel. Environment variables are process-wide, so concurrent modification causes race conditions.
 
 ### E2E test binary resolution
-Use `std::env::var("CARGO_BIN_EXE_acp-server")` with fallback to workspace-relative path for finding test binaries. The env var is only set when using `cargo test`, not `cargo build`.
+Use `std::env::var("CARGO_BIN_EXE_gap-server")` with fallback to workspace-relative path for finding test binaries. The env var is only set when using `cargo test`, not `cargo build`.
 
 **Why:** Cargo provides this env var during test execution to locate built binaries, but it's not available in all contexts.
 
@@ -157,7 +157,7 @@ The test-runner service uses profile `test`, so it only runs when invoked with `
 **Why:** Test services should be opt-in to avoid cluttering normal development workflows.
 
 ### Docker healthcheck dependencies
-Use `depends_on` with `condition: service_healthy` to ensure test-runner waits for acp-server to be ready before running tests.
+Use `depends_on` with `condition: service_healthy` to ensure test-runner waits for gap-server to be ready before running tests.
 
 **Why:** Tests that run before services are ready will fail intermittently. Health checks provide proper startup synchronization.
 

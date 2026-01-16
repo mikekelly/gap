@@ -36,7 +36,7 @@ fi
 cleanup() {
     log_info "Cleaning up test containers and images..."
     docker compose -f /Users/mike/code/agent-credential-proxy/docker-compose.yml down -v 2>/dev/null || true
-    docker rmi agent-credential-proxy-acp-server 2>/dev/null || true
+    docker rmi agent-credential-proxy-gap-server 2>/dev/null || true
 }
 
 # Register cleanup on exit
@@ -51,7 +51,7 @@ echo "===================="
 
 cd /Users/mike/code/agent-credential-proxy
 
-if docker build -t acp-test:latest .; then
+if docker build -t gap-test:latest .; then
     log_pass "Docker build succeeded"
 else
     log_fail "Docker build failed"
@@ -62,16 +62,16 @@ echo ""
 echo "Test 2: Verify binaries in image"
 echo "================================="
 
-if docker run --rm acp-test:latest acp --version; then
-    log_pass "acp binary works in container"
+if docker run --rm gap-test:latest gap --version; then
+    log_pass "gap binary works in container"
 else
-    log_fail "acp binary failed in container"
+    log_fail "gap binary failed in container"
 fi
 
-if docker run --rm acp-test:latest acp-server --version; then
-    log_pass "acp-server binary works in container"
+if docker run --rm gap-test:latest gap-server --version; then
+    log_pass "gap-server binary works in container"
 else
-    log_fail "acp-server binary failed in container"
+    log_fail "gap-server binary failed in container"
 fi
 
 # Test 3: Docker Compose

@@ -3,17 +3,17 @@
 > Last verified: 2026-01-13 | Status: PASS
 
 ## Prerequisites
-- [ ] Clean environment (no existing ACP data)
+- [ ] Clean environment (no existing GAP data)
 - [ ] Rust toolchain installed
 - [ ] Both server and CLI binaries can be built
 - [ ] Ports 9080 and 9081 available
 
 ## Test Environment
 - **OS:** macOS (Darwin 25.1.0)
-- **Server:** acp-server v0.2.2
-- **CLI:** acp v0.2.2
+- **Server:** gap-server v0.2.2
+- **CLI:** gap v0.2.2
 - **Storage:** File-based (using --data-dir flag)
-- **CA Certificate Location:** `~/.config/acp/ca.crt`
+- **CA Certificate Location:** `~/.config/gap/ca.crt`
 
 ## Fixes Verified
 1. Certificate signature failure (commit a839237) - FIXED
@@ -26,12 +26,12 @@
 ### Steps
 
 1. Clean environment completely
-   - Run: `rm -rf ~/.config/acp ~/.local/share/acp`
+   - Run: `rm -rf ~/.config/gap ~/.local/share/gap`
    - Expected: Clean slate for testing
    - [x] PASS
 
 2. Start the server with test data directory
-   - Run: `cargo run -p acp-server -- --api-port 9080 --proxy-port 9081 --data-dir /tmp/acp-test-data`
+   - Run: `cargo run -p gap-server -- --api-port 9080 --proxy-port 9081 --data-dir /tmp/gap-test-data`
    - Expected: Server starts, generates CA and management cert, listens on HTTPS
    - [x] PASS
    - Server logs show:
@@ -46,16 +46,16 @@
 3. Run init command with password
    - Run: Use expect script to provide password interactively
    ```bash
-   spawn cargo run -p acp -- init
+   spawn cargo run -p gap -- init
    expect "Enter password:" -> send "testpass123\r"
    expect "Confirm password:" -> send "testpass123\r"
    ```
-   - Expected: Command succeeds, CA cert saved to `~/.config/acp/ca.crt`
+   - Expected: Command succeeds, CA cert saved to `~/.config/gap/ca.crt`
    - [x] PASS
-   - Output: "ACP initialized successfully! CA certificate saved to: /Users/mike/.config/acp/ca.crt"
+   - Output: "GAP initialized successfully! CA certificate saved to: /Users/mike/.config/gap/ca.crt"
 
 4. Verify CA certificate file exists
-   - Run: `ls -la ~/.config/acp/ca.crt`
+   - Run: `ls -la ~/.config/gap/ca.crt`
    - Expected: File exists and is readable
    - [x] PASS
 
@@ -76,13 +76,13 @@
 ### Steps
 
 1. Test with OpenSSL
-   - Run: `openssl s_client -connect localhost:9080 -CAfile ~/.config/acp/ca.crt </dev/null`
+   - Run: `openssl s_client -connect localhost:9080 -CAfile ~/.config/gap/ca.crt </dev/null`
    - Expected: Shows "Verify return code: 0 (ok)"
    - [x] PASS
    - Output confirms certificate chain is valid
 
 2. Test with curl using CA cert
-   - Run: `curl --cacert ~/.config/acp/ca.crt https://localhost:9080/status`
+   - Run: `curl --cacert ~/.config/gap/ca.crt https://localhost:9080/status`
    - Expected: Successfully retrieves status JSON
    - [x] PASS
    - Output: `{"version":"0.2.2","uptime_seconds":42,"proxy_port":9081,"api_port":9080}`
@@ -109,12 +109,12 @@
 ### Steps
 
 1. Check server status
-   - Run: `cargo run -p acp -- status`
+   - Run: `cargo run -p gap -- status`
    - Expected: Returns server status information without password
    - [x] PASS
    - Output:
      ```
-     ACP Server Status
+     GAP Server Status
        Version: 0.2.2
        Uptime: 53 seconds
        Proxy Port: 9081
@@ -144,28 +144,28 @@
 ### Steps
 
 1. Verify baseline certificate works
-   - Run: `cargo run -p acp -- status`
+   - Run: `cargo run -p gap -- status`
    - Expected: Command succeeds with original cert
    - [x] PASS
 
 2. Rotate the management certificate
    - Run: Use expect script to provide password
    ```bash
-   spawn cargo run -p acp -- new-management-cert --sans "DNS:localhost,IP:127.0.0.1"
-   expect "Enter ACP password:" -> send "testpass123\r"
+   spawn cargo run -p gap -- new-management-cert --sans "DNS:localhost,IP:127.0.0.1"
+   expect "Enter GAP password:" -> send "testpass123\r"
    ```
    - Expected: New certificate generated successfully
    - [x] PASS
    - Output: "Management certificate rotated successfully! New SANs: DNS:localhost, IP:127.0.0.1"
 
 3. Verify CLI continues working with new certificate
-   - Run: `cargo run -p acp -- status`
+   - Run: `cargo run -p gap -- status`
    - Expected: Command succeeds with rotated cert
    - [x] PASS
    - Server uptime increased, confirming no restart occurred
 
 4. Verify new certificate is valid
-   - Run: `openssl s_client -connect localhost:9080 -CAfile ~/.config/acp/ca.crt </dev/null`
+   - Run: `openssl s_client -connect localhost:9080 -CAfile ~/.config/gap/ca.crt </dev/null`
    - Expected: Certificate verification still passes
    - [x] PASS
    - Output: "Verify return code: 0 (ok)"
@@ -212,7 +212,7 @@ None. All critical paths passing.
 - Server auto-generates certs on first startup
 - This is expected behavior for ease of use
 - For truly fresh environment, use `--data-dir` flag with empty directory
-- `acp init` downloads CA cert for client use
+- `gap init` downloads CA cert for client use
 
 ## Recommendations
 
@@ -221,11 +221,11 @@ None. All critical paths passing.
 
 ## Testing Notes
 
-**Password in CI/Scripts:** For non-interactive testing, use the `ACP_PASSWORD` environment variable (intentionally undocumented to discourage production use). This avoids passwords appearing in shell history while enabling automation:
+**Password in CI/Scripts:** For non-interactive testing, use the `GAP_PASSWORD` environment variable (intentionally undocumented to discourage production use). This avoids passwords appearing in shell history while enabling automation:
 
 ```bash
-ACP_PASSWORD=testpass123 cargo run -p acp -- init
-ACP_PASSWORD=testpass123 cargo run -p acp -- new-management-cert --sans "DNS:localhost"
+GAP_PASSWORD=testpass123 cargo run -p gap -- init
+GAP_PASSWORD=testpass123 cargo run -p gap -- new-management-cert --sans "DNS:localhost"
 ```
 
 A `--password` flag is intentionally NOT provided to prevent secrets from appearing in shell history and process listings.
@@ -236,28 +236,28 @@ To verify these fixes in the future:
 
 ```bash
 # 1. Clean environment
-rm -rf ~/.config/acp ~/.local/share/acp /tmp/acp-test-data
+rm -rf ~/.config/gap ~/.local/share/gap /tmp/gap-test-data
 
 # 2. Start server with test data directory
-cargo run -p acp-server -- --api-port 9080 --proxy-port 9081 --data-dir /tmp/acp-test-data &
+cargo run -p gap-server -- --api-port 9080 --proxy-port 9081 --data-dir /tmp/gap-test-data &
 
 # 3. Wait for server to start (3 seconds)
 sleep 3
 
-# 4. Initialize (use ACP_PASSWORD env var for non-interactive testing)
-ACP_PASSWORD=testpass123 cargo run -p acp -- init
+# 4. Initialize (use GAP_PASSWORD env var for non-interactive testing)
+GAP_PASSWORD=testpass123 cargo run -p gap -- init
 
 # 5. Verify HTTPS
-openssl s_client -connect localhost:9080 -CAfile ~/.config/acp/ca.crt </dev/null | grep "Verify return"
+openssl s_client -connect localhost:9080 -CAfile ~/.config/gap/ca.crt </dev/null | grep "Verify return"
 # Expected: "Verify return code: 0 (ok)"
 
 # 6. Test CLI
-cargo run -p acp -- status
+cargo run -p gap -- status
 # Expected: Shows version, uptime, ports
 
-# 7. Test rotation (use ACP_PASSWORD env var)
-ACP_PASSWORD=testpass123 cargo run -p acp -- new-management-cert --sans "DNS:localhost,IP:127.0.0.1"
+# 7. Test rotation (use GAP_PASSWORD env var)
+GAP_PASSWORD=testpass123 cargo run -p gap -- new-management-cert --sans "DNS:localhost,IP:127.0.0.1"
 
 # 8. Verify still works
-cargo run -p acp -- status
+cargo run -p gap -- status
 ```

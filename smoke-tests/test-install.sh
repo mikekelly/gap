@@ -125,7 +125,7 @@ if command -v cargo &> /dev/null; then
 
     # Test plugin installation via CLI (requires network access)
     # Note: This will fail if GitHub is unreachable, but that's expected
-    if "$TEMP_PREFIX/bin/gap" --server http://localhost:19080 install mikekelly/exa-acp 2>&1 | tee "$TEMP_PREFIX/install.log"; then
+    if "$TEMP_PREFIX/bin/gap" --server http://localhost:19080 install mikekelly/exa-gap 2>&1 | tee "$TEMP_PREFIX/install.log"; then
         log_pass "gap install command executed"
 
         # Test plugin listing via CLI

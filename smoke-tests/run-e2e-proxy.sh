@@ -30,9 +30,9 @@ log_warn() {
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 WORKSPACE_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
-export ACP_BIN="$WORKSPACE_ROOT/target/release/acp"
-export ACP_SERVER_BIN="$WORKSPACE_ROOT/target/release/acp-server"
-export ACP_PASSWORD="testpass123"
+export GAP_BIN="$WORKSPACE_ROOT/target/release/gap"
+export GAP_SERVER_BIN="$WORKSPACE_ROOT/target/release/gap-server"
+export GAP_PASSWORD="testpass123"
 
 # Create clean test directory
 export TEST_DIR=$(mktemp -d)
@@ -53,7 +53,7 @@ trap cleanup EXIT
 # Phase 1: Server Setup
 
 log_step "Phase 1.1: Starting server"
-$ACP_SERVER_BIN --data-dir "$TEST_DIR" --api-port 9080 --proxy-port 9443 --log-level warn > "$TEST_DIR/server.log" 2>&1 &
+$GAP_SERVER_BIN --data-dir "$TEST_DIR" --api-port 9080 --proxy-port 9443 --log-level warn > "$TEST_DIR/server.log" 2>&1 &
 SERVER_PID=$!
 sleep 3
 
@@ -67,17 +67,17 @@ log_success "Server started (PID: $SERVER_PID)"
 
 log_step "Phase 1.2: Initializing server"
 # Export CA to test directory to avoid conflicts with other tests
-export ACP_CA_PATH="$TEST_DIR/ca.crt"
-if ! $ACP_BIN --server http://localhost:9080 init --ca-path "$ACP_CA_PATH" 2>&1 | tee "$TEST_DIR/init.log"; then
+export GAP_CA_PATH="$TEST_DIR/ca.crt"
+if ! $GAP_BIN --server http://localhost:9080 init --ca-path "$GAP_CA_PATH" 2>&1 | tee "$TEST_DIR/init.log"; then
     log_error "Initialization failed"
     cat "$TEST_DIR/server.log"
     exit 1
 fi
 log_success "Server initialized"
-log_step "CA certificate: $ACP_CA_PATH"
+log_step "CA certificate: $GAP_CA_PATH"
 
 log_step "Phase 1.3: Verifying status"
-$ACP_BIN --server http://localhost:9080 status
+$GAP_BIN --server http://localhost:9080 status
 log_success "Status verified"
 
 # Phase 2: Plugin & Credentials
@@ -91,8 +91,8 @@ var plugin = {
     credentialSchema: [],
     transform: function(request, credentials) {
         // Add a custom header to verify transformation
-        request.headers["X-ACP-Test"] = "smoke-test-passed";
-        request.headers["X-ACP-Timestamp"] = new Date().toISOString();
+        request.headers["X-GAP-Test"] = "smoke-test-passed";
+        request.headers["X-GAP-Timestamp"] = new Date().toISOString();
         return request;
     }
 };
@@ -104,17 +104,17 @@ cp "$TEST_DIR/test-plugin.js" "$TEST_DIR/plugin:test-echo"
 log_success "Test plugin created and stored"
 
 log_step "Phase 2.2: Creating agent token"
-TOKEN_OUTPUT=$($ACP_BIN --server http://localhost:9080 token create test-agent 2>&1)
+TOKEN_OUTPUT=$($GAP_BIN --server http://localhost:9080 token create test-agent 2>&1)
 echo "$TOKEN_OUTPUT"
 
 # Extract token from output
-export ACP_TOKEN=$(echo "$TOKEN_OUTPUT" | grep -o 'acp_[a-zA-Z0-9_-]*' || true)
-if [ -z "$ACP_TOKEN" ]; then
+export GAP_TOKEN=$(echo "$TOKEN_OUTPUT" | grep -o 'gap_[a-zA-Z0-9_-]*' || true)
+if [ -z "$GAP_TOKEN" ]; then
     log_error "Failed to extract token from output"
     echo "$TOKEN_OUTPUT"
     exit 1
 fi
-log_success "Token created: ${ACP_TOKEN:0:15}..."
+log_success "Token created: ${GAP_TOKEN:0:15}..."
 
 # Phase 3: Proxy Test
 
@@ -126,13 +126,13 @@ import http from 'http';
 import tls from 'tls';
 import fs from 'fs';
 
-const token = process.env.ACP_TOKEN;
-const caPath = process.env.ACP_CA_PATH;
-const proxyHost = process.env.ACP_PROXY_HOST || 'localhost';
-const proxyPort = process.env.ACP_PROXY_PORT || '9443';
+const token = process.env.GAP_TOKEN;
+const caPath = process.env.GAP_CA_PATH;
+const proxyHost = process.env.GAP_PROXY_HOST || 'localhost';
+const proxyPort = process.env.GAP_PROXY_PORT || '9443';
 
 if (!token) {
-  console.error('Error: ACP_TOKEN required');
+  console.error('Error: GAP_TOKEN required');
   process.exit(1);
 }
 
@@ -205,7 +205,7 @@ proxyReq.on('connect', (res, socket, head) => {
     console.log('Status:', statusLine);
 
     // Check for our custom headers in the echo response
-    if (responseData.includes('X-ACP-Test') || responseData.includes('X-Acp-Test')) {
+    if (responseData.includes('X-GAP-Test') || responseData.includes('X-Gap-Test')) {
       console.log('\n✓ SUCCESS: Transform verified!');
       console.log('  - Proxy accepted token');
       console.log('  - TLS MITM worked');
@@ -229,7 +229,7 @@ proxyReq.on('connect', (res, socket, head) => {
 proxyReq.on('error', (err) => {
   console.error('Proxy error:', err.message);
   if (err.code === 'ECONNREFUSED') {
-    console.error('Is ACP server running?');
+    console.error('Is GAP server running?');
   }
   process.exit(1);
 });

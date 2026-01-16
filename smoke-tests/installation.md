@@ -1,6 +1,6 @@
 # Installation Smoke Tests
 
-This directory contains smoke tests for ACP installation methods.
+This directory contains smoke tests for GAP installation methods.
 
 ## Test Scripts
 
@@ -117,7 +117,7 @@ These smoke tests are designed to run in CI pipelines:
 ./install.sh --build-from-source
 
 # Build from source to custom location
-./install.sh --build-from-source --prefix ~/acp-test
+./install.sh --build-from-source --prefix ~/gap-test
 
 # Download binary (when releases available)
 ./install.sh
@@ -126,14 +126,14 @@ These smoke tests are designed to run in CI pipelines:
 ### Test install.sh on Linux
 ```bash
 # Same commands as macOS
-./install.sh --build-from-source --prefix ~/acp-test
+./install.sh --build-from-source --prefix ~/gap-test
 ```
 
 ### Test Docker locally
 ```bash
 # Build and run
-docker build -t acp-local .
-docker run --rm acp-local acp --version
+docker build -t gap-local .
+docker run --rm gap-local gap --version
 
 # Full stack with compose
 docker compose up -d
@@ -146,25 +146,25 @@ docker compose down
 ### Install Script Issues
 Add debugging output:
 ```bash
-bash -x ./install.sh --build-from-source --prefix /tmp/acp-test
+bash -x ./install.sh --build-from-source --prefix /tmp/gap-test
 ```
 
 ### Docker Build Issues
 Check build logs:
 ```bash
-docker build --progress=plain -t acp-debug .
+docker build --progress=plain -t gap-debug .
 ```
 
 ### Container Runtime Issues
 Check logs:
 ```bash
-docker compose logs acp-server
+docker compose logs gap-server
 docker compose logs mock-api
 ```
 
 Inspect running container:
 ```bash
-docker compose exec acp-server /bin/bash
+docker compose exec gap-server /bin/bash
 ```
 
 ## Notes

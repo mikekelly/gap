@@ -1,10 +1,10 @@
 # End-to-End Proxy Smoke Test
 
-Manual test to verify the complete ACP flow: agent makes request through proxy, credentials are injected, upstream API responds.
+Manual test to verify the complete GAP flow: agent makes request through proxy, credentials are injected, upstream API responds.
 
 ## Prerequisites
 
-- Built binaries: `acp` and `acp-server`
+- Built binaries: `gap` and `gap-server`
 - Valid Exa API key (get from https://exa.ai)
 - Node.js installed (for test client)
 
@@ -15,9 +15,9 @@ Manual test to verify the complete ACP flow: agent makes request through proxy, 
 cargo build --release
 
 # Set up paths
-export ACP_BIN=./target/release/acp
-export ACP_SERVER_BIN=./target/release/acp-server
-export ACP_PASSWORD=testpass123
+export GAP_BIN=./target/release/gap
+export GAP_SERVER_BIN=./target/release/gap-server
+export GAP_PASSWORD=testpass123
 
 # Create clean test directory
 export TEST_DIR=$(mktemp -d)
@@ -31,7 +31,7 @@ echo "Test directory: $TEST_DIR"
 ### 1.1 Start server
 
 ```bash
-$ACP_SERVER_BIN --data-dir "$TEST_DIR" --api-port 9080 --proxy-port 9443 --log-level info &
+$GAP_SERVER_BIN --data-dir "$TEST_DIR" --api-port 9080 --proxy-port 9443 --log-level info &
 SERVER_PID=$!
 sleep 2
 ```
@@ -43,17 +43,17 @@ sleep 2
 ### 1.2 Initialize
 
 ```bash
-$ACP_BIN --server http://localhost:9080 init
+$GAP_BIN --server http://localhost:9080 init
 ```
 
 **Expected:**
 - Success message
-- CA certificate path shown (e.g., `~/.config/acp/ca.crt`)
+- CA certificate path shown (e.g., `~/.config/gap/ca.crt`)
 
 ### 1.3 Verify status
 
 ```bash
-$ACP_BIN --server http://localhost:9080 status
+$GAP_BIN --server http://localhost:9080 status
 ```
 
 **Expected:**
@@ -68,31 +68,31 @@ $ACP_BIN --server http://localhost:9080 status
 ### 2.1 Install Exa plugin
 
 ```bash
-$ACP_BIN --server http://localhost:9080 install mikekelly/exa-acp
+$GAP_BIN --server http://localhost:9080 install mikekelly/exa-gap
 ```
 
 **Expected:**
-- "Plugin 'mikekelly/exa-acp' installed successfully"
-- Server log shows: `Installed plugin: mikekelly/exa-acp (matches: ["api.exa.ai"])`
+- "Plugin 'mikekelly/exa-gap' installed successfully"
+- Server log shows: `Installed plugin: mikekelly/exa-gap (matches: ["api.exa.ai"])`
 
 ### 2.2 Set Exa API key
 
 ```bash
-$ACP_BIN --server http://localhost:9080 set mikekelly/exa-acp:apiKey
+$GAP_BIN --server http://localhost:9080 set mikekelly/exa-gap:apiKey
 # Enter your Exa API key when prompted
 ```
 
 **Expected:**
-- "Saved mikekelly/exa-acp:apiKey"
+- "Saved mikekelly/exa-gap:apiKey"
 
 ### 2.3 Create agent token
 
 ```bash
-$ACP_BIN --server http://localhost:9080 token create test-agent
+$GAP_BIN --server http://localhost:9080 token create test-agent
 ```
 
 **Expected:**
-- Token displayed: `ACP_TOKEN=acp_...`
+- Token displayed: `GAP_TOKEN=gap_...`
 - Save this token for Phase 3
 
 ---
@@ -105,16 +105,16 @@ Create `test-client.mjs`:
 
 ```javascript
 // test-client.mjs
-// Usage: ACP_TOKEN=acp_xxx node test-client.mjs
+// Usage: GAP_TOKEN=gap_xxx node test-client.mjs
 
-const token = process.env.ACP_TOKEN;
+const token = process.env.GAP_TOKEN;
 if (!token) {
-  console.error('Error: ACP_TOKEN environment variable required');
+  console.error('Error: GAP_TOKEN environment variable required');
   process.exit(1);
 }
 
-const proxyHost = process.env.ACP_PROXY_HOST || 'localhost';
-const proxyPort = process.env.ACP_PROXY_PORT || '9443';
+const proxyHost = process.env.GAP_PROXY_HOST || 'localhost';
+const proxyPort = process.env.GAP_PROXY_PORT || '9443';
 
 // Request body for Exa search
 const body = JSON.stringify({
@@ -122,7 +122,7 @@ const body = JSON.stringify({
   numResults: 1
 });
 
-console.log('Making request to api.exa.ai through ACP proxy...');
+console.log('Making request to api.exa.ai through GAP proxy...');
 console.log(`Proxy: ${proxyHost}:${proxyPort}`);
 
 // Use Node's native fetch with HTTPS proxy
@@ -136,15 +136,15 @@ import fs from 'fs';
 import path from 'path';
 import os from 'os';
 
-// Load the ACP CA certificate
-const caPath = process.env.ACP_CA_PATH || path.join(os.homedir(), '.config', 'acp', 'ca.crt');
+// Load the GAP CA certificate
+const caPath = process.env.GAP_CA_PATH || path.join(os.homedir(), '.config', 'gap', 'ca.crt');
 let ca;
 try {
   ca = fs.readFileSync(caPath);
   console.log(`Loaded CA from: ${caPath}`);
 } catch (e) {
   console.error(`Failed to load CA certificate from ${caPath}`);
-  console.error('Make sure ACP is initialized and CA exists');
+  console.error('Make sure GAP is initialized and CA exists');
   process.exit(1);
 }
 
@@ -173,7 +173,7 @@ proxyReq.on('connect', (res, socket, head) => {
   const tlsSocket = tls.connect({
     socket: socket,
     servername: 'api.exa.ai',
-    ca: ca,  // Trust ACP's CA for MITM
+    ca: ca,  // Trust GAP's CA for MITM
     rejectUnauthorized: true
   }, () => {
     console.log('TLS connection established through proxy');
@@ -216,7 +216,7 @@ proxyReq.on('connect', (res, socket, head) => {
         console.log('\n SUCCESS: Received search results from Exa!');
         console.log('This proves:');
         console.log('  1. Proxy accepted our token');
-        console.log('  2. TLS MITM worked (we trusted ACP CA)');
+        console.log('  2. TLS MITM worked (we trusted GAP CA)');
         console.log('  3. Plugin injected Authorization header');
         console.log('  4. Exa accepted the request and responded');
       } else if (json.error) {
@@ -235,7 +235,7 @@ proxyReq.on('connect', (res, socket, head) => {
 proxyReq.on('error', (err) => {
   console.error('Proxy connection error:', err.message);
   if (err.code === 'ECONNREFUSED') {
-    console.error('Is the ACP server running?');
+    console.error('Is the GAP server running?');
   }
 });
 
@@ -246,16 +246,16 @@ proxyReq.end();
 
 ```bash
 # Use the token from step 2.3
-export ACP_TOKEN=acp_xxxxx  # Replace with actual token
+export GAP_TOKEN=gap_xxxxx  # Replace with actual token
 
 node test-client.mjs
 ```
 
 **Expected output:**
 ```
-Making request to api.exa.ai through ACP proxy...
+Making request to api.exa.ai through GAP proxy...
 Proxy: localhost:9443
-Loaded CA from: /Users/you/.config/acp/ca.crt
+Loaded CA from: /Users/you/.config/gap/ca.crt
 CONNECT response: 200
 TLS connection established through proxy
 Sending request (without Authorization - proxy should add it)...
@@ -267,7 +267,7 @@ Response body: {"results":[...]...
 SUCCESS: Received search results from Exa!
 This proves:
   1. Proxy accepted our token
-  2. TLS MITM worked (we trusted ACP CA)
+  2. TLS MITM worked (we trusted GAP CA)
   3. Plugin injected Authorization header
   4. Exa accepted the request and responded
 ```
@@ -289,7 +289,7 @@ rm -rf "$TEST_DIR"
 |---------|--------------|
 | CONNECT response: 407 | Invalid or missing token |
 | CONNECT response: 502 | Proxy can't reach upstream |
-| TLS error: self signed certificate | CA not trusted - check ACP_CA_PATH |
+| TLS error: self signed certificate | CA not trusted - check GAP_CA_PATH |
 | TLS error: certificate unknown | Proxy not doing MITM correctly |
 | Response: 401 Unauthorized | Plugin didn't inject Authorization header |
 | Response: 403 Forbidden | API key invalid or plugin transform wrong |

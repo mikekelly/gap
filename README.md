@@ -12,7 +12,7 @@ Today's approach is not ideal - agents are entrusted with access to API credenti
 
 GAP lets you grant agents authenticated API access without giving them your credentials.
 
-Agents **opt in** by routing requests through the proxy. You give them a proxy token - not your API keys. When they make a request to an API you've authorized, ACP injects your credentials at the network layer. The agent never sees them.
+Agents **opt in** by routing requests through the proxy. You give them a proxy token - not your API keys. When they make a request to an API you've authorized, GAP injects your credentials at the network layer. The agent never sees them.
 
 ```
 ┌─────────────┐      ┌─────────────┐      ┌─────────────┐
