@@ -6,6 +6,7 @@ pub mod error;
 pub mod http_utils;
 #[cfg(target_os = "macos")]
 mod keychain_impl;
+pub mod paths;
 pub mod plugin_matcher;
 pub mod plugin_runtime;
 pub mod proxy;
@@ -17,6 +18,7 @@ pub mod types;
 
 pub use error::{GapError, Result};
 pub use http_utils::{parse_http_request, serialize_http_request};
+pub use paths::ca_cert_path;
 pub use plugin_matcher::find_matching_plugin;
 pub use plugin_runtime::PluginRuntime;
 pub use proxy::ProxyServer;

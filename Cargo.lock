@@ -852,6 +852,7 @@ dependencies = [
  "chrono",
  "core-foundation 0.9.4",
  "core-foundation-sys",
+ "dirs",
  "hex",
  "hmac",
  "httparse",
