@@ -117,10 +117,7 @@ enum TokenCommands {
 }
 
 pub fn get_default_ca_path() -> std::path::PathBuf {
-    let home = std::env::var("HOME")
-        .or_else(|_| std::env::var("USERPROFILE"))
-        .expect("Cannot determine home directory");
-    std::path::PathBuf::from(home).join(".config").join("gap").join("ca.crt")
+    gap_lib::ca_cert_path()
 }
 
 pub fn create_api_client(server_url: &str) -> anyhow::Result<client::ApiClient> {
@@ -349,5 +346,16 @@ mod tests {
             }
             _ => panic!("Expected NewManagementCert command"),
         }
+    }
+
+    #[test]
+    fn test_get_default_ca_path_matches_lib() {
+        // get_default_ca_path should return the same path as gap_lib::ca_cert_path()
+        // to ensure CLI and server agree on CA cert location
+        let cli_path = get_default_ca_path();
+        let lib_path = gap_lib::ca_cert_path();
+        assert_eq!(cli_path, lib_path,
+                   "CLI CA path should match gap_lib::ca_cert_path(). CLI: {:?}, Lib: {:?}",
+                   cli_path, lib_path);
     }
 }
