@@ -2,6 +2,7 @@
 
 Raw thoughts, not yet evaluated.
 
+- certs from boot (linux user place in shared dir?)
 - In memory SurrealDB that flushes to disk ecrypted using secret stored in keychain (might be possible with SurrealDB + RocksDB)
 - Analaytics (overall usage, failures, etc)
 - Activity log

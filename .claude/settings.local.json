@@ -1,4 +1,10 @@
 {
+  "permissions": {
+    "allow": [
+      "Skill(promode:managing-claude-code-meta)",
+      "Bash(find:*)"
+    ]
+  },
   "enabledPlugins": {
     "rust-lsp@claude-plugins-official": true
   }

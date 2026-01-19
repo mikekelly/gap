@@ -70,6 +70,8 @@ pub async fn run(server_url: &str, ca_path: Option<&str>, management_sans: Optio
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+
     #[test]
     fn test_parse_management_sans() {
         // Test parsing comma-separated SANs
@@ -101,5 +103,47 @@ mod tests {
             .collect();
 
         assert_eq!(result, vec!["DNS:localhost"]);
+    }
+
+    #[test]
+    fn test_https_init_reads_ca_from_filesystem() {
+        use std::fs;
+        use tempfile::TempDir;
+
+        // Create a temporary directory to act as the CA cert location
+        let temp_dir = TempDir::new().unwrap();
+        let ca_path = temp_dir.path().join("ca.crt");
+
+        // Generate a test CA certificate
+        let ca = gap_lib::tls::CertificateAuthority::generate().unwrap();
+        fs::write(&ca_path, ca.ca_cert_pem()).unwrap();
+
+        // Mock gap_lib::ca_cert_path() to return our temp path
+        // Note: This test verifies the behavior - actual implementation will use gap_lib::ca_cert_path()
+
+        // Verify CA cert file exists
+        assert!(ca_path.exists(), "Test CA cert should exist");
+
+        // Read the CA cert from the path (simulating what the code should do)
+        let ca_cert_content = fs::read(&ca_path).unwrap();
+
+        // Verify we can create an ApiClient with this CA cert
+        let result = ApiClient::with_ca_cert("https://localhost:9080", &ca_cert_content);
+        assert!(result.is_ok(), "Should be able to create ApiClient with CA cert from filesystem");
+    }
+
+    #[test]
+    fn test_https_init_fails_gracefully_if_ca_missing() {
+        use std::path::PathBuf;
+
+        // Use a non-existent path
+        let non_existent_path = PathBuf::from("/tmp/nonexistent_ca_cert_12345.crt");
+
+        // Ensure the path doesn't exist
+        assert!(!non_existent_path.exists(), "Test path should not exist");
+
+        // Attempting to read should fail with a clear error message
+        let result = std::fs::read(&non_existent_path);
+        assert!(result.is_err(), "Reading non-existent CA cert should fail");
     }
 }

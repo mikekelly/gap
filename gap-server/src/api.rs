@@ -245,7 +245,6 @@ pub struct ActivityResponse {
 /// Init request
 #[derive(Debug, Deserialize)]
 pub struct InitRequest {
-    pub ca_path: Option<String>,
     pub management_sans: Option<Vec<String>>,
 }
 
@@ -406,25 +405,8 @@ async fn init(
     let ca = CertificateAuthority::from_pem(&ca_cert_str, &ca_key_str)
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to load CA: {}", e)))?;
 
-    // Determine CA certificate path
-    let ca_path = if let Some(path) = req.data.ca_path {
-        path
-    } else {
-        // Default to ~/.config/gap/ca.crt
-        let home = std::env::var("HOME")
-            .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "HOME env var not set".to_string()))?;
-        format!("{}/.config/gap/ca.crt", home)
-    };
-
-    // Export CA certificate to filesystem
-    let ca_dir = std::path::Path::new(&ca_path).parent()
-        .ok_or_else(|| (StatusCode::BAD_REQUEST, "Invalid CA path".to_string()))?;
-
-    std::fs::create_dir_all(ca_dir)
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to create CA directory: {}", e)))?;
-
-    std::fs::write(&ca_path, ca.ca_cert_pem())
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to write CA cert: {}", e)))?;
+    // Return the well-known CA path (CA was already exported at server boot)
+    let ca_path = gap_lib::ca_cert_path().to_string_lossy().to_string();
 
     // Generate management certificate with provided SANs or defaults
     let management_sans = req.data.management_sans.unwrap_or_else(|| {
@@ -1255,6 +1237,55 @@ mod tests {
         // Password hash should be set in state
         let hash = state.password_hash.read().await;
         assert!(hash.is_some());
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn test_init_endpoint_returns_well_known_ca_path() {
+        use gap_lib::tls::CertificateAuthority;
+
+        let temp_dir = tempfile::tempdir().expect("create temp dir");
+        std::env::set_var("GAP_DATA_DIR", temp_dir.path());
+
+        let (store, registry, _temp_dir) = create_test_storage().await;
+
+        // Pre-create CA in storage (as server does at startup)
+        let ca = CertificateAuthority::generate().expect("generate CA");
+        store.set("ca:cert", ca.ca_cert_pem().as_bytes()).await.expect("store CA cert");
+        store.set("ca:key", ca.ca_key_pem().as_bytes()).await.expect("store CA key");
+
+        let state = ApiState::new(9443, 9080, store, registry);
+        let app = create_router(state.clone());
+
+        let password = "testpass123";
+
+        // Create init request body WITHOUT ca_path (it's no longer user-configurable)
+        let body = serde_json::json!({
+            "password_hash": password
+        });
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/init")
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let body_bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let init_response: InitResponse = serde_json::from_slice(&body_bytes).unwrap();
+
+        // Should return the well-known CA path from gap_lib::ca_cert_path()
+        let expected_path = gap_lib::ca_cert_path().to_string_lossy().to_string();
+        assert_eq!(init_response.ca_path, expected_path);
     }
 
     #[tokio::test]
