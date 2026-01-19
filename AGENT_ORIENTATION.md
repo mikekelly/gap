@@ -38,6 +38,27 @@ cargo run --bin gap-server  # Run server
 
 5. **PluginRuntime single-context limitation**: Loading a plugin overwrites the global `plugin` object in the JS context. Only the most recently loaded plugin's transform function can be executed. Plugin metadata is preserved for all loaded plugins.
 
+## Data Protection Keychain (macOS 10.15+)
+
+**Purpose:** Eliminates password prompts by using entitlement-based access instead of ACLs.
+
+**How to enable:**
+```rust
+let store = KeychainStore::new_with_data_protection(
+    "com.gap.credentials",
+    "3R44BTH39W.com.gap.secrets"
+)?;
+```
+
+**Requirements:**
+- macOS 10.15 (Catalina, Oct 2019) or later
+- Binary must be signed with `keychain-access-groups` entitlement
+- Access group must match the entitlement value
+
+**Breaking change:** Items stored in traditional keychain won't be found in Data Protection keychain. They are separate storage spaces. Users must re-initialize credentials when switching.
+
+**Testing caveat:** Data Protection Keychain fails in development/test environments with `-34018` (errSecMissingEntitlement) because binaries aren't properly signed. Tests use traditional keychain by default (`use_data_protection: false`).
+
 ## Detailed Reference Documentation
 
 For comprehensive details, see:
