@@ -15,7 +15,7 @@ use core_foundation_sys::base::OSStatus;
 use security_framework_sys::base::{errSecItemNotFound, errSecSuccess};
 use security_framework_sys::item::{
     kSecAttrAccount, kSecAttrAccessGroup, kSecAttrService, kSecClass, kSecClassGenericPassword,
-    kSecReturnData, kSecValueData,
+    kSecReturnData, kSecValueData, kSecUseDataProtectionKeychain,
 };
 use security_framework_sys::keychain_item::{SecItemAdd, SecItemCopyMatching, SecItemDelete};
 
@@ -31,15 +31,16 @@ fn cvt(status: OSStatus) -> Result<()> {
     }
 }
 
-/// Set a generic password with optional access group
+/// Set a generic password with optional access group and Data Protection Keychain
 pub fn set_generic_password_with_access_group(
     service: &str,
     account: &str,
     password: &[u8],
     access_group: Option<&str>,
+    use_data_protection: bool,
 ) -> Result<()> {
     // Delete existing entry first
-    let _ = delete_generic_password_with_access_group(service, account, access_group);
+    let _ = delete_generic_password_with_access_group(service, account, access_group, use_data_protection);
 
     // Build add dictionary
     let mut dict = CFMutableDictionary::from_CFType_pairs(&[]);
@@ -63,15 +64,23 @@ pub fn set_generic_password_with_access_group(
     let data = CFData::from_buffer(password);
     dict.add(&data_key.to_void(), &data.to_void());
 
+    // Use Data Protection Keychain for entitlement-based access (macOS 10.15+)
+    // This eliminates password prompts by using entitlements instead of ACLs
+    if use_data_protection {
+        let dpk_key = unsafe { CFString::wrap_under_get_rule(kSecUseDataProtectionKeychain) };
+        dict.add(&dpk_key.to_void(), &CFBoolean::from(true).to_void());
+    }
+
     let status = unsafe { SecItemAdd(dict.as_concrete_TypeRef(), std::ptr::null_mut()) };
     cvt(status)
 }
 
-/// Get a generic password with optional access group
+/// Get a generic password with optional access group and Data Protection Keychain
 pub fn get_generic_password_with_access_group(
     service: &str,
     account: &str,
     access_group: Option<&str>,
+    use_data_protection: bool,
 ) -> Result<Option<Vec<u8>>> {
     // Build query dictionary
     let mut dict = CFMutableDictionary::from_CFType_pairs(&[]);
@@ -96,6 +105,13 @@ pub fn get_generic_password_with_access_group(
         &return_data_key.to_void(),
         &CFBoolean::from(true).to_void(),
     );
+
+    // Use Data Protection Keychain for entitlement-based access (macOS 10.15+)
+    // This eliminates password prompts by using entitlements instead of ACLs
+    if use_data_protection {
+        let dpk_key = unsafe { CFString::wrap_under_get_rule(kSecUseDataProtectionKeychain) };
+        dict.add(&dpk_key.to_void(), &CFBoolean::from(true).to_void());
+    }
 
     let mut ret: CFTypeRef = std::ptr::null_mut();
     let status = unsafe { SecItemCopyMatching(dict.as_concrete_TypeRef(), &mut ret) };
@@ -123,11 +139,12 @@ pub fn get_generic_password_with_access_group(
     }
 }
 
-/// Delete a generic password with optional access group
+/// Delete a generic password with optional access group and Data Protection Keychain
 pub fn delete_generic_password_with_access_group(
     service: &str,
     account: &str,
     access_group: Option<&str>,
+    use_data_protection: bool,
 ) -> Result<()> {
     // Build query dictionary
     let mut dict = CFMutableDictionary::from_CFType_pairs(&[]);
@@ -145,6 +162,13 @@ pub fn delete_generic_password_with_access_group(
     if let Some(group) = access_group {
         let group_key = unsafe { CFString::wrap_under_get_rule(kSecAttrAccessGroup) };
         dict.add(&group_key.to_void(), &CFString::from(group).to_void());
+    }
+
+    // Use Data Protection Keychain for entitlement-based access (macOS 10.15+)
+    // This eliminates password prompts by using entitlements instead of ACLs
+    if use_data_protection {
+        let dpk_key = unsafe { CFString::wrap_under_get_rule(kSecUseDataProtectionKeychain) };
+        dict.add(&dpk_key.to_void(), &CFBoolean::from(true).to_void());
     }
 
     let status = unsafe { SecItemDelete(dict.as_concrete_TypeRef()) };

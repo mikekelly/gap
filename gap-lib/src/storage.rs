@@ -154,6 +154,7 @@ impl SecretStore for FileStore {
 pub struct KeychainStore {
     service_name: String,
     access_group: Option<String>,
+    use_data_protection: bool,
 }
 
 #[cfg(target_os = "macos")]
@@ -161,10 +162,12 @@ impl KeychainStore {
     /// Create a new KeychainStore with the given service name
     ///
     /// The service name is used as a namespace for all keychain items.
+    /// Uses traditional keychain (with ACLs) by default.
     pub fn new(service_name: impl Into<String>) -> Result<Self> {
         Ok(Self {
             service_name: service_name.into(),
             access_group: None,
+            use_data_protection: false,
         })
     }
 
@@ -172,6 +175,7 @@ impl KeychainStore {
     ///
     /// The access group allows keychain items to survive binary re-signing.
     /// Must be prefixed with Team ID (e.g., "3R44BTH39W.com.gap.secrets").
+    /// Uses traditional keychain (with ACLs) by default.
     pub fn new_with_access_group(
         service_name: impl Into<String>,
         access_group: impl Into<String>,
@@ -179,6 +183,27 @@ impl KeychainStore {
         Ok(Self {
             service_name: service_name.into(),
             access_group: Some(access_group.into()),
+            use_data_protection: false,
+        })
+    }
+
+    /// Create a new KeychainStore with Data Protection Keychain enabled
+    ///
+    /// Data Protection Keychain uses entitlement-based access instead of ACLs,
+    /// eliminating password prompts. Requires:
+    /// - macOS 10.15 (Catalina) or later
+    /// - Properly signed binary with keychain-access-groups entitlement
+    /// - Access group must match the entitlement
+    ///
+    /// This is a breaking change - existing keychain items won't be found.
+    pub fn new_with_data_protection(
+        service_name: impl Into<String>,
+        access_group: impl Into<String>,
+    ) -> Result<Self> {
+        Ok(Self {
+            service_name: service_name.into(),
+            access_group: Some(access_group.into()),
+            use_data_protection: true,
         })
     }
 }
@@ -192,6 +217,7 @@ impl SecretStore for KeychainStore {
             key,
             value,
             self.access_group.as_deref(),
+            self.use_data_protection,
         )
     }
 
@@ -200,6 +226,7 @@ impl SecretStore for KeychainStore {
             &self.service_name,
             key,
             self.access_group.as_deref(),
+            self.use_data_protection,
         )
     }
 
@@ -208,6 +235,7 @@ impl SecretStore for KeychainStore {
             &self.service_name,
             key,
             self.access_group.as_deref(),
+            self.use_data_protection,
         )
     }
 
@@ -539,5 +567,25 @@ mod tests {
 
         // Cleanup
         let _ = store.delete("test:isolation_check").await;
+    }
+
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    async fn test_keychain_store_with_data_protection() {
+        // Test that KeychainStore can be created with Data Protection Keychain enabled
+        let service_name = format!("com.gap.test.{}", std::process::id());
+        let access_group = "3R44BTH39W.com.gap.secrets";
+
+        let store = KeychainStore::new_with_data_protection(&service_name, access_group)
+            .expect("create KeychainStore with Data Protection Keychain");
+
+        // Verify the store has the settings configured
+        assert_eq!(store.access_group.as_deref(), Some(access_group));
+        assert!(store.use_data_protection, "Data Protection should be enabled");
+
+        // Note: We can't test actual operations here because Data Protection Keychain
+        // requires the binary to be properly signed with entitlements. This will fail
+        // in development/test environments with errSecMissingEntitlement (-34018).
+        // The important verification is that the constructor works and sets the flag.
     }
 }

@@ -34,7 +34,7 @@ tracing.workspace = true
 security-framework.workspace = true
 core-foundation = "0.9"
 core-foundation-sys = "0.8"
-security-framework-sys = "2.15"
+security-framework-sys = { version = "2.15", features = ["OSX_10_15"] }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util"] }
