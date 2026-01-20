@@ -47,15 +47,18 @@ pub async fn parse_and_transform<S: SecretStore + ?Sized>(
     debug!("Parsed HTTP request: {} {}", request.method, request.url);
 
     // Find matching plugin
+    // SECURITY: Only allow connections to hosts with registered plugins
     let plugin = match find_matching_plugin(hostname, store, registry).await? {
         Some(p) => {
             debug!("Found matching plugin: {}", p.name);
             p
         }
         None => {
-            debug!("No plugin match for {}, passing through", hostname);
-            // No plugin, return original bytes
-            return Ok(request_bytes.to_vec());
+            warn!("BLOCKED: Host {} has no matching plugin - not allowed", hostname);
+            return Err(GapError::auth(format!(
+                "Host '{}' is not allowed: no plugin registered for this host",
+                hostname
+            )));
         }
     };
 
@@ -64,13 +67,16 @@ pub async fn parse_and_transform<S: SecretStore + ?Sized>(
     // We need to load all fields and build a credentials object
     let credentials = load_plugin_credentials(&plugin.name, store, registry).await?;
 
+    // SECURITY: Only allow connections when credentials are configured
     if credentials.credentials.is_empty() {
         warn!(
-            "No credentials found for plugin {}, passing through",
+            "BLOCKED: Plugin {} has no credentials configured - not allowed",
             plugin.name
         );
-        // No credentials, return original bytes
-        return Ok(request_bytes.to_vec());
+        return Err(GapError::auth(format!(
+            "Host '{}' is not allowed: plugin '{}' has no credentials configured",
+            hostname, plugin.name
+        )));
     }
 
     debug!("Loaded {} credential fields for plugin {}", credentials.credentials.len(), plugin.name);

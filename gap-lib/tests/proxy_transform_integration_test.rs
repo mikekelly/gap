@@ -134,9 +134,46 @@ async fn test_parse_and_transform_with_single_field_credential() {
     tokio::fs::remove_dir_all(temp_dir).await.ok();
 }
 
-/// Test that parse_and_transform passes through when no credentials found
+/// Test that parse_and_transform rejects hosts with no matching plugin
+/// Security: proxy should NOT act as an open proxy for arbitrary hosts
 #[tokio::test]
-async fn test_parse_and_transform_missing_credentials() {
+async fn test_parse_and_transform_rejects_unregistered_host() {
+    let temp_dir = std::env::temp_dir().join(format!(
+        "gap_proxy_unregistered_test_{}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+
+    let store = Arc::new(FileStore::new(temp_dir.clone()).await.unwrap()) as Arc<dyn SecretStore>;
+    let registry = Registry::new(Arc::clone(&store));
+
+    // Note: NO plugins installed - this is an arbitrary host
+
+    // Simulate an incoming HTTP request to an unregistered host
+    let raw_http = b"GET /api/data HTTP/1.1\r\nHost: unknown.example.com\r\n\r\n";
+
+    // Transform should REJECT - not pass through
+    let result = parse_and_transform(raw_http, "unknown.example.com", &*store, &registry).await;
+
+    // Must be an error - the proxy should not allow connections to arbitrary hosts
+    assert!(result.is_err(), "Expected error for unregistered host, but got Ok");
+    let err_msg = result.unwrap_err().to_string();
+    assert!(
+        err_msg.contains("not allowed") || err_msg.contains("no plugin") || err_msg.contains("forbidden"),
+        "Error should indicate host is not allowed: {}",
+        err_msg
+    );
+
+    // Cleanup
+    tokio::fs::remove_dir_all(temp_dir).await.ok();
+}
+
+/// Test that parse_and_transform rejects hosts with plugin but no credentials
+/// Security: Having a plugin without credentials means it's not fully configured
+#[tokio::test]
+async fn test_parse_and_transform_rejects_missing_credentials() {
     let temp_dir = std::env::temp_dir().join(format!(
         "gap_proxy_missing_test_{}",
         std::time::SystemTime::now()
@@ -172,19 +209,22 @@ async fn test_parse_and_transform_missing_credentials() {
     };
     registry.add_plugin(&plugin_entry).await.unwrap();
 
-    // Note: NOT storing credentials or adding to registry
+    // Note: NOT storing credentials - plugin exists but is not configured
 
     // Simulate an incoming HTTP request
     let raw_http = b"GET /api/data HTTP/1.1\r\nHost: api.nocreds.com\r\n\r\n";
 
-    // Transform should pass through unchanged
-    let transformed_bytes = parse_and_transform(raw_http, "api.nocreds.com", &*store, &registry)
-        .await
-        .unwrap();
+    // Transform should REJECT - not pass through
+    let result = parse_and_transform(raw_http, "api.nocreds.com", &*store, &registry).await;
 
-    // Verify no transformation occurred (no Authorization header added)
-    let transformed_str = String::from_utf8_lossy(&transformed_bytes);
-    assert!(!transformed_str.contains("Authorization:"));
+    // Must be an error - can't proxy without credentials
+    assert!(result.is_err(), "Expected error for missing credentials, but got Ok");
+    let err_msg = result.unwrap_err().to_string();
+    assert!(
+        err_msg.contains("credentials") || err_msg.contains("not configured"),
+        "Error should indicate credentials missing: {}",
+        err_msg
+    );
 
     // Cleanup
     tokio::fs::remove_dir_all(temp_dir).await.ok();
