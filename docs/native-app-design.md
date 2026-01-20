@@ -973,8 +973,11 @@ curl -x https://127.0.0.1:9443 \
 
 **Goal:** Make GAP easier to use and more discoverable
 
-- [ ] **Native GUI applications**
-  - macOS: Swift/SwiftUI menu bar app with Keychain integration
+- [x] **Native macOS GUI application**
+  - Swift/SwiftUI menu bar app with Data Protection Keychain
+  - Developer ID signing and notarization
+  - See [macos-app](../macos-app/) directory
+- [ ] **Native GUI applications (other platforms)**
   - Linux: GTK4 system tray with libsecret
   - Windows: WinUI 3 with Credential Manager
 - [ ] **Plugin marketplace**
@@ -1063,7 +1066,7 @@ GAP is production-ready for individual developers and small teams. The core plat
 
 ### What's Missing
 
-- Native GUI applications (CLI only)
+- Native GUI applications for Linux and Windows (macOS app available in [macos-app](../macos-app/))
 - Real-time activity streaming (`--follow` flag)
 - Windows support
 - OAuth flows (only static credentials)
