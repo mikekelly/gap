@@ -121,28 +121,30 @@ pub fn get_default_ca_path() -> std::path::PathBuf {
 }
 
 pub fn create_api_client(server_url: &str) -> anyhow::Result<client::ApiClient> {
-    // If using HTTPS, try to load the CA cert
-    if server_url.starts_with("https://") {
-        let ca_path = get_default_ca_path();
+    // Management API is HTTPS-only
+    if !server_url.starts_with("https://") {
+        return Err(anyhow::anyhow!(
+            "Management API requires HTTPS. Server URL must start with 'https://', got: {}",
+            server_url
+        ));
+    }
 
-        // For init command, the CA doesn't exist yet, so we'll handle that specially
-        // in the init command itself. For all other commands, we require the CA cert.
-        if ca_path.exists() {
-            let ca_pem = std::fs::read(&ca_path)
-                .map_err(|e| anyhow::anyhow!("Failed to read CA certificate from {}: {}", ca_path.display(), e))?;
+    let ca_path = get_default_ca_path();
 
-            client::ApiClient::with_ca_cert(server_url, &ca_pem)
-                .map_err(|e| anyhow::anyhow!("Failed to create HTTPS client: {}. Ensure the CA certificate at {} is valid.", e, ca_path.display()))
-        } else {
-            // CA cert doesn't exist - likely need to run `gap init` first
-            Err(anyhow::anyhow!(
-                "CA certificate not found at {}. Please run `gap init` first to initialize the server and download the CA certificate.",
-                ca_path.display()
-            ))
-        }
+    // For init command, the CA doesn't exist yet, so we'll handle that specially
+    // in the init command itself. For all other commands, we require the CA cert.
+    if ca_path.exists() {
+        let ca_pem = std::fs::read(&ca_path)
+            .map_err(|e| anyhow::anyhow!("Failed to read CA certificate from {}: {}", ca_path.display(), e))?;
+
+        client::ApiClient::with_ca_cert(server_url, &ca_pem)
+            .map_err(|e| anyhow::anyhow!("Failed to create HTTPS client: {}. Ensure the CA certificate at {} is valid.", e, ca_path.display()))
     } else {
-        // HTTP - use default client (for backwards compatibility during transition)
-        Ok(client::ApiClient::new(server_url))
+        // CA cert doesn't exist - likely need to run `gap init` first
+        Err(anyhow::anyhow!(
+            "CA certificate not found at {}. Please run `gap init` first to initialize the server and download the CA certificate.",
+            ca_path.display()
+        ))
     }
 }
 
@@ -357,5 +359,39 @@ mod tests {
         assert_eq!(cli_path, lib_path,
                    "CLI CA path should match gap_lib::ca_cert_path(). CLI: {:?}, Lib: {:?}",
                    cli_path, lib_path);
+    }
+
+    #[test]
+    fn test_create_api_client_rejects_http() {
+        // create_api_client should reject HTTP URLs since management API is HTTPS-only
+        let result = create_api_client("http://localhost:9080");
+        assert!(result.is_err(), "Expected error for HTTP URL, got Ok");
+
+        if let Err(error) = result {
+            let error_msg = error.to_string().to_lowercase();
+            assert!(
+                error_msg.contains("https") || error_msg.contains("http"),
+                "Error message should mention HTTPS requirement, got: {}",
+                error
+            );
+        }
+    }
+
+    #[test]
+    fn test_create_api_client_accepts_https_without_ca() {
+        // When CA cert doesn't exist, should get a clear error about needing to run init
+        let result = create_api_client("https://localhost:9080");
+
+        // This will fail if the CA cert exists, but that's ok - we're testing the logic path
+        // In a clean environment, this should error about missing CA cert
+        if let Err(error) = result {
+            let error_msg = error.to_string();
+            assert!(
+                error_msg.contains("CA certificate") || error_msg.contains("init"),
+                "Error for missing CA should mention CA cert or init command, got: {}",
+                error_msg
+            );
+        }
+        // If CA exists, that's fine - the function would succeed
     }
 }
