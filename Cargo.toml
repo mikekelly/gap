@@ -1,5 +1,6 @@
 [workspace]
 members = ["gap", "gap-server", "gap-lib"]
+exclude = ["macos-app-test/helper"]
 resolver = "2"
 
 [workspace.package]

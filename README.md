@@ -51,6 +51,8 @@ gap init
 
 > **Note for oh-my-zsh users:** The `git` plugin aliases `gap` to `git apply`. You can either add `unalias gap` to your `.zshrc`, or use `gap-cli` instead (installed automatically as an alias).
 
+> **Keychain prompts:** On first run, macOS will show a keychain access prompt for each stored credential, asking you to enter your login password and click "Always Allow". This is a one-time setup per credential, but can be tedious if you have multiple plugins installed. We're working on a Mac App Store version that eliminates these prompts entirely - see [macos-app](./macos-app/) for details on how this works.
+
 Install a GAP plugin for a given service (eg. Exa) and set credentials:
 ```bash
 # Install a plugin (e.g. Exa search API)

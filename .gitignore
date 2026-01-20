@@ -27,3 +27,8 @@ Thumbs.db
 
 # Release artifacts
 /dist/
+
+# macOS app build artifacts
+macos-app/GAP-App/.build/
+macos-app/build/
+macos-app-test/
