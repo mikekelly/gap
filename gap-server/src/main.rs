@@ -60,6 +60,98 @@ enum Command {
     },
 }
 
+/// Cleanup orphaned helper process (macOS only)
+/// Removes LaunchAgent plist and attempts to unload the service
+#[cfg(target_os = "macos")]
+fn cleanup_orphaned_helper() {
+    let home = std::env::var("HOME").unwrap_or_default();
+    let plist_path = format!("{}/Library/LaunchAgents/com.mikekelly.gap-server.plist", home);
+
+    // Try to unload via launchctl (old command)
+    let _ = std::process::Command::new("launchctl")
+        .args(["unload", &plist_path])
+        .status();
+
+    // Also try bootout (newer macOS)
+    if let Ok(output) = std::process::Command::new("id").args(["-u"]).output() {
+        if let Ok(uid) = String::from_utf8_lossy(&output.stdout).trim().parse::<u32>() {
+            let _ = std::process::Command::new("launchctl")
+                .args(["bootout", &format!("gui/{}", uid), "com.mikekelly.gap-server"])
+                .status();
+        }
+    }
+
+    // Note: We don't call `sfltool resetbtm` as it requires admin authentication
+    // The BTM entries will become stale but shouldn't block new installs since
+    // the bundle ID is the same and macOS will update the registration.
+
+    // Remove the plist file
+    if let Err(e) = std::fs::remove_file(&plist_path) {
+        tracing::warn!("Failed to remove plist: {}", e);
+    } else {
+        tracing::info!("Removed LaunchAgent plist at {}", plist_path);
+    }
+}
+
+/// Check if the binary still exists and cleanup if it doesn't
+/// Returns Ok(true) if should continue running, Ok(false) if should exit
+#[cfg(target_os = "macos")]
+async fn check_binary_exists_and_cleanup(exe_path: &std::path::Path) -> anyhow::Result<bool> {
+    // Check if we're running from inside GAP.app
+    let exe_str = exe_path.to_string_lossy();
+    if !exe_str.contains("/GAP.app/Contents/Library/LoginItems/") {
+        // Not running from GAP.app, no need to check
+        return Ok(true);
+    }
+
+    // Check if main app still exists (use try_exists for proper error handling)
+    let main_app_path = std::path::Path::new("/Applications/GAP.app");
+    if main_app_path.try_exists().unwrap_or(true) {
+        // App still exists (or we couldn't check), continue running
+        return Ok(true);
+    }
+
+    // App was deleted - clean up and signal to exit
+    tracing::info!("GAP.app deleted, cleaning up orphaned helper process");
+    cleanup_orphaned_helper();
+    tracing::info!("Cleanup complete, exiting");
+
+    Ok(false)
+}
+
+/// Spawn a background task that periodically checks if the binary still exists
+#[cfg(target_os = "macos")]
+fn spawn_periodic_binary_check() -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async {
+        let exe_path = match std::env::current_exe() {
+            Ok(path) => path,
+            Err(e) => {
+                tracing::warn!("Failed to get current exe path: {}", e);
+                return;
+            }
+        };
+
+        let mut interval = tokio::time::interval(std::time::Duration::from_secs(60));
+
+        loop {
+            interval.tick().await;
+
+            match check_binary_exists_and_cleanup(&exe_path).await {
+                Ok(true) => {
+                    // Continue running
+                }
+                Ok(false) => {
+                    // Binary was deleted, exit
+                    std::process::exit(0);
+                }
+                Err(e) => {
+                    tracing::error!("Error checking binary existence: {}", e);
+                }
+            }
+        }
+    })
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     // Install default crypto provider for rustls (required for TLS operations)
@@ -82,48 +174,27 @@ async fn main() -> anyhow::Result<()> {
 
     // Default: run the server
 
-    // Orphan detection: if running from within GAP.app, check if main app still exists
-    #[cfg(target_os = "macos")]
-    {
-        if let Ok(exe_path) = std::env::current_exe() {
-            let exe_str = exe_path.to_string_lossy();
-            // Check if we're running from inside GAP.app
-            if exe_str.contains("/GAP.app/Contents/Library/LoginItems/") {
-                let main_app_path = std::path::Path::new("/Applications/GAP.app");
-                if !main_app_path.exists() {
-                    eprintln!("GAP.app not found at /Applications/GAP.app - uninstalling orphaned helper");
-                    let home = std::env::var("HOME").unwrap_or_default();
-                    let plist_path = format!("{}/Library/LaunchAgents/com.mikekelly.gap-server.plist", home);
-
-                    // Try to unload via launchctl (both old and new commands)
-                    let _ = std::process::Command::new("launchctl")
-                        .args(["unload", &plist_path])
-                        .status();
-                    // Also try bootout (newer macOS) - get uid from id command
-                    if let Ok(output) = std::process::Command::new("id").args(["-u"]).output() {
-                        if let Ok(uid) = String::from_utf8_lossy(&output.stdout).trim().parse::<u32>() {
-                            let _ = std::process::Command::new("launchctl")
-                                .args(["bootout", &format!("gui/{}", uid), &plist_path])
-                                .status();
-                        }
-                    }
-
-                    // Remove the plist file
-                    match std::fs::remove_file(&plist_path) {
-                        Ok(_) => eprintln!("Removed LaunchAgent plist"),
-                        Err(e) => eprintln!("Failed to remove plist: {}", e),
-                    }
-                    eprintln!("Orphaned helper cleaned up. Exiting.");
-                    std::process::exit(0);
-                }
-            }
-        }
-    }
-
-    // Initialize tracing with configured log level
+    // Initialize tracing with configured log level (must be early for logging to work)
     tracing_subscriber::fmt()
         .with_env_filter(args.log_level.clone())
         .init();
+
+    // Orphan detection at startup: if running from within GAP.app, check if main app still exists
+    #[cfg(target_os = "macos")]
+    if let Ok(exe_path) = std::env::current_exe() {
+        match check_binary_exists_and_cleanup(&exe_path).await {
+            Ok(false) => {
+                // App was deleted, cleanup happened, exit
+                std::process::exit(0);
+            }
+            Ok(true) => {
+                // Continue running
+            }
+            Err(e) => {
+                tracing::warn!("Error during startup orphan check: {}", e);
+            }
+        }
+    }
 
     // Build configuration
     let config = Config::new()
@@ -177,6 +248,10 @@ async fn main() -> anyhow::Result<()> {
             tracing::error!("Proxy server error: {}", e);
         }
     });
+
+    // Spawn periodic binary check (macOS only)
+    #[cfg(target_os = "macos")]
+    let _check_handle = spawn_periodic_binary_check();
 
     // Load management certificate for HTTPS
     let mgmt_cert_pem = store.get("mgmt:cert").await?
@@ -431,5 +506,51 @@ mod tests {
         // Verify the content matches what the CA has
         let exported_content = fs::read_to_string(&ca_path).unwrap();
         assert_eq!(exported_content, ca.ca_cert_pem());
+    }
+
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    async fn test_periodic_binary_check_detects_deletion() {
+        use std::path::PathBuf;
+
+        // Simulate running from GAP.app LoginItems
+        let fake_exe_path = PathBuf::from("/Applications/GAP.app/Contents/Library/LoginItems/gap-server");
+
+        // Test case 1: When /Applications/GAP.app exists, should return Ok(true)
+        // (This will only pass if GAP.app actually exists, otherwise it will return Ok(false))
+        // For a proper test, we need to check based on actual existence
+        let app_exists = std::path::Path::new("/Applications/GAP.app").exists();
+        let result = check_binary_exists_and_cleanup(&fake_exe_path).await;
+        assert_eq!(result.unwrap(), app_exists);
+
+        // Test case 2: When not running from GAP.app, should always return Ok(true)
+        let non_app_path = PathBuf::from("/usr/local/bin/gap-server");
+        let result = check_binary_exists_and_cleanup(&non_app_path).await;
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), true);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn test_cleanup_removes_launchagent_plist() {
+        use std::fs;
+
+        // Set up a temporary HOME directory
+        let temp_home = tempfile::tempdir().unwrap();
+        std::env::set_var("HOME", temp_home.path());
+
+        // Create the LaunchAgents directory and plist file
+        let launchagents_dir = temp_home.path().join("Library/LaunchAgents");
+        fs::create_dir_all(&launchagents_dir).unwrap();
+
+        let plist_path = launchagents_dir.join("com.mikekelly.gap-server.plist");
+        fs::write(&plist_path, "<?xml version=\"1.0\"?><plist></plist>").unwrap();
+        assert!(plist_path.exists());
+
+        // Call cleanup
+        cleanup_orphaned_helper();
+
+        // Verify plist was removed
+        assert!(!plist_path.exists(), "plist should be removed by cleanup");
     }
 }
