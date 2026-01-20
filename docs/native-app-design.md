@@ -363,8 +363,10 @@ GAP performs MITM to inspect/modify HTTPS requests:
 **Certificate setup:**
 - On first run, `gap-server init` generates a local CA
 - CA private key stored in secure storage
-- CA public cert written to `~/.config/gap/ca.crt` (or configurable path)
-- Agent must trust this CA: `NODE_EXTRA_CA_CERTS=~/.config/gap/ca.crt`
+- CA public cert written to platform-specific path:
+  - macOS: `~/Library/Application Support/gap/ca.crt`
+  - Linux: `/var/lib/gap/ca.crt`
+- Agent must trust this CA: `NODE_EXTRA_CA_CERTS=~/Library/Application\ Support/gap/ca.crt` (macOS)
 
 ### Ports
 
@@ -432,7 +434,9 @@ gap status                          Check if server is running
 
 # Password required - Setup
 gap init                            First-time setup (set password, generate CA)
-                                    CA written to ~/.config/gap/ca.crt
+                                    CA written to:
+                                    - macOS: ~/Library/Application Support/gap/ca.crt
+                                    - Linux: /var/lib/gap/ca.crt
 
 # Password required - Plugins
 gap plugins                         List installed plugins
@@ -474,7 +478,8 @@ Password: ••••••••••••
 Confirm:  ••••••••••••
 
 ✓ Server initialized
-✓ CA certificate: ~/.config/gap/ca.crt
+✓ CA certificate: ~/Library/Application Support/gap/ca.crt (macOS)
+                 /var/lib/gap/ca.crt (Linux)
 
 # Or with custom cert path
 $ gap init --ca-path /path/to/ca.crt
@@ -516,7 +521,10 @@ Save this token - it won't be shown again.
 
 Configure your agent:
   export HTTPS_PROXY=https://127.0.0.1:9443
-  export NODE_EXTRA_CA_CERTS=~/.config/gap/ca.crt
+  # macOS:
+  export NODE_EXTRA_CA_CERTS=~/Library/Application\ Support/gap/ca.crt
+  # Linux:
+  # export NODE_EXTRA_CA_CERTS=/var/lib/gap/ca.crt
   export GAP_TOKEN=<token above>
 ```
 
@@ -687,8 +695,14 @@ services:
   my-agent:
     image: your-agent-image
     environment:
-      - HTTP_PROXY=https://gap-server:9443
+      # Proxy uses HTTPS, not HTTP
       - HTTPS_PROXY=https://gap-server:9443
+      # Agent needs to trust GAP's CA for both proxy and MITM
+      - NODE_EXTRA_CA_CERTS=/certs/ca.crt
+      - GAP_TOKEN=${GAP_TOKEN}
+    volumes:
+      # Mount CA cert from host (export first: docker cp gap-server:/var/lib/gap/ca.crt ./gap-ca.crt)
+      - ./gap-ca.crt:/certs/ca.crt:ro
     networks:
       - agent-network
     depends_on:
@@ -749,8 +763,8 @@ plugins:
 
 **macOS:**
 ```
-~/.config/gap/
-└── ca.crt                # CA cert (copy for agents to trust)
+~/Library/Application Support/gap/
+└── ca.crt                # CA cert (exported for agents to trust)
 
 # Everything else in Keychain (not filesystem):
 # Storage keys use Registry pattern with individual entries:
@@ -765,10 +779,8 @@ plugins:
 
 **Linux (systemd service):**
 ```
-~/.config/gap/
-└── ca.crt                # CA cert (copy for agents to trust)
-
 /var/lib/gap/             # Owned by gap:gap, mode 0600 per file
+├── ca.crt                # CA cert (exported for agents to trust)
 ├── _registry             # Central metadata (JSON)
 ├── password_hash         # Argon2 hash
 ├── ca_private_key        # CA private key (PEM)
@@ -910,14 +922,37 @@ cargo build --release
 ./target/release/gap token create test-agent
 
 # Test with curl through proxy
+# Note: macOS system curl (LibreSSL) may not support TLS 1.3 + post-quantum key exchange
+# Use OpenSSL-based curl if needed: brew install curl
+
+# macOS:
 curl -x https://127.0.0.1:9443 \
-     --proxy-cacert ~/.config/gap/ca.crt \
-     --cacert ~/.config/gap/ca.crt \
+     --proxy-cacert ~/Library/Application\ Support/gap/ca.crt \
+     --cacert ~/Library/Application\ Support/gap/ca.crt \
      --proxy-header "Proxy-Authorization: Bearer <token>" \
      -H "Content-Type: application/json" \
      -d '{"query": "test", "numResults": 1}' \
      https://api.exa.ai/search
+
+# Linux:
+# curl -x https://127.0.0.1:9443 \
+#      --proxy-cacert /var/lib/gap/ca.crt \
+#      --cacert /var/lib/gap/ca.crt \
+#      --proxy-header "Proxy-Authorization: Bearer <token>" \
+#      -H "Content-Type: application/json" \
+#      -d '{"query": "test", "numResults": 1}' \
+#      https://api.exa.ai/search
 ```
+
+**Proxy protocol details:**
+- The proxy uses **HTTPS** on port 9443 (not HTTP)
+- TLS 1.3 with post-quantum key exchange (X25519MLKEM768)
+- `--proxy-cacert`: Trust GAP's CA for the proxy's TLS connection
+- `--cacert`: Trust GAP's CA for MITM of the target HTTPS connection
+- Both flags use the same CA certificate
+- CA cert location:
+  - macOS: `~/Library/Application Support/gap/ca.crt`
+  - Linux: `/var/lib/gap/ca.crt`
 
 ## Roadmap
 

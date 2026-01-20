@@ -5,6 +5,9 @@
 #   Local build:      docker compose up gap-server
 #   Docker Hub image: docker compose up gap-server-hub
 #   Run tests:        docker compose --profile test up
+#
+# Important: The proxy uses HTTPS on port 9443. Agents must trust GAP's CA certificate.
+# Export CA: docker cp gap-server:/var/lib/gap/ca.crt ./gap-ca.crt
 
 services:
   # GAP server (local build from Dockerfile)
@@ -73,6 +76,25 @@ services:
     networks:
       - gap-network
     restart: unless-stopped
+
+  # Example: Agent using HTTPS proxy
+  # Uncomment and customize for your agent
+  # example-agent:
+  #   image: your-agent-image
+  #   environment:
+  #     # Proxy is HTTPS, not HTTP
+  #     - HTTPS_PROXY=https://gap-server:9443
+  #     # Agent must trust GAP's CA for proxy TLS and MITM
+  #     - NODE_EXTRA_CA_CERTS=/certs/ca.crt
+  #     - GAP_TOKEN=${GAP_TOKEN}
+  #   volumes:
+  #     # Mount CA cert exported from gap-server container
+  #     - ./gap-ca.crt:/certs/ca.crt:ro
+  #   networks:
+  #     - gap-network
+  #   depends_on:
+  #     gap-server:
+  #       condition: service_healthy
 
 volumes:
   # Persistent storage for GAP data

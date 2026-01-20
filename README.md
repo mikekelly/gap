@@ -161,14 +161,20 @@ gap token create my-agent
 #### 6. Use the proxy
 
 ```bash
+# CA cert location varies by platform:
+# - macOS: ~/Library/Application\ Support/gap/ca.crt
+# - Linux: /var/lib/gap/ca.crt
+
 curl -x https://localhost:9443 \
-     --proxy-cacert ~/.config/gap/ca.crt \
-     --cacert ~/.config/gap/ca.crt \
+     --proxy-cacert ~/Library/Application\ Support/gap/ca.crt \
+     --cacert ~/Library/Application\ Support/gap/ca.crt \
      --proxy-header "Proxy-Authorization: Bearer gap_xxxxxxxxxxxx" \
      -H "Content-Type: application/json" \
      -d '{"query": "latest AI news", "numResults": 3}' \
      https://api.exa.ai/search
 ```
+
+> **Note:** On Linux, replace `~/Library/Application\ Support/gap/ca.crt` with `/var/lib/gap/ca.crt`
 
 ### Docker (for containerized agents)
 
@@ -199,6 +205,8 @@ services:
     image: mikekelly321/gap:latest
     volumes:
       - gap-data:/var/lib/gap
+      # Export CA cert so agents can trust it
+      - ./gap-ca.crt:/var/lib/gap/ca-export.crt:ro
     ports:
       - "9443:9443"
       - "9080:9080"
@@ -208,10 +216,18 @@ services:
   my-agent:
     image: your-agent-image
     environment:
-      - HTTP_PROXY=https://gap-server:9443
+      # Proxy uses HTTPS, not HTTP
       - HTTPS_PROXY=https://gap-server:9443
+      # Agent needs to trust GAP's CA for both proxy and MITM
+      - NODE_EXTRA_CA_CERTS=/certs/ca.crt
+      - GAP_TOKEN=${GAP_TOKEN}
+    volumes:
+      # Mount CA cert from host
+      - ./gap-ca.crt:/certs/ca.crt:ro
     networks:
       - agent-network
+    depends_on:
+      - gap-server
 
 volumes:
   gap-data:
@@ -220,7 +236,11 @@ networks:
   agent-network:
 ```
 
-This isolates credentials from the agent - the agent container cannot access the `gap-data` volume.
+**Important notes:**
+- The proxy now uses **HTTPS** on port 9443 (not HTTP)
+- Agents must trust GAP's CA certificate for both the proxy TLS connection and HTTPS MITM
+- Export the CA cert from the container: `docker cp gap-server:/var/lib/gap/ca.crt ./gap-ca.crt`
+- This isolates credentials from the agent - the agent container cannot access the `gap-data` volume
 
 #### Volume requirement
 
@@ -275,12 +295,14 @@ Point your agent's HTTP traffic through GAP:
 
 ```bash
 # The proxy runs on localhost:9443
-# Your agent needs to trust the CA certificate at ~/.config/gap/ca.crt
+# Your agent needs to trust the CA certificate at:
+#   macOS: ~/Library/Application Support/gap/ca.crt
+#   Linux: /var/lib/gap/ca.crt
 
-# Example with curl:
+# Example with curl (macOS):
 curl --proxy https://127.0.0.1:9443 \
-     --proxy-cacert ~/.config/gap/ca.crt \
-     --cacert ~/.config/gap/ca.crt \
+     --proxy-cacert ~/Library/Application\ Support/gap/ca.crt \
+     --cacert ~/Library/Application\ Support/gap/ca.crt \
      --proxy-header "Proxy-Authorization: Bearer gap_19ba8e89e25" \
      -X POST https://api.exa.ai/search \
      -H "Content-Type: application/json" \
@@ -350,7 +372,13 @@ With direct API keys: credentials in chat logs, sent to LLM providers, vulnerabl
 
 **Q: Can I use this with Claude Code, Cursor, or other IDEs?**
 
-Yes, if the IDE supports HTTPS proxy configuration. Point it to `https://localhost:9443` and provide the CA certificate at `~/.config/gap/ca.crt`. Each IDE has different proxy settings - check their documentation.
+Yes, if the IDE supports HTTPS proxy configuration. The proxy uses **HTTPS on port 9443** (not HTTP). Point it to `https://localhost:9443` and configure the IDE to trust GAP's CA certificate at:
+- **macOS:** `~/Library/Application Support/gap/ca.crt`
+- **Linux:** `/var/lib/gap/ca.crt`
+
+Each IDE has different proxy settings - check their documentation.
+
+**Note:** The proxy uses TLS 1.3 with post-quantum key exchange (X25519MLKEM768). macOS system curl (LibreSSL-based) may not be compatible; use an OpenSSL-based curl if needed.
 
 **Q: Do I need to trust the agent framework?**
 
