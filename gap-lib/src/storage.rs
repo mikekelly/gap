@@ -282,13 +282,14 @@ pub async fn create_store(data_dir: Option<PathBuf>) -> Result<Box<dyn SecretSto
                     return Ok(Box::new(store));
                 }
 
-                // In production, use traditional keychain with access group
+                // In production, use Data Protection Keychain (no prompts when properly signed)
+                // Access group must match application-identifier in entitlements
                 #[cfg(not(test))]
                 {
-                    let service_name = "com.gap.credentials";
-                    let store = KeychainStore::new_with_access_group(
+                    let service_name = "com.mikekelly.gap-server";
+                    let store = KeychainStore::new_with_data_protection(
                         service_name,
-                        "3R44BTH39W.com.gap.secrets",
+                        "3R44BTH39W.com.mikekelly.gap-server",
                     )?;
                     return Ok(Box::new(store));
                 }

@@ -106,6 +106,7 @@ pub struct StatusResponse {
     pub uptime_seconds: u64,
     pub proxy_port: u16,
     pub api_port: u16,
+    pub initialized: bool,
 }
 
 /// Request body containing password_hash for authentication
@@ -334,12 +335,14 @@ pub fn create_router(state: ApiState) -> Router {
 /// GET /status - Server status (no auth required)
 async fn get_status(State(state): State<ApiState>) -> Json<StatusResponse> {
     let uptime = state.start_time.elapsed().as_secs();
+    let initialized = state.password_hash.read().await.is_some();
 
     Json(StatusResponse {
         version: env!("CARGO_PKG_VERSION").to_string(),
         uptime_seconds: uptime,
         proxy_port: state.proxy_port,
         api_port: state.api_port,
+        initialized,
     })
 }
 

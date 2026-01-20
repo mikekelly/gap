@@ -81,6 +81,45 @@ async fn main() -> anyhow::Result<()> {
     }
 
     // Default: run the server
+
+    // Orphan detection: if running from within GAP.app, check if main app still exists
+    #[cfg(target_os = "macos")]
+    {
+        if let Ok(exe_path) = std::env::current_exe() {
+            let exe_str = exe_path.to_string_lossy();
+            // Check if we're running from inside GAP.app
+            if exe_str.contains("/GAP.app/Contents/Library/LoginItems/") {
+                let main_app_path = std::path::Path::new("/Applications/GAP.app");
+                if !main_app_path.exists() {
+                    eprintln!("GAP.app not found at /Applications/GAP.app - uninstalling orphaned helper");
+                    let home = std::env::var("HOME").unwrap_or_default();
+                    let plist_path = format!("{}/Library/LaunchAgents/com.mikekelly.gap-server.plist", home);
+
+                    // Try to unload via launchctl (both old and new commands)
+                    let _ = std::process::Command::new("launchctl")
+                        .args(["unload", &plist_path])
+                        .status();
+                    // Also try bootout (newer macOS) - get uid from id command
+                    if let Ok(output) = std::process::Command::new("id").args(["-u"]).output() {
+                        if let Ok(uid) = String::from_utf8_lossy(&output.stdout).trim().parse::<u32>() {
+                            let _ = std::process::Command::new("launchctl")
+                                .args(["bootout", &format!("gui/{}", uid), &plist_path])
+                                .status();
+                        }
+                    }
+
+                    // Remove the plist file
+                    match std::fs::remove_file(&plist_path) {
+                        Ok(_) => eprintln!("Removed LaunchAgent plist"),
+                        Err(e) => eprintln!("Failed to remove plist: {}", e),
+                    }
+                    eprintln!("Orphaned helper cleaned up. Exiting.");
+                    std::process::exit(0);
+                }
+            }
+        }
+    }
+
     // Initialize tracing with configured log level
     tracing_subscriber::fmt()
         .with_env_filter(args.log_level.clone())
