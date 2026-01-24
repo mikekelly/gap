@@ -31,4 +31,5 @@ Thumbs.db
 # macOS app build artifacts
 macos-app/GAP-App/.build/
 macos-app/build/
+!macos-app/build/*.entitlements
 macos-app-test/

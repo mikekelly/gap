@@ -92,14 +92,16 @@ cd macos-app
 **Entitlements architecture:**
 - Main app (`GAP.app`): Minimal entitlements (just `app-sandbox=false`)
 - Helper binary (`gap-server`): Keychain entitlements required for Data Protection Keychain access
-- Entitlement files: `build/main.entitlements` and `build/helper.entitlements`
+- Entitlement files: `build/main.entitlements` and `build/helper.entitlements` (tracked in git)
 - Signing must apply correct entitlements to each binary separately (inside-out order: helper first, then main app)
+- **Critical**: `helper.entitlements` MUST include `keychain-access-groups` with value `$(AppIdentifierPrefix)com.mikekelly.gap-server` for Data Protection Keychain to work
 
 **Common issues:**
 - `-34018` error: Binary not signed, or entitlements don't match provisioning profile
 - Keychain prompt loop: Access group in code must match `keychain-access-groups` entitlement
 - LibreSSL TLS error: macOS system curl incompatible with TLS 1.3 PQ key exchange; use homebrew curl
 - Error 163 on launch: Incorrect entitlements on main app (keep minimal: just `app-sandbox=false`)
+- Exit code 137 (SIGKILL): On modern macOS, Developer ID signed binaries require notarization to run. For local testing, use ad-hoc signing (`codesign --sign -`) instead of Developer ID signing.
 
 ## Quick Type Reference
 
