@@ -15,6 +15,14 @@ use crate::Result;
 use async_trait::async_trait;
 use std::path::PathBuf;
 
+#[cfg(target_os = "macos")]
+use chacha20poly1305::{
+    aead::{Aead, KeyInit},
+    ChaCha20Poly1305, Nonce,
+};
+#[cfg(target_os = "macos")]
+use rand::RngCore;
+
 /// Trait for secure secret storage operations
 ///
 /// All implementations must be async and support binary data.
@@ -244,15 +252,163 @@ impl SecretStore for KeychainStore {
     }
 }
 
+/// Hybrid encrypted file storage implementation (macOS only)
+///
+/// Stores credentials encrypted at rest in files, with the master encryption key
+/// stored in the traditional macOS keychain. This approach:
+/// - Uses traditional keychain (one-time prompt with "Always Allow" option)
+/// - Encrypts all credential data with ChaCha20-Poly1305
+/// - Stores encrypted data in files (avoids Data Protection Keychain complexity)
+#[cfg(target_os = "macos")]
+pub struct EncryptedFileStore {
+    file_store: FileStore,
+    keychain_service: String,
+    keychain_account: String,
+}
+
+#[cfg(target_os = "macos")]
+impl EncryptedFileStore {
+    /// Create a new EncryptedFileStore
+    ///
+    /// # Arguments
+    /// * `base_path` - Directory for encrypted credential files
+    /// * `keychain_service` - Keychain service name for master key (e.g., "com.mikekelly.gap-server")
+    /// * `keychain_account` - Keychain account name for master key (e.g., "master_key")
+    pub async fn new(
+        base_path: PathBuf,
+        keychain_service: impl Into<String>,
+        keychain_account: impl Into<String>,
+    ) -> Result<Self> {
+        let file_store = FileStore::new(base_path).await?;
+        Ok(Self {
+            file_store,
+            keychain_service: keychain_service.into(),
+            keychain_account: keychain_account.into(),
+        })
+    }
+
+    /// Get or create the master encryption key from keychain
+    ///
+    /// If the key doesn't exist, generates 32 random bytes and stores in keychain.
+    /// Uses traditional keychain (no access group, no data protection) for reliable
+    /// "Always Allow" behavior.
+    fn get_or_create_master_key(&self) -> Result<[u8; 32]> {
+        // Try to get existing key from traditional keychain (no access group, no data protection)
+        if let Some(key_bytes) = crate::keychain_impl::get_generic_password_with_access_group(
+            &self.keychain_service,
+            &self.keychain_account,
+            None,  // No access group - traditional keychain
+            false, // No data protection - traditional keychain
+        )? {
+            if key_bytes.len() == 32 {
+                let mut key = [0u8; 32];
+                key.copy_from_slice(&key_bytes);
+                return Ok(key);
+            }
+            // Key exists but wrong size - delete and regenerate
+            crate::keychain_impl::delete_generic_password_with_access_group(
+                &self.keychain_service,
+                &self.keychain_account,
+                None,
+                false,
+            )?;
+        }
+
+        // Generate new master key
+        let mut key = [0u8; 32];
+        rand::thread_rng().fill_bytes(&mut key);
+
+        // Store in traditional keychain
+        crate::keychain_impl::set_generic_password_with_access_group(
+            &self.keychain_service,
+            &self.keychain_account,
+            &key,
+            None,  // No access group - traditional keychain
+            false, // No data protection - traditional keychain
+        )?;
+
+        Ok(key)
+    }
+
+    /// Encrypt data using ChaCha20-Poly1305
+    ///
+    /// Output format: [12-byte nonce][ciphertext + 16-byte auth tag]
+    fn encrypt(&self, plaintext: &[u8], key: &[u8; 32]) -> Result<Vec<u8>> {
+        let cipher = ChaCha20Poly1305::new(key.into());
+
+        // Generate random nonce
+        let mut nonce_bytes = [0u8; 12];
+        rand::thread_rng().fill_bytes(&mut nonce_bytes);
+        let nonce = Nonce::from_slice(&nonce_bytes);
+
+        let ciphertext = cipher
+            .encrypt(nonce, plaintext)
+            .map_err(|e| crate::GapError::storage(format!("Encryption failed: {}", e)))?;
+
+        // Prepend nonce to ciphertext
+        let mut output = Vec::with_capacity(12 + ciphertext.len());
+        output.extend_from_slice(&nonce_bytes);
+        output.extend_from_slice(&ciphertext);
+        Ok(output)
+    }
+
+    /// Decrypt data using ChaCha20-Poly1305
+    ///
+    /// Input format: [12-byte nonce][ciphertext + 16-byte auth tag]
+    fn decrypt(&self, encrypted: &[u8], key: &[u8; 32]) -> Result<Vec<u8>> {
+        if encrypted.len() < 12 + 16 {
+            // Minimum: 12-byte nonce + 16-byte auth tag
+            return Err(crate::GapError::storage("Encrypted data too short"));
+        }
+
+        let cipher = ChaCha20Poly1305::new(key.into());
+        let nonce = Nonce::from_slice(&encrypted[..12]);
+        let ciphertext = &encrypted[12..];
+
+        cipher
+            .decrypt(nonce, ciphertext)
+            .map_err(|e| crate::GapError::storage(format!("Decryption failed: {}", e)))
+    }
+}
+
+#[cfg(target_os = "macos")]
+#[async_trait]
+impl SecretStore for EncryptedFileStore {
+    async fn set(&self, key: &str, value: &[u8]) -> Result<()> {
+        let master_key = self.get_or_create_master_key()?;
+        let encrypted = self.encrypt(value, &master_key)?;
+        self.file_store.set(key, &encrypted).await
+    }
+
+    async fn get(&self, key: &str) -> Result<Option<Vec<u8>>> {
+        let encrypted = match self.file_store.get(key).await? {
+            Some(data) => data,
+            None => return Ok(None),
+        };
+
+        let master_key = self.get_or_create_master_key()?;
+        let decrypted = self.decrypt(&encrypted, &master_key)?;
+        Ok(Some(decrypted))
+    }
+
+    async fn delete(&self, key: &str) -> Result<()> {
+        self.file_store.delete(key).await
+    }
+
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+}
+
 /// Factory function to create the appropriate SecretStore implementation
 ///
-/// On macOS, returns a KeychainStore by default. If `data_dir` is provided,
-/// returns a FileStore instead (useful for containers/testing).
+/// On macOS, returns EncryptedFileStore by default (master key in traditional keychain,
+/// credentials encrypted in files). If `data_dir` is provided, returns FileStore instead.
 ///
 /// On other platforms, always returns a FileStore.
 ///
 /// # Arguments
-/// * `data_dir` - Optional directory for FileStore. If None on macOS, uses Keychain.
+/// * `data_dir` - Optional directory for FileStore. If None on macOS, uses EncryptedFileStore.
 ///   If None on other platforms, uses a default location.
 pub async fn create_store(data_dir: Option<PathBuf>) -> Result<Box<dyn SecretStore>> {
     // Check for GAP_DATA_DIR environment variable first (useful for testing)
@@ -271,26 +427,33 @@ pub async fn create_store(data_dir: Option<PathBuf>) -> Result<Box<dyn SecretSto
             // Platform-specific default
             #[cfg(target_os = "macos")]
             {
-                // In test mode, use traditional keychain (Data Protection requires signed binary)
+                // In test mode, use EncryptedFileStore with test-specific keychain service
                 #[cfg(test)]
                 {
+                    let temp_dir = std::env::temp_dir()
+                        .join("gap-test")
+                        .join(std::process::id().to_string());
                     let service_name = format!("com.gap.test.{}", std::process::id());
-                    let store = KeychainStore::new_with_access_group(
+                    let store = EncryptedFileStore::new(
+                        temp_dir,
                         service_name,
-                        "3R44BTH39W.com.gap.secrets",
-                    )?;
+                        "master_key",
+                    ).await?;
                     return Ok(Box::new(store));
                 }
 
-                // In production, use Data Protection Keychain (no prompts when properly signed)
-                // Access group must match application-identifier in entitlements
+                // In production, use EncryptedFileStore with traditional keychain for master key
+                // This avoids Data Protection Keychain complexity while keeping credentials encrypted
                 #[cfg(not(test))]
                 {
-                    let service_name = "com.mikekelly.gap-server";
-                    let store = KeychainStore::new_with_data_protection(
-                        service_name,
-                        "3R44BTH39W.com.mikekelly.gap-server",
-                    )?;
+                    let home = std::env::var("HOME")
+                        .map_err(|_| crate::GapError::storage("Cannot determine home directory"))?;
+                    let data_path = PathBuf::from(home).join(".gap").join("secrets");
+                    let store = EncryptedFileStore::new(
+                        data_path,
+                        "com.mikekelly.gap-server",
+                        "master_key",
+                    ).await?;
                     return Ok(Box::new(store));
                 }
             }
@@ -531,36 +694,36 @@ mod tests {
 
     #[cfg(target_os = "macos")]
     #[tokio::test]
-    async fn test_create_store_uses_test_namespace_in_test_mode() {
-        // Verify that create_store(None) uses test namespace when running in test mode
-        // This prevents tests from interfering with production keychain
+    async fn test_create_store_uses_encrypted_file_store_in_test_mode() {
+        // Verify that create_store(None) uses EncryptedFileStore when running in test mode
+        // This uses traditional keychain for master key + encrypted files for credentials
 
-        // Unset GAP_DATA_DIR to ensure we get KeychainStore
+        // Unset GAP_DATA_DIR to ensure we get EncryptedFileStore
         std::env::remove_var("GAP_DATA_DIR");
 
         let store = create_store(None)
             .await
             .expect("create_store should succeed");
 
-        // Downcast to KeychainStore to verify service name
-        let keychain_store = store
+        // Downcast to EncryptedFileStore to verify it's the correct type
+        let encrypted_store = store
             .as_any()
-            .downcast_ref::<KeychainStore>()
-            .expect("Should be KeychainStore on macOS in test mode without data_dir");
+            .downcast_ref::<EncryptedFileStore>()
+            .expect("Should be EncryptedFileStore on macOS in test mode without data_dir");
 
-        // Verify service name starts with test prefix
+        // Verify keychain service name starts with test prefix
         assert!(
-            keychain_store.service_name.starts_with("com.gap.test."),
-            "Service name should use test namespace, got: {}",
-            keychain_store.service_name
+            encrypted_store.keychain_service.starts_with("com.gap.test."),
+            "Keychain service should use test namespace, got: {}",
+            encrypted_store.keychain_service
         );
 
         // Verify it contains the process ID
         let expected_suffix = std::process::id().to_string();
         assert!(
-            keychain_store.service_name.ends_with(&expected_suffix),
-            "Service name should include process ID, got: {}",
-            keychain_store.service_name
+            encrypted_store.keychain_service.ends_with(&expected_suffix),
+            "Keychain service should include process ID, got: {}",
+            encrypted_store.keychain_service
         );
 
         // Test that we can actually use it without affecting production keychain
@@ -578,6 +741,13 @@ mod tests {
 
         // Cleanup
         let _ = store.delete("test:isolation_check").await;
+        // Cleanup master key from keychain
+        let _ = crate::keychain_impl::delete_generic_password_with_access_group(
+            &encrypted_store.keychain_service,
+            &encrypted_store.keychain_account,
+            None,
+            false,
+        );
     }
 
     #[cfg(target_os = "macos")]
@@ -598,5 +768,244 @@ mod tests {
         // requires the binary to be properly signed with entitlements. This will fail
         // in development/test environments with errSecMissingEntitlement (-34018).
         // The important verification is that the constructor works and sets the flag.
+    }
+
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    async fn test_encrypted_file_store() {
+        // Test EncryptedFileStore basic operations
+        let temp_dir = tempfile::tempdir().expect("create temp dir");
+        let service_name = format!("com.gap.test.encrypted.{}", std::process::id());
+
+        let store = EncryptedFileStore::new(
+            temp_dir.path().to_path_buf(),
+            &service_name,
+            "test_master_key",
+        )
+        .await
+        .expect("create EncryptedFileStore");
+
+        // Test set and get
+        store
+            .set("test:key1", b"value1")
+            .await
+            .expect("set should succeed");
+
+        let value = store
+            .get("test:key1")
+            .await
+            .expect("get should succeed")
+            .expect("value should exist");
+        assert_eq!(value, b"value1");
+
+        // Test get non-existent key
+        let missing = store
+            .get("test:missing")
+            .await
+            .expect("get should succeed");
+        assert!(missing.is_none(), "missing key should return None");
+
+        // Test overwrite
+        store
+            .set("test:key1", b"value2")
+            .await
+            .expect("overwrite should succeed");
+        let value = store
+            .get("test:key1")
+            .await
+            .expect("get should succeed")
+            .expect("value should exist");
+        assert_eq!(value, b"value2");
+
+        // Test binary data
+        let binary_data = vec![0u8, 1, 2, 255, 128];
+        store
+            .set("test:binary", &binary_data)
+            .await
+            .expect("binary set should succeed");
+        let retrieved = store
+            .get("test:binary")
+            .await
+            .expect("get should succeed")
+            .expect("value should exist");
+        assert_eq!(retrieved, binary_data);
+
+        // Test delete
+        store
+            .delete("test:key1")
+            .await
+            .expect("delete should succeed");
+        let deleted = store
+            .get("test:key1")
+            .await
+            .expect("get should succeed");
+        assert!(deleted.is_none(), "deleted key should not exist");
+
+        // Test delete idempotency
+        store
+            .delete("test:key1")
+            .await
+            .expect("second delete should succeed");
+
+        // Cleanup keychain
+        let _ = crate::keychain_impl::delete_generic_password_with_access_group(
+            &service_name,
+            "test_master_key",
+            None,
+            false,
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    async fn test_encrypted_file_store_data_is_encrypted_on_disk() {
+        // Verify that data stored by EncryptedFileStore is actually encrypted
+        let temp_dir = tempfile::tempdir().expect("create temp dir");
+        let service_name = format!("com.gap.test.encrypted.disk.{}", std::process::id());
+
+        let store = EncryptedFileStore::new(
+            temp_dir.path().to_path_buf(),
+            &service_name,
+            "test_master_key",
+        )
+        .await
+        .expect("create EncryptedFileStore");
+
+        let plaintext = b"this is a secret value that should be encrypted";
+        store
+            .set("test:encrypted", plaintext)
+            .await
+            .expect("set should succeed");
+
+        // Read the raw file contents
+        let raw_store = FileStore::new(temp_dir.path().to_path_buf())
+            .await
+            .expect("create FileStore");
+        let raw_data = raw_store
+            .get("test:encrypted")
+            .await
+            .expect("get raw should succeed")
+            .expect("raw data should exist");
+
+        // Raw data should NOT equal plaintext (it should be encrypted)
+        assert_ne!(
+            raw_data.as_slice(),
+            plaintext,
+            "Data on disk should be encrypted, not plaintext"
+        );
+
+        // Raw data should be longer than plaintext (nonce + auth tag overhead)
+        // 12-byte nonce + 16-byte auth tag = 28 bytes overhead
+        assert!(
+            raw_data.len() >= plaintext.len() + 28,
+            "Encrypted data should include nonce and auth tag"
+        );
+
+        // But decrypted data should match original
+        let decrypted = store
+            .get("test:encrypted")
+            .await
+            .expect("get should succeed")
+            .expect("value should exist");
+        assert_eq!(decrypted.as_slice(), plaintext);
+
+        // Cleanup
+        let _ = crate::keychain_impl::delete_generic_password_with_access_group(
+            &service_name,
+            "test_master_key",
+            None,
+            false,
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    async fn test_encrypted_file_store_master_key_persistence() {
+        // Verify that master key persists in keychain across store instances
+        let temp_dir = tempfile::tempdir().expect("create temp dir");
+        let service_name = format!("com.gap.test.encrypted.persist.{}", std::process::id());
+
+        // Create first store and set a value
+        let store1 = EncryptedFileStore::new(
+            temp_dir.path().to_path_buf(),
+            &service_name,
+            "test_master_key",
+        )
+        .await
+        .expect("create first EncryptedFileStore");
+
+        store1
+            .set("test:persist", b"persistent_value")
+            .await
+            .expect("set should succeed");
+
+        // Create second store (simulates restart) - should use same master key
+        let store2 = EncryptedFileStore::new(
+            temp_dir.path().to_path_buf(),
+            &service_name,
+            "test_master_key",
+        )
+        .await
+        .expect("create second EncryptedFileStore");
+
+        // Second store should be able to decrypt data from first store
+        let value = store2
+            .get("test:persist")
+            .await
+            .expect("get should succeed")
+            .expect("value should exist");
+        assert_eq!(value, b"persistent_value");
+
+        // Cleanup
+        let _ = crate::keychain_impl::delete_generic_password_with_access_group(
+            &service_name,
+            "test_master_key",
+            None,
+            false,
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    async fn test_encrypted_file_store_uses_traditional_keychain() {
+        // Verify that EncryptedFileStore uses traditional keychain (not Data Protection)
+        // Traditional keychain allows "Always Allow" option
+        let temp_dir = tempfile::tempdir().expect("create temp dir");
+        let service_name = format!("com.gap.test.encrypted.trad.{}", std::process::id());
+
+        let store = EncryptedFileStore::new(
+            temp_dir.path().to_path_buf(),
+            &service_name,
+            "test_master_key",
+        )
+        .await
+        .expect("create EncryptedFileStore");
+
+        // Store something to trigger master key creation
+        store
+            .set("test:trigger", b"value")
+            .await
+            .expect("set should succeed");
+
+        // Verify we can retrieve the master key from traditional keychain
+        // (no access group, no data protection)
+        let key_data = crate::keychain_impl::get_generic_password_with_access_group(
+            &service_name,
+            "test_master_key",
+            None,  // No access group
+            false, // Not data protection
+        )
+        .expect("get master key should succeed")
+        .expect("master key should exist");
+
+        assert_eq!(key_data.len(), 32, "Master key should be 32 bytes");
+
+        // Cleanup
+        let _ = crate::keychain_impl::delete_generic_password_with_access_group(
+            &service_name,
+            "test_master_key",
+            None,
+            false,
+        );
     }
 }

@@ -4,7 +4,7 @@
 GAP (Gated Agent Proxy) lets AI agents access APIs without seeing your credentials. Agents route requests through the proxy with a token; GAP injects stored credentials and forwards to the API. The agent never sees the actual API keys.
 
 **Security model:**
-- Credentials stored in OS keychain (macOS) or under dedicated service user (Linux)
+- Credentials encrypted at rest in files (macOS: `~/.gap/secrets`), with master encryption key in traditional macOS keychain
 - No API to retrieve credentials - write-only storage
 - Agent tokens are for audit/tracking only, not authentication
 - Proxy listens on localhost - stolen tokens useless off-machine
@@ -38,26 +38,21 @@ cargo run --bin gap-server  # Run server
 
 5. **PluginRuntime single-context limitation**: Loading a plugin overwrites the global `plugin` object in the JS context. Only the most recently loaded plugin's transform function can be executed. Plugin metadata is preserved for all loaded plugins.
 
-## Data Protection Keychain (macOS 10.15+)
+## Hybrid Credential Storage (macOS)
 
-**Purpose:** Eliminates password prompts by using entitlement-based access instead of ACLs.
+**Architecture:** Master encryption key stored in traditional macOS keychain, credentials encrypted at rest in files (`~/.gap/secrets`).
 
-**How to enable:**
-```rust
-let store = KeychainStore::new_with_data_protection(
-    "com.gap.credentials",
-    "3R44BTH39W.com.gap.secrets"
-)?;
-```
+**Why this approach:**
+- Traditional keychain supports "Always Allow" (one-time prompt)
+- Avoids Data Protection Keychain complexity (signing, entitlements, `-34018` errors)
+- Credentials encrypted with ChaCha20-Poly1305
 
-**Requirements:**
-- macOS 10.15 (Catalina, Oct 2019) or later
-- Binary must be signed with `keychain-access-groups` entitlement
-- Access group must match the entitlement value
+**Storage classes:**
+- `EncryptedFileStore` - Production default on macOS (master key in keychain, encrypted files)
+- `FileStore` - Plain file storage (use with `--data-dir` or `GAP_DATA_DIR`)
+- `KeychainStore` - Direct keychain storage (legacy, not used by default)
 
-**Breaking change:** Items stored in traditional keychain won't be found in Data Protection keychain. They are separate storage spaces. Users must re-initialize credentials when switching.
-
-**Testing caveat:** Data Protection Keychain fails in development/test environments with `-34018` (errSecMissingEntitlement) because binaries aren't properly signed. Tests use traditional keychain by default (`use_data_protection: false`).
+**Breaking change:** Users migrating from previous versions that stored directly in keychain must re-initialize credentials.
 
 ## Detailed Reference Documentation
 
@@ -85,20 +80,16 @@ cd macos-app
 3. **Provisioning profiles** - Must be downloaded from Apple Developer portal first
 
 **Testing signed builds:**
-- Data Protection Keychain only works with signed binaries (unsigned gets `-34018` error)
 - Use `--data-dir` flag with unsigned dev builds to bypass keychain
 - Smoke test: `./smoke-tests/test-https-proxy.sh`
 
 **Entitlements architecture:**
 - Main app (`GAP.app`): Minimal entitlements (just `app-sandbox=false`)
-- Helper binary (`gap-server`): Keychain entitlements required for Data Protection Keychain access
+- Helper binary (`gap-server`): Minimal entitlements (no `keychain-access-groups` needed - uses traditional keychain)
 - Entitlement files: `build/main.entitlements` and `build/helper.entitlements` (tracked in git)
 - Signing must apply correct entitlements to each binary separately (inside-out order: helper first, then main app)
-- **Critical**: `helper.entitlements` MUST include `keychain-access-groups` with value `$(AppIdentifierPrefix)com.mikekelly.gap-server` for Data Protection Keychain to work
 
 **Common issues:**
-- `-34018` error: Binary not signed, or entitlements don't match provisioning profile
-- Keychain prompt loop: Access group in code must match `keychain-access-groups` entitlement
 - LibreSSL TLS error: macOS system curl incompatible with TLS 1.3 PQ key exchange; use homebrew curl
 - Error 163 on launch: Incorrect entitlements on main app (keep minimal: just `app-sandbox=false`)
 - Exit code 137 (SIGKILL): On modern macOS, Developer ID signed binaries require notarization to run. For local testing, use ad-hoc signing (`codesign --sign -`) instead of Developer ID signing.
@@ -108,7 +99,7 @@ cd macos-app
 Key types you'll use frequently:
 - `GAPRequest`, `GAPCredentials`, `GAPPlugin` - HTTP and plugin types
 - `AgentToken` - Bearer token (`.token` is a field, not a method)
-- `SecretStore` trait - Storage abstraction (`FileStore`, `KeychainStore`)
+- `SecretStore` trait - Storage abstraction (`EncryptedFileStore`, `FileStore`, `KeychainStore`)
 - `PluginRuntime` - Sandboxed Boa JS runtime for plugins
 - `Registry` - Centralized metadata at key `"_registry"`
 - `CertificateAuthority` - TLS CA for dynamic cert generation
