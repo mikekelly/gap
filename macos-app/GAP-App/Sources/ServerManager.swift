@@ -124,6 +124,38 @@ class ServerManager: ObservableObject {
 
         checkStatus()
     }
+
+    /// Clean up LaunchAgent when the app is being removed
+    /// This is called when the app is moved to Trash
+    func cleanup() {
+        NSLog("GAP: cleanup() called - unloading LaunchAgent")
+
+        // Unload using bootout (modern macOS approach)
+        let bootoutTask = Process()
+        bootoutTask.executableURL = URL(fileURLWithPath: "/bin/launchctl")
+        if let uid = getuid() as uid_t? {
+            bootoutTask.arguments = ["bootout", "gui/\(uid)/\(launchAgentLabel)"]
+        } else {
+            bootoutTask.arguments = ["bootout", "gui/501/\(launchAgentLabel)"]
+        }
+        try? bootoutTask.run()
+        bootoutTask.waitUntilExit()
+
+        // Also try legacy unload for older macOS
+        let unloadTask = Process()
+        unloadTask.executableURL = URL(fileURLWithPath: "/bin/launchctl")
+        unloadTask.arguments = ["unload", launchAgentPath]
+        try? unloadTask.run()
+        unloadTask.waitUntilExit()
+
+        // Remove the plist file
+        do {
+            try FileManager.default.removeItem(atPath: launchAgentPath)
+            NSLog("GAP: Removed LaunchAgent plist at \(launchAgentPath)")
+        } catch {
+            NSLog("GAP: Failed to remove LaunchAgent plist: \(error)")
+        }
+    }
 }
 
 // Delegate to accept self-signed certificates for localhost only

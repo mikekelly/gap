@@ -1,6 +1,9 @@
 import SwiftUI
 
 class AppDelegate: NSObject, NSApplicationDelegate {
+    private var serverManager: ServerManager?
+    private var bundleMonitor: BundlePathMonitor?
+
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
         // Menu bar apps should not terminate when windows close
         return false
@@ -15,6 +18,125 @@ class AppDelegate: NSObject, NSApplicationDelegate {
                 appMenu.removeItem(at: quitIndex)
             }
         }
+
+        // Initialize ServerManager for cleanup operations
+        Task { @MainActor in
+            serverManager = ServerManager()
+        }
+
+        // Start monitoring our app bundle for deletion/move to trash
+        bundleMonitor = BundlePathMonitor { [weak self] in
+            self?.performCleanupAndQuit()
+        }
+        bundleMonitor?.startMonitoring()
+    }
+
+    func applicationWillTerminate(_ notification: Notification) {
+        bundleMonitor?.stopMonitoring()
+    }
+
+    private func performCleanupAndQuit() {
+        NSLog("GAP: App moved to Trash or deleted, performing cleanup")
+
+        // Perform cleanup on main thread
+        Task { @MainActor in
+            serverManager?.cleanup()
+
+            // Small delay to allow cleanup to complete
+            try? await Task.sleep(nanoseconds: 500_000_000) // 0.5 seconds
+
+            NSLog("GAP: Cleanup complete, terminating")
+            NSApplication.shared.terminate(nil)
+        }
+    }
+}
+
+/// Monitors the app bundle path to detect when the app is moved to Trash
+class BundlePathMonitor {
+    private var dispatchSource: DispatchSourceFileSystemObject?
+    private var fileDescriptor: Int32 = -1
+    private let onDeleted: () -> Void
+    private let bundlePath: String
+
+    init(onDeleted: @escaping () -> Void) {
+        self.onDeleted = onDeleted
+        // Get the app bundle path - typically /Applications/GAP.app
+        self.bundlePath = Bundle.main.bundlePath
+    }
+
+    func startMonitoring() {
+        // Only monitor if we're running from a typical install location
+        guard bundlePath.contains("/Applications/") ||
+              bundlePath.contains("/Users/") else {
+            NSLog("GAP: Not monitoring bundle path - not in standard location: \(bundlePath)")
+            return
+        }
+
+        // Open the bundle directory for monitoring
+        fileDescriptor = open(bundlePath, O_EVTONLY)
+        guard fileDescriptor >= 0 else {
+            NSLog("GAP: Failed to open bundle path for monitoring: \(bundlePath)")
+            return
+        }
+
+        // Create dispatch source to monitor file system events
+        dispatchSource = DispatchSource.makeFileSystemObjectSource(
+            fileDescriptor: fileDescriptor,
+            eventMask: [.delete, .rename, .revoke],
+            queue: .main
+        )
+
+        dispatchSource?.setEventHandler { [weak self] in
+            guard let self = self else { return }
+
+            // Check which event occurred
+            let flags = self.dispatchSource?.data ?? []
+
+            if flags.contains(.delete) || flags.contains(.rename) || flags.contains(.revoke) {
+                NSLog("GAP: Bundle path event detected - delete:\(flags.contains(.delete)), rename:\(flags.contains(.rename)), revoke:\(flags.contains(.revoke))")
+
+                // Verify the app is actually gone or in Trash
+                // Small delay to let the move complete
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+                    if self.isAppInTrashOrDeleted() {
+                        self.onDeleted()
+                    }
+                }
+            }
+        }
+
+        dispatchSource?.setCancelHandler { [weak self] in
+            guard let self = self, self.fileDescriptor >= 0 else { return }
+            close(self.fileDescriptor)
+            self.fileDescriptor = -1
+        }
+
+        dispatchSource?.resume()
+        NSLog("GAP: Started monitoring bundle path: \(bundlePath)")
+    }
+
+    func stopMonitoring() {
+        dispatchSource?.cancel()
+        dispatchSource = nil
+    }
+
+    private func isAppInTrashOrDeleted() -> Bool {
+        // Check if original path still exists
+        if !FileManager.default.fileExists(atPath: bundlePath) {
+            NSLog("GAP: App no longer exists at original path")
+            return true
+        }
+
+        // Check if we've been moved to Trash
+        // When an app is in Trash, its path changes to ~/.Trash/
+        if let currentPath = Bundle.main.executablePath {
+            if currentPath.contains("/.Trash/") {
+                NSLog("GAP: App is now in Trash")
+                return true
+            }
+        }
+
+        return false
     }
 }
 

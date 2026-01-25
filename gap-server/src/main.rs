@@ -99,7 +99,7 @@ fn cleanup_orphaned_helper() {
 async fn check_binary_exists_and_cleanup(exe_path: &std::path::Path) -> anyhow::Result<bool> {
     // Check if we're running from inside GAP.app
     let exe_str = exe_path.to_string_lossy();
-    if !exe_str.contains("/GAP.app/Contents/Library/LoginItems/") {
+    if !exe_str.contains("/GAP.app/Contents/Resources/") {
         // Not running from GAP.app, no need to check
         return Ok(true);
     }
@@ -513,8 +513,8 @@ mod tests {
     async fn test_periodic_binary_check_detects_deletion() {
         use std::path::PathBuf;
 
-        // Simulate running from GAP.app LoginItems
-        let fake_exe_path = PathBuf::from("/Applications/GAP.app/Contents/Library/LoginItems/gap-server");
+        // Simulate running from GAP.app Resources
+        let fake_exe_path = PathBuf::from("/Applications/GAP.app/Contents/Resources/gap-server");
 
         // Test case 1: When /Applications/GAP.app exists, should return Ok(true)
         // (This will only pass if GAP.app actually exists, otherwise it will return Ok(false))
