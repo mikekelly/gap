@@ -63,31 +63,36 @@ echo "Staging directory prepared with Applications symlink"
 
 # Check if create-dmg is installed
 if command -v create-dmg &> /dev/null; then
-    # Use sindresorhus/create-dmg (simple)
-    cd build
-    create-dmg dmg-staging || true  # May fail if DMG exists
-    cd ..
+    # Use create-dmg/create-dmg with maximum icon size
+    DMG_FILE="build/${APP_NAME}.dmg"
+    rm -f "$DMG_FILE"
 
-    DMG_FILE=$(ls -t build/*.dmg 2>/dev/null | head -1)
-    if [ -n "$DMG_FILE" ]; then
-        # Clean up staging directory
-        rm -rf "$STAGING_DIR"
+    create-dmg \
+        --volname "${APP_NAME}" \
+        --window-size 600 400 \
+        --icon-size 128 \
+        --icon "${APP_NAME}.app" 150 200 \
+        --app-drop-link 450 200 \
+        "$DMG_FILE" \
+        "$STAGING_DIR"
 
-        echo ""
-        echo "=== Step 5: Signing DMG ==="
-        codesign -s "Developer ID Application: Mike Kelly (3R44BTH39W)" --timestamp "$DMG_FILE"
-        echo "DMG signed: $DMG_FILE"
+    # Clean up staging directory
+    rm -rf "$STAGING_DIR"
 
-        echo ""
-        echo "=== Done! ==="
-        echo "DMG created and signed: $DMG_FILE"
-        echo ""
-        echo "To install:"
-        echo "  1. Open the DMG"
-        echo "  2. Drag GAP to Applications folder"
-        echo "  3. First launch: right-click > Open (to bypass Gatekeeper)"
-        echo "  4. Approve 'GAP Server' in System Settings > Login Items"
-    fi
+    echo ""
+    echo "=== Step 5: Signing DMG ==="
+    codesign -s "Developer ID Application: Mike Kelly (3R44BTH39W)" --timestamp "$DMG_FILE"
+    echo "DMG signed: $DMG_FILE"
+
+    echo ""
+    echo "=== Done! ==="
+    echo "DMG created and signed: $DMG_FILE"
+    echo ""
+    echo "To install:"
+    echo "  1. Open the DMG"
+    echo "  2. Drag GAP to Applications folder"
+    echo "  3. First launch: right-click > Open (to bypass Gatekeeper)"
+    echo "  4. Approve 'GAP Server' in System Settings > Login Items"
 else
     echo "create-dmg not found. Install with: brew install create-dmg"
     echo ""
