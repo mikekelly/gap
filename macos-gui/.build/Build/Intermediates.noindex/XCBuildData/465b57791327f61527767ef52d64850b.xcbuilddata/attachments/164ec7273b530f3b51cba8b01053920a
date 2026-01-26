@@ -1,9 +1,0 @@
-/Users/mike/code/agent-credential-proxy/macos-gui/ACP/ACPApp.swift
-/Users/mike/code/agent-credential-proxy/macos-gui/ACP/AppState.swift
-/Users/mike/code/agent-credential-proxy/macos-gui/ACP/API/ACPClient.swift
-/Users/mike/code/agent-credential-proxy/macos-gui/ACP/API/Models.swift
-/Users/mike/code/agent-credential-proxy/macos-gui/ACP/API/PasswordHash.swift
-/Users/mike/code/agent-credential-proxy/macos-gui/ACP/Views/PasswordPrompt.swift
-/Users/mike/code/agent-credential-proxy/macos-gui/ACP/Views/MenuBarView.swift
-/Users/mike/code/agent-credential-proxy/macos-gui/ACP/Views/MainWindow.swift
-/Users/mike/code/agent-credential-proxy/macos-gui/.build/Build/Intermediates.noindex/ACP.build/Release/ACP.build/DerivedSources/GeneratedAssetSymbols.swift
