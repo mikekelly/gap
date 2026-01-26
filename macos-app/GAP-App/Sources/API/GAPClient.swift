@@ -123,7 +123,10 @@ class GAPClient {
     /// - Returns: PluginInstallResponse with update status
     /// - Throws: GAPError if the request fails or authentication fails
     func updatePlugin(name: String, passwordHash: String) async throws -> PluginInstallResponse {
-        guard let encodedName = name.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) else {
+        // Use alphanumerics only to ensure / is encoded (plugin names like "mikekelly/exa-gap")
+        var allowed = CharacterSet.alphanumerics
+        allowed.insert(charactersIn: "-_.")
+        guard let encodedName = name.addingPercentEncoding(withAllowedCharacters: allowed) else {
             throw GAPError.invalidURL
         }
         return try await post("/plugins/\(encodedName)/update", body: ["password_hash": passwordHash])
@@ -137,7 +140,10 @@ class GAPClient {
     /// - Returns: PluginUninstallResponse with uninstall status
     /// - Throws: GAPError if the request fails or authentication fails
     func uninstallPlugin(name: String, passwordHash: String) async throws -> PluginUninstallResponse {
-        guard let encodedName = name.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) else {
+        // Use alphanumerics only to ensure / is encoded (plugin names like "mikekelly/exa-gap")
+        var allowed = CharacterSet.alphanumerics
+        allowed.insert(charactersIn: "-_.")
+        guard let encodedName = name.addingPercentEncoding(withAllowedCharacters: allowed) else {
             throw GAPError.invalidURL
         }
         return try await delete("/plugins/\(encodedName)", body: ["password_hash": passwordHash])
@@ -176,7 +182,10 @@ class GAPClient {
     /// - Returns: TokenRevokeResponse with revocation status
     /// - Throws: GAPError if the request fails or authentication fails
     func revokeToken(id: String, passwordHash: String) async throws -> TokenRevokeResponse {
-        guard let encodedId = id.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) else {
+        // Use alphanumerics only to ensure / is encoded
+        var allowed = CharacterSet.alphanumerics
+        allowed.insert(charactersIn: "-_.")
+        guard let encodedId = id.addingPercentEncoding(withAllowedCharacters: allowed) else {
             throw GAPError.invalidURL
         }
         return try await delete("/tokens/\(encodedId)", body: ["password_hash": passwordHash])
