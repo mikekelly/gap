@@ -181,7 +181,7 @@ struct GAPApp: App {
                 NSApplication.shared.terminate(nil)
             }
         } label: {
-            Image(systemName: appState.serverRunning ? "lock.shield.fill" : "lock.shield")
+            Image("MenuBarIcon")
         }
 
         Window("Gap", id: "main") {
