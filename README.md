@@ -1,31 +1,21 @@
 <p align="center">
   <img src="gap_header.png" alt="GAP Header" width="100%">
 </p>
-
-# GAP (Gated Agent Proxy)
-
-**Give AI agents secure access to your APIs - without sharing your credentials.**
+## Give AI agents secure access to your APIs - without sharing your credentials.
 
 ## The Problem
 
-AI agents need to call APIs on your behalf - search the web, access your cloud services, interact with third-party tools. But how do you give them access?
-
-Today's approach is not ideal - agents are entrusted with access to API credentials.
+AI agents need to call APIs on your behalf - search the web, access your cloud services, interact with third-party tools. But how do you give them access? Today's approach is not ideal - agents are entrusted with access to API credentials.
 
 ## The Solution
 
-GAP lets you grant agents authenticated API access without giving them your credentials.
+Gap lets you grant agents authenticated API access without giving them your credentials.
 
 Agents **opt in** by routing requests through the proxy. You give them a proxy token - not your API keys. When they make a request to an API you've authorized, GAP injects your credentials at the network layer. The agent never sees them.
 
-```
-┌─────────────┐      ┌─────────────┐      ┌─────────────┐
-│   AI Agent  │ ──── │     GAP     │ ──── │   Exa API   │
-│             │      │  (proxy)    │      │             │
-│  has: proxy │      │  has: your  │      │  sees: your │
-│  token only │      │  API keys   │      │  API key    │
-└─────────────┘      └─────────────┘      └─────────────┘
-```
+<p align="center">
+  <img src="gap_visualised.png" alt="GAP Header" width="400px">
+</p>
 
 **Why this matters:**
 - **Prompt injection can't leak credentials** - The agent doesn't have them. A malicious prompt can't trick the agent into revealing what it doesn't possess.
