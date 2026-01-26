@@ -1,7 +1,8 @@
 <p align="center">
-  <img src="gap_header.png" alt="GAP Header" width="100%">
+  <img src="gap_header.png" alt="Gap Header" width="100%">
 </p>
-## Give AI agents secure access to your APIs - without sharing your credentials.
+
+### Give AI agents secure access to your APIs - without sharing your credentials.
 
 ## The Problem
 
@@ -11,20 +12,21 @@ AI agents need to call APIs on your behalf - search the web, access your cloud s
 
 Gap lets you grant agents authenticated API access without giving them your credentials.
 
-Agents **opt in** by routing requests through the proxy. You give them a proxy token - not your API keys. When they make a request to an API you've authorized, GAP injects your credentials at the network layer. The agent never sees them.
+Agents **opt in** by routing requests through the proxy. You give them a proxy token - not your API keys. When they make a request to an API you've authorized, Gap injects your credentials at the network layer. The agent never sees them.
 
 <p align="center">
-  <img src="gap_visualised.png" alt="GAP Header" width="400px">
+  <img src="gap_visualised.png" alt="Gap Header" width="400px">
 </p>
 
 **Why this matters:**
 - **Prompt injection can't leak credentials** - The agent doesn't have them. A malicious prompt can't trick the agent into revealing what it doesn't possess.
-- **Credentials never leave your machine** - Stored in your OS keychain (macOS) or under a dedicated service user (Linux). The proxy injects them into requests on your behalf.
-- **Stolen tokens are useless off-machine** - Prompt injection could exfiltrate a GAP token, but the proxy only listens on localhost. The token only works on your machine.
-- **One-way credential flow** - Credentials go into GAP and never come back out. There's no API to retrieve them, no export function. The only path out is privilege escalation on your machine.
-- **Scoped access** - Agents only get access to APIs you explicitly authorize via plugins
-- **Works with any agent or software stack** - If it can use an HTTP proxy, it works with GAP
-- **CLI protects secrets from shell history** - Credentials are entered via secure prompts, never as command arguments that could end up in shell logs (accessible to agents)
+- **Stolen tokens are useless off-machine** - Prompt injection could exfiltrate a Gap token, but by default the proxy is only accessible on your machine (localhost loopback).
+- **Credentials are never exposed to agents** - Stored using the keychain (macOS) or under a dedicated service user (Linux), they're not accessible to your agents.
+- **Gap can only be managed with your passcode** - To manage gap, you must know the secret you set it up with. If you don't write this down on your machine, agents can't change anything.
+- **One-way credential flow** - Credentials go into Gap and never come back out. There's no API to retrieve them, no export function. The only path out is privilege escalation on your machine.
+- **Works with any agent or software stack** - If it can use an HTTP proxy, it works with Gap
+- **Monitor your agents** - By funneling access through Gap, you can monitor and record all of their interactions with your secured services. 
+- **Enforce policies** - Gap can act as an enforcer of policies. Rate limit requests, restrict certain activities, require human authorisation, etc.
 
 ## Get Started
 
@@ -32,7 +34,7 @@ Agents **opt in** by routing requests through the proxy. You give them a proxy t
 
 **Download the native app (recommended):**
 
-1. Download `GAP.dmg` from the [latest GitHub release](https://github.com/mikekelly/gap/releases/latest)
+1. Download `Gap.dmg` from the [latest GitHub release](https://github.com/mikekelly/gap/releases/latest)
 2. Open the DMG and drag Gap to Applications
 3. Launch Gap from Applications
 
@@ -45,7 +47,7 @@ gap install mikekelly/exa-gap
 gap set mikekelly/exa-gap:apiKey
 ```
 
-Assign a GAP token to an agent (eg. Claude Code)
+Assign a Gap token to an agent (eg. Claude Code)
 ```bash
 gap token create my-agent
 # outputs: gap_xxxxxxxxxxxx
@@ -55,12 +57,12 @@ cd /path/to/your/project
 echo "GAP_TOKEN=gap_xxxxxxxxxxxx" >> .env
 ```
 
-Install GAP enabled tools (eg. this GAP-enabled fork of exa-mcp-server):
+Install Gap enabled tools (eg. this Gap-enabled fork of exa-mcp-server):
 ```
 claude mcp add exa -- npx -y exa-gapped-mcp
 ```
 
-The agent can now talk to Exa without direct API credentials - GAP injects them automatically.
+The agent can now talk to Exa without direct API credentials - Gap injects them automatically.
 
 ### Linux Quick Start
 
@@ -164,7 +166,7 @@ curl -x https://localhost:9443 \
 > **Security note:** The Docker deployment is designed for environments where **agents also run in containers**. If your agent runs directly on the host machine, use the native macOS/Linux installation instead - a host-based agent could potentially access the Docker volume and read credentials directly, bypassing the proxy's protection.
 
 The Docker image is ideal for:
-- Sandboxed agent environments (agent and GAP both containerized)
+- Sandboxed agent environments (agent and Gap both containerized)
 - Kubernetes deployments
 - CI/CD pipelines with ephemeral agents
 
@@ -201,7 +203,7 @@ services:
     environment:
       # Proxy uses HTTPS, not HTTP
       - HTTPS_PROXY=https://gap-server:9443
-      # Agent needs to trust GAP's CA for both proxy and MITM
+      # Agent needs to trust Gap's CA for both proxy and MITM
       - NODE_EXTRA_CA_CERTS=/certs/ca.crt
       - GAP_TOKEN=${GAP_TOKEN}
     volumes:
@@ -221,7 +223,7 @@ networks:
 
 **Important notes:**
 - The proxy now uses **HTTPS** on port 9443 (not HTTP)
-- Agents must trust GAP's CA certificate for both the proxy TLS connection and HTTPS MITM
+- Agents must trust Gap's CA certificate for both the proxy TLS connection and HTTPS MITM
 - Export the CA cert from the container: `docker cp gap-server:/var/lib/gap/ca.crt ./gap-ca.crt`
 - This isolates credentials from the agent - the agent container cannot access the `gap-data` volume
 
@@ -274,7 +276,7 @@ This outputs a token like `gap_19ba8e89e25` - give this to your agent.
 
 #### 4. Configure your agent to use the proxy
 
-Point your agent's HTTP traffic through GAP:
+Point your agent's HTTP traffic through Gap:
 
 ```bash
 # The proxy runs on localhost:9443
@@ -292,12 +294,12 @@ curl --proxy https://127.0.0.1:9443 \
      -d '{"query":"latest AI news","numResults":3}'
 ```
 
-The agent sends the request without any API key - GAP injects it automatically.
+The agent sends the request without any API key - Gap injects it automatically.
 
 ## How It Works
 
 1. **Agent makes request** through the proxy with its bearer token
-2. **GAP authenticates** the agent and checks which plugins it can use
+2. **Gap authenticates** the agent and checks which plugins it can use
 3. **Plugin matches** the target hostname (e.g., `api.exa.ai`)
 4. **Credentials loaded** from secure storage (Keychain on macOS, service user on Linux)
 5. **JavaScript transform** injects credentials into the request
@@ -349,13 +351,13 @@ Agent tokens control which APIs can be accessed, but not which credentials are u
 
 **Q: How is this different from giving my API keys to the agent?**
 
-With GAP: credentials stay in secure storage, agent gets scoped access via token, you control which APIs, you can revoke instantly.
+With Gap: credentials stay in secure storage, agent gets scoped access via token, you control which APIs, you can revoke instantly.
 
 With direct API keys: credentials in chat logs, sent to LLM providers, vulnerable to prompt injection, no revocation without rotating keys everywhere.
 
 **Q: Can I use this with Claude Code, Cursor, or other IDEs?**
 
-Yes, if the IDE supports HTTPS proxy configuration. The proxy uses **HTTPS on port 9443** (not HTTP). Point it to `https://localhost:9443` and configure the IDE to trust GAP's CA certificate at:
+Yes, if the IDE supports HTTPS proxy configuration. The proxy uses **HTTPS on port 9443** (not HTTP). Point it to `https://localhost:9443` and configure the IDE to trust Gap's CA certificate at:
 - **macOS:** `~/Library/Application Support/gap/ca.crt`
 - **Linux:** `/var/lib/gap/ca.crt`
 
