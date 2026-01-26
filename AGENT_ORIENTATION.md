@@ -92,9 +92,11 @@ cd macos-app
 **Icon regeneration:**
 - Source logo: `gap_logo.png` (1024x1024 PNG in project root)
 - Script: `macos-app/regenerate-icons.sh` - regenerates all icon sizes from source
-- Icons stored in: `macos-app/GAP-App/Sources/Assets.xcassets/AppIcon.appiconset/`
+- App icons stored in: `macos-app/GAP-App/Sources/Assets.xcassets/AppIcon.appiconset/`
+- Menu bar icon stored in: `macos-app/GAP-App/Sources/Assets.xcassets/MenuBarIcon.imageset/`
+- Menu bar icon uses `template-rendering-intent: template` for automatic monochrome rendering
 - After regenerating, must run `macos-app/build-dmg.sh` to rebuild the app
-- Build script uses `xcrun actool` to compile icons into `AppIcon.icns`
+- Build script uses `xcrun actool` to compile icons into `AppIcon.icns` and `Assets.car`
 - **Critical:** Always verify icon content visually, not just timestamps. Simply copying icon files doesn't update the built app - must run regenerate script to properly resize from source.
 - **macOS icon caching:** After rebuilding with new icons, may need to clear system icon cache (`rm -rf /Library/Caches/com.apple.iconservices.store` and `killall Dock Finder`) or restart Mac.
 
