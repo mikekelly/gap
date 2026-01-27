@@ -6,7 +6,7 @@
 
 ## The Problem
 
-AI agents need to call APIs on your behalf - search the web, access your cloud services, interact with third-party tools. But how do you give them access? Today's approach is not ideal: agents are entrusted with access to API credentials - even MCPs don't keep the credentials out of reach. 
+AI agents need to call APIs on your behalf - access your cloud services, interact with third-party tools. But how do you give them access? Today's approach is not ideal: agents are entrusted with access to API credentials - even MCPs don't keep them out of reach. 
 
 ## The Solution
 
@@ -42,10 +42,16 @@ Install a gap plugin for a given service (eg. Exa) and set credentials:
 ```bash
 # Install a plugin (e.g. Exa search API)
 gap install mikekelly/exa-gap
+```
 
+<img src="assets/gap-install-plugin.gif" width="600" alt="Installing a Gap plugin" />
+
+```bash
 # Set your API key for the plugin
 gap set mikekelly/exa-gap:apiKey
 ```
+
+<img src="assets/gap-set-api-key.gif" width="600" alt="Setting an API key" />
 
 Assign a Gap token to an agent (eg. Claude Code)
 ```bash
@@ -56,6 +62,8 @@ cd /path/to/your/project
 
 echo "GAP_TOKEN=gap_xxxxxxxxxxxx" >> .env
 ```
+
+<img src="assets/gap-create-token.gif" width="600" alt="Creating a Gap token" />
 
 Install Gap enabled tools (eg. this Gap-enabled fork of exa-mcp-server):
 ```
