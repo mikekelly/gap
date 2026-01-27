@@ -39,33 +39,24 @@ Agents can only access secure APIs by going via Gap. You give them a Gap token -
 3. Launch Gap from Applications
 
 Install a gap plugin for a given service (eg. Exa) and set credentials:
-```bash
-# Install a plugin (e.g. Exa search API)
-gap install mikekelly/exa-gap
-```
 
 <img src="assets/gap-install-plugin.gif" width="600" alt="Installing a Gap plugin" />
 
-```bash
-# Set your API key for the plugin
-gap set mikekelly/exa-gap:apiKey
-```
+Set your API key:
 
 <img src="assets/gap-set-api-key.gif" width="600" alt="Setting an API key" />
 
-Assign a Gap token to an agent (eg. Claude Code)
-```bash
-gap token create my-agent
-# outputs: gap_xxxxxxxxxxxx
+Create a Gap token:
 
+<img src="assets/gap-create-token.gif" width="600" alt="Creating a Gap token" />
+
+```bash
 cd /path/to/your/project
 
 echo "GAP_TOKEN=gap_xxxxxxxxxxxx" >> .env
 ```
 
-<img src="assets/gap-create-token.gif" width="600" alt="Creating a Gap token" />
-
-Install Gap enabled tools (eg. this Gap-enabled fork of exa-mcp-server):
+Use gapped MCPs, CLIs, etc. like this gapped fork of exa-mcp-server:
 ```
 claude mcp add exa -- npx -y exa-gapped-mcp
 ```
