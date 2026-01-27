@@ -88,7 +88,7 @@ This script:
 - Builds `gap-server` if not already built
 - Creates the app bundle structure with embedded helper
 - Generates entitlements files
-- Outputs an unsigned `build/GAP.app`
+- Outputs an unsigned `build/Gap.app`
 
 ### 3. Sign the App
 
@@ -100,7 +100,7 @@ This script:
 - Embeds provisioning profiles (if available from `setup-app-provisioning.sh`)
 - Signs the helper app (inside-out signing is critical)
 - Signs the main app
-- Creates `build/GAP.dmg` with Applications symlink
+- Creates `build/Gap Installer.dmg` with Applications symlink
 
 **Note:** macOS will prompt for your login password to access the Developer ID certificate in Keychain. This step cannot be automated.
 
@@ -111,10 +111,10 @@ This script:
 **Notarize the DMG:**
 ```bash
 # If you set NOTARIZE_KEYCHAIN_PROFILE in your shell profile:
-./scripts/macos-notarize.sh build/GAP.dmg
+./scripts/macos-notarize.sh build/Gap Installer.dmg
 
 # Or specify the profile explicitly:
-./scripts/macos-notarize.sh build/GAP.dmg --keychain-profile "notarytool-profile"
+./scripts/macos-notarize.sh build/Gap Installer.dmg --keychain-profile "notarytool-profile"
 ```
 
 **Notes:**
@@ -138,7 +138,7 @@ git push origin vX.Y.Z
 gh release create vX.Y.Z \
     --title "vX.Y.Z" \
     --notes "Release notes here" \
-    macos-app/build/GAP.dmg
+    macos-app/build/Gap Installer.dmg
 ```
 
 ## Docker/Linux Release

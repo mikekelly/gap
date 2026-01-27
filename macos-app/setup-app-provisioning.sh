@@ -1,5 +1,5 @@
 #!/bin/bash
-# Set up provisioning profiles for GAP.app and gap-server helper
+# Set up provisioning profiles for Gap.app and gap-server helper
 set -e
 
 cd "$(dirname "$0")"
@@ -7,7 +7,7 @@ cd "$(dirname "$0")"
 MAIN_BUNDLE_ID="com.mikekelly.gap"
 HELPER_BUNDLE_ID="com.mikekelly.gap-server"
 
-echo "=== Setting up Provisioning for GAP.app ==="
+echo "=== Setting up Provisioning for Gap.app ==="
 echo ""
 echo "This will create:"
 echo "1. App ID: ${MAIN_BUNDLE_ID}"
@@ -53,7 +53,7 @@ echo ""
 echo "=== Done! ==="
 echo ""
 echo "Provisioning profiles created:"
-echo "  - build/main.mobileprovision (for GAP.app)"
+echo "  - build/main.mobileprovision (for Gap.app)"
 echo "  - build/helper.mobileprovision (for gap-server.app)"
 echo ""
 echo "Next steps:"

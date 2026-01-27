@@ -60,7 +60,7 @@ class BundlePathMonitor {
 
     init(onDeleted: @escaping () -> Void) {
         self.onDeleted = onDeleted
-        // Get the app bundle path - typically /Applications/GAP.app
+        // Get the app bundle path - typically /Applications/Gap.app
         self.bundlePath = Bundle.main.bundlePath
     }
 

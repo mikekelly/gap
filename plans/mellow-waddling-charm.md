@@ -86,7 +86,7 @@ rand = "0.8"               # Key generation (may already exist)
 
 ## UX Flow
 
-1. User installs GAP.app, launches it
+1. User installs Gap.app, launches it
 2. gap-server starts, calls `EncryptedFileStore::new()`
 3. First run: generates master key, stores in keychain
 4. macOS shows keychain prompt: "gap-server wants to use keychain"
@@ -104,14 +104,14 @@ rand = "0.8"               # Key generation (may already exist)
 
 2. **Clean install:**
    ```bash
-   rm -rf /Applications/GAP.app ~/.gap
+   rm -rf /Applications/Gap.app ~/.gap
    security delete-generic-password -s "com.mikekelly.gap-server" -a "master_key" 2>/dev/null
-   cp -R build/GAP.app /Applications/
+   cp -R build/Gap.app /Applications/
    ```
 
 3. **First launch (expect keychain prompt):**
    ```bash
-   open /Applications/GAP.app
+   open /Applications/Gap.app
    # Click "Always Allow" when prompted
    ```
 
@@ -130,13 +130,13 @@ rand = "0.8"               # Key generation (may already exist)
 6. **Second launch (no prompt):**
    ```bash
    pkill gap-server
-   open /Applications/GAP.app
+   open /Applications/Gap.app
    # No keychain prompt expected
    ```
 
 7. **Notarize and test distributed version:**
    ```bash
-   xcrun notarytool submit build/GAP.dmg --keychain-profile "notarytool-profile" --wait
-   xcrun stapler staple build/GAP.dmg
+   xcrun notarytool submit build/Gap Installer.dmg --keychain-profile "notarytool-profile" --wait
+   xcrun stapler staple build/Gap Installer.dmg
    # Test on clean system or different user account
    ```

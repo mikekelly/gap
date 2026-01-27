@@ -64,8 +64,8 @@ All attempts still result in error 163 "Launchd job spawn failed".
    cd macos-app
    ./build-dmg.sh
    ./sign-and-package.sh
-   cp -R build/GAP.app /Applications/
-   open /Applications/GAP.app
+   cp -R build/Gap.app /Applications/
+   open /Applications/Gap.app
    ```
 
 3. If it works without SMAppService:
@@ -92,7 +92,7 @@ All attempts still result in error 163 "Launchd job spawn failed".
 5. `docs/RELEASING.md` - Release process
 
 ### Important Patterns
-- The app has a Login Item helper at `GAP.app/Contents/Library/LoginItems/gap-server.app`
+- The app has a Login Item helper at `Gap.app/Contents/Library/LoginItems/gap-server.app`
 - The main app registers this helper via `SMAppService.loginItem(identifier:)` on install
 - It also creates a LaunchAgent plist at `~/Library/LaunchAgents/com.mikekelly.gap-server.plist`
 - The helper (gap-server) has orphan detection that cleans up when binary is deleted
@@ -123,15 +123,15 @@ sfltool dumpbtm | grep -i gap
 ls ~/Library/LaunchAgents/*gap* 2>/dev/null
 
 # Clean slate before testing
-rm -rf /Applications/GAP.app
+rm -rf /Applications/Gap.app
 sfltool resetbtm  # Requires auth
 
 # Build and install
 cd macos-app
 ./build-dmg.sh
 ./sign-and-package.sh
-cp -R build/GAP.app /Applications/
-open /Applications/GAP.app
+cp -R build/Gap.app /Applications/
+open /Applications/Gap.app
 
 # Check launch failure
 # Error 163 = "Launchd job spawn failed"

@@ -4,7 +4,7 @@ set -e
 
 cd "$(dirname "$0")"
 
-APP_NAME="GAP"
+APP_NAME="Gap"
 STAGING_DIR="build/dmg-staging"
 
 echo "=== Testing DMG Staging Directory Creation ==="
@@ -16,7 +16,7 @@ rm -rf "$STAGING_DIR"
 mkdir -p "$STAGING_DIR"
 
 # Create a dummy app bundle for testing
-echo "2. Creating dummy GAP.app bundle..."
+echo "2. Creating dummy Gap.app bundle..."
 mkdir -p "build/${APP_NAME}.app/Contents"
 echo "dummy" > "build/${APP_NAME}.app/Contents/dummy.txt"
 
@@ -34,9 +34,9 @@ echo "=== Verification ==="
 echo ""
 
 if [ -d "$STAGING_DIR/${APP_NAME}.app" ]; then
-    echo "✓ GAP.app exists in staging directory"
+    echo "✓ Gap.app exists in staging directory"
 else
-    echo "✗ GAP.app NOT found in staging directory"
+    echo "✗ Gap.app NOT found in staging directory"
     exit 1
 fi
 

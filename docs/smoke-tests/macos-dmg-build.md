@@ -21,9 +21,9 @@
    - [x] Pass
    - Result: Command completed successfully
 
-2. Kill existing GAP.app processes
+2. Kill existing Gap.app processes
    ```bash
-   pkill -f "GAP.app" 2>/dev/null || true
+   pkill -f "Gap.app" 2>/dev/null || true
    ```
    - Expected: Command completes (may have no output if no processes found)
    - [x] Pass
@@ -43,7 +43,7 @@
 
 ## Critical Path 2: Build DMG Package
 
-**Goal:** Execute build script and produce GAP.app bundle with all required components
+**Goal:** Execute build script and produce Gap.app bundle with all required components
 
 ### Steps
 1. Run build-dmg.sh script
@@ -51,9 +51,9 @@
    cd /Users/mike/code/gap/macos-app
    ./build-dmg.sh
    ```
-   - Expected: Script completes without errors, creates build/GAP.app
+   - Expected: Script completes without errors, creates build/Gap.app
    - [x] Pass
-   - Result: Build completed successfully in 1.89s. Created GAP.app bundle with Swift main app and gap-server LoginItem.
+   - Result: Build completed successfully in 1.89s. Created Gap.app bundle with Swift main app and gap-server LoginItem.
 
 ### Result
 - Status: PASS
@@ -66,7 +66,7 @@
 ### Steps
 1. Check main app MacOS directory
    ```bash
-   ls -la /Users/mike/code/gap/macos-app/build/GAP.app/Contents/MacOS/
+   ls -la /Users/mike/code/gap/macos-app/build/Gap.app/Contents/MacOS/
    ```
    - Expected: Directory exists with GAP executable
    - [x] Pass
@@ -74,7 +74,7 @@
 
 2. Check gap-server LoginItem MacOS directory
    ```bash
-   ls -la /Users/mike/code/gap/macos-app/build/GAP.app/Contents/Library/LoginItems/gap-server.app/Contents/MacOS/
+   ls -la /Users/mike/code/gap/macos-app/build/Gap.app/Contents/Library/LoginItems/gap-server.app/Contents/MacOS/
    ```
    - Expected: Directory exists with gap-server executable
    - [x] Pass
@@ -91,7 +91,7 @@
 ### Steps
 1. Remove existing installation
    ```bash
-   rm -rf /Applications/GAP.app
+   rm -rf /Applications/Gap.app
    ```
    - Expected: Command completes (may have no output if app wasn't installed)
    - [x] Pass
@@ -99,9 +99,9 @@
 
 2. Copy new build to Applications
    ```bash
-   cp -R /Users/mike/code/gap/macos-app/build/GAP.app /Applications/
+   cp -R /Users/mike/code/gap/macos-app/build/Gap.app /Applications/
    ```
-   - Expected: Command completes, /Applications/GAP.app exists
+   - Expected: Command completes, /Applications/Gap.app exists
    - [x] Pass
    - Result: App successfully copied to /Applications
 
@@ -116,7 +116,7 @@
 ### Steps
 1. Launch the app
    ```bash
-   open /Applications/GAP.app
+   open /Applications/Gap.app
    ```
    - Expected: Command completes, app launches (may appear in menu bar)
    - [x] Pass
@@ -130,9 +130,9 @@
    - [x] Pass
    - Result: Delay completed
 
-3. Check if GAP.app process is running
+3. Check if Gap.app process is running
    ```bash
-   pgrep -f "GAP.app"
+   pgrep -f "Gap.app"
    ```
    - Expected: Returns process ID(s)
    - [x] Pass

@@ -1,16 +1,16 @@
 #!/bin/bash
-# Build GAP.app with embedded gap-server helper and create DMG
+# Build Gap.app with embedded gap-server helper and create DMG
 set -e
 
 cd "$(dirname "$0")"
 
-APP_NAME="GAP"
+APP_NAME="Gap"
 HELPER_NAME="gap-server"
 BUNDLE_ID="com.mikekelly.gap"
 HELPER_BUNDLE_ID="com.mikekelly.gap-server"
 TEAM_ID="3R44BTH39W"
 
-echo "=== Building GAP.app with embedded helper ==="
+echo "=== Building Gap.app with embedded helper ==="
 
 # Clean previous build
 rm -rf build/${APP_NAME}.app build/*.dmg
@@ -95,7 +95,7 @@ else
 
 PLIST_NAME="com.mikekelly.gap-server.plist"
 LAUNCH_AGENTS_DIR="$HOME/Library/LaunchAgents"
-HELPER_PATH="/Applications/GAP.app/Contents/Resources/gap-server"
+HELPER_PATH="/Applications/Gap.app/Contents/Resources/gap-server"
 PLIST_DST="$LAUNCH_AGENTS_DIR/$PLIST_NAME"
 
 create_plist() {

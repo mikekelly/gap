@@ -5,7 +5,7 @@ set -e
 cd "$(dirname "$0")/.."
 
 SOURCE_LOGO="gap_logo.png"
-BUILT_ICON="macos-app/build/GAP.app/Contents/Resources/AppIcon.icns"
+BUILT_ICON="macos-app/build/Gap.app/Contents/Resources/AppIcon.icns"
 ICONSET_DIR="macos-app/GAP-App/Sources/Assets.xcassets/AppIcon.appiconset"
 
 if [ ! -f "$BUILT_ICON" ]; then

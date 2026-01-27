@@ -9,7 +9,7 @@ class ServerManager: ObservableObject {
     private let helperBundleID = "com.mikekelly.gap-server"
     private let launchAgentLabel = "com.mikekelly.gap-server"
     private let launchAgentPath: String
-    private let helperPath = "/Applications/GAP.app/Contents/Resources/gap-server"
+    private let helperPath = "/Applications/Gap.app/Contents/Resources/gap-server"
 
     init() {
         launchAgentPath = NSHomeDirectory() + "/Library/LaunchAgents/\(launchAgentLabel).plist"

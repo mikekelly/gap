@@ -97,22 +97,22 @@ fn cleanup_orphaned_helper() {
 /// Returns Ok(true) if should continue running, Ok(false) if should exit
 #[cfg(target_os = "macos")]
 async fn check_binary_exists_and_cleanup(exe_path: &std::path::Path) -> anyhow::Result<bool> {
-    // Check if we're running from inside GAP.app
+    // Check if we're running from inside Gap.app
     let exe_str = exe_path.to_string_lossy();
-    if !exe_str.contains("/GAP.app/Contents/Resources/") {
-        // Not running from GAP.app, no need to check
+    if !exe_str.contains("/Gap.app/Contents/Resources/") {
+        // Not running from Gap.app, no need to check
         return Ok(true);
     }
 
     // Check if main app still exists (use try_exists for proper error handling)
-    let main_app_path = std::path::Path::new("/Applications/GAP.app");
+    let main_app_path = std::path::Path::new("/Applications/Gap.app");
     if main_app_path.try_exists().unwrap_or(true) {
         // App still exists (or we couldn't check), continue running
         return Ok(true);
     }
 
     // App was deleted - clean up and signal to exit
-    tracing::info!("GAP.app deleted, cleaning up orphaned helper process");
+    tracing::info!("Gap.app deleted, cleaning up orphaned helper process");
     cleanup_orphaned_helper();
     tracing::info!("Cleanup complete, exiting");
 
@@ -179,7 +179,7 @@ async fn main() -> anyhow::Result<()> {
         .with_env_filter(args.log_level.clone())
         .init();
 
-    // Orphan detection at startup: if running from within GAP.app, check if main app still exists
+    // Orphan detection at startup: if running from within Gap.app, check if main app still exists
     #[cfg(target_os = "macos")]
     if let Ok(exe_path) = std::env::current_exe() {
         match check_binary_exists_and_cleanup(&exe_path).await {
@@ -513,17 +513,17 @@ mod tests {
     async fn test_periodic_binary_check_detects_deletion() {
         use std::path::PathBuf;
 
-        // Simulate running from GAP.app Resources
-        let fake_exe_path = PathBuf::from("/Applications/GAP.app/Contents/Resources/gap-server");
+        // Simulate running from Gap.app Resources
+        let fake_exe_path = PathBuf::from("/Applications/Gap.app/Contents/Resources/gap-server");
 
-        // Test case 1: When /Applications/GAP.app exists, should return Ok(true)
-        // (This will only pass if GAP.app actually exists, otherwise it will return Ok(false))
+        // Test case 1: When /Applications/Gap.app exists, should return Ok(true)
+        // (This will only pass if Gap.app actually exists, otherwise it will return Ok(false))
         // For a proper test, we need to check based on actual existence
-        let app_exists = std::path::Path::new("/Applications/GAP.app").exists();
+        let app_exists = std::path::Path::new("/Applications/Gap.app").exists();
         let result = check_binary_exists_and_cleanup(&fake_exe_path).await;
         assert_eq!(result.unwrap(), app_exists);
 
-        // Test case 2: When not running from GAP.app, should always return Ok(true)
+        // Test case 2: When not running from Gap.app, should always return Ok(true)
         let non_app_path = PathBuf::from("/usr/local/bin/gap-server");
         let result = check_binary_exists_and_cleanup(&non_app_path).await;
         assert!(result.is_ok());

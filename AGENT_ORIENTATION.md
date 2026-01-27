@@ -84,7 +84,7 @@ cd macos-app
 - Smoke test: `./smoke-tests/test-https-proxy.sh`
 
 **Entitlements architecture:**
-- Main app (`GAP.app`): Minimal entitlements (just `app-sandbox=false`)
+- Main app (`Gap.app`): Minimal entitlements (just `app-sandbox=false`)
 - Helper binary (`gap-server`): Minimal entitlements (no `keychain-access-groups` needed - uses traditional keychain)
 - Entitlement files: `build/main.entitlements` and `build/helper.entitlements` (tracked in git)
 - Signing must apply correct entitlements to each binary separately (inside-out order: helper first, then main app)

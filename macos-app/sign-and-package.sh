@@ -5,12 +5,12 @@ set -e
 
 cd "$(dirname "$0")"
 
-APP_NAME="GAP"
+APP_NAME="Gap"
 HELPER_NAME="gap-server"
 BUNDLE_ID="com.mikekelly.gap"
 HELPER_BUNDLE_ID="com.mikekelly.gap-server"
 
-echo "=== Signing and Packaging GAP.app ==="
+echo "=== Signing and Packaging Gap.app ==="
 
 # Check app bundle exists
 if [ ! -d "build/${APP_NAME}.app" ]; then
@@ -64,7 +64,7 @@ echo "Staging directory prepared with Applications symlink"
 # Check if create-dmg is installed
 if command -v create-dmg &> /dev/null; then
     # Use create-dmg/create-dmg with maximum icon size
-    DMG_FILE="build/${APP_NAME}.dmg"
+    DMG_FILE="build/Gap Installer.dmg"
     rm -f "$DMG_FILE"
 
     create-dmg \
@@ -99,24 +99,24 @@ else
     echo "Creating DMG manually with hdiutil..."
 
     # Fallback to hdiutil
-    rm -f "build/${APP_NAME}.dmg"
+    rm -f "build/Gap Installer.dmg"
     hdiutil create -srcfolder "$STAGING_DIR" \
         -volname "${APP_NAME}" \
         -fs HFS+ \
         -format UDZO \
-        "build/${APP_NAME}.dmg"
+        "build/Gap Installer.dmg"
 
     # Clean up staging directory
     rm -rf "$STAGING_DIR"
 
     echo ""
     echo "=== Step 5: Signing DMG ==="
-    codesign -s "Developer ID Application: Mike Kelly (3R44BTH39W)" --timestamp "build/${APP_NAME}.dmg"
-    echo "DMG signed: build/${APP_NAME}.dmg"
+    codesign -s "Developer ID Application: Mike Kelly (3R44BTH39W)" --timestamp "build/Gap Installer.dmg"
+    echo "DMG signed: build/Gap Installer.dmg"
 
     echo ""
     echo "=== Done! ==="
-    echo "DMG created and signed: build/${APP_NAME}.dmg"
+    echo "DMG created and signed: build/Gap Installer.dmg"
     echo ""
     echo "The DMG includes an Applications folder symlink for easy drag-and-drop installation."
 fi
