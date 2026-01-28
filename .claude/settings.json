@@ -1,6 +1,5 @@
 {
   "enabledPlugins": {
-    "promode@promode": true,
-    "rust-analyzer@claude-code-lsps": true
+    "promode@promode": true
   }
 }

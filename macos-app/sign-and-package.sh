@@ -56,13 +56,9 @@ mkdir -p "$STAGING_DIR"
 # Copy signed app to staging
 cp -R "build/${APP_NAME}.app" "$STAGING_DIR/"
 
-# Create Applications symlink for drag-and-drop installation
-ln -s /Applications "$STAGING_DIR/Applications"
-
-echo "Staging directory prepared with Applications symlink"
-
 # Check if create-dmg is installed
 if command -v create-dmg &> /dev/null; then
+    echo "Staging directory prepared (create-dmg will add Applications symlink)"
     # Use create-dmg/create-dmg with maximum icon size
     DMG_FILE="build/Gap Installer.dmg"
     rm -f "$DMG_FILE"
@@ -97,6 +93,10 @@ else
     echo "create-dmg not found. Install with: brew install create-dmg"
     echo ""
     echo "Creating DMG manually with hdiutil..."
+
+    # Create Applications symlink for drag-and-drop installation (manual fallback)
+    ln -s /Applications "$STAGING_DIR/Applications"
+    echo "Staging directory prepared with Applications symlink"
 
     # Fallback to hdiutil
     rm -f "build/Gap Installer.dmg"
