@@ -144,14 +144,26 @@ class ServerManager: ObservableObject {
     }
 
     private func installLaunchAgent() {
+        // Use ~/.gap/logs/ for log files (matching Rust server behavior)
+        let logsDir = NSHomeDirectory() + "/.gap/logs"
+        let stdoutPath = logsDir + "/gap-server.log"
+        let stderrPath = logsDir + "/gap-server.err"
+
         let plist: [String: Any] = [
             "Label": launchAgentLabel,
             "ProgramArguments": [helperPath],
             "RunAtLoad": true,
             "KeepAlive": true,
-            "StandardOutPath": "/tmp/gap-server.log",
-            "StandardErrorPath": "/tmp/gap-server.log"
+            "StandardOutPath": stdoutPath,
+            "StandardErrorPath": stderrPath
         ]
+
+        // Create logs directory if needed
+        do {
+            try FileManager.default.createDirectory(atPath: logsDir, withIntermediateDirectories: true)
+        } catch {
+            NSLog("Failed to create logs directory: \(error)")
+        }
 
         // Create LaunchAgents directory if needed
         let launchAgentsDir = NSHomeDirectory() + "/Library/LaunchAgents"

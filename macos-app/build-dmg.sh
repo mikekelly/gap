@@ -97,6 +97,9 @@ HELPER_PATH="/Applications/Gap.app/Contents/Resources/gap-server"
 PLIST_DST="$LAUNCH_AGENTS_DIR/$PLIST_NAME"
 
 create_plist() {
+    # Create logs directory if it doesn't exist
+    mkdir -p "$HOME/.gap/logs"
+
     cat > "$PLIST_DST" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -113,9 +116,9 @@ create_plist() {
     <key>KeepAlive</key>
     <true/>
     <key>StandardOutPath</key>
-    <string>/tmp/gap-server.log</string>
+    <string>$HOME/.gap/logs/gap-server.log</string>
     <key>StandardErrorPath</key>
-    <string>/tmp/gap-server.log</string>
+    <string>$HOME/.gap/logs/gap-server.err</string>
 </dict>
 </plist>
 PLIST
