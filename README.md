@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="gap_header.png" alt="Gap Header" width="100%">
+  <img src="gap_heading.png" alt="Gap Header" width="100%">
 </p>
 
 ### Give AI agents secure access to your accounts - without sharing your credentials.
