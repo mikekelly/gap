@@ -1,0 +1,72 @@
+name: Build AMD64 Binaries
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Release version (e.g., v0.6.1)'
+        required: true
+        default: 'v0.6.1'
+
+jobs:
+  build-amd64:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: ~/.cargo/registry
+          key: ${{ runner.os }}-cargo-registry-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Cache cargo index
+        uses: actions/cache@v4
+        with:
+          path: ~/.cargo/git
+          key: ${{ runner.os }}-cargo-git-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Cache cargo build
+        uses: actions/cache@v4
+        with:
+          path: target
+          key: ${{ runner.os }}-cargo-build-target-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Build release binaries
+        run: cargo build --release --bins
+
+      - name: Package binaries
+        run: |
+          mkdir -p gap-linux-amd64
+          cp target/release/gap gap-linux-amd64/
+          cp target/release/gap-server gap-linux-amd64/
+          cd gap-linux-amd64
+          tar -czvf ../gap-linux-amd64.tar.gz gap gap-server
+          cd ..
+
+      - name: Verify architecture
+        run: file gap-linux-amd64/gap gap-linux-amd64/gap-server
+
+      - name: Upload to release
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release upload ${{ inputs.version }} gap-linux-amd64.tar.gz --clobber
+
+      - name: Build Docker image
+        run: |
+          docker build --platform linux/amd64 -t mikekelly321/gap:${{ inputs.version }}-amd64 .
+
+      - name: Extract binaries from Docker
+        run: |
+          docker create --name gap-extract-amd64 mikekelly321/gap:${{ inputs.version }}-amd64
+          docker cp gap-extract-amd64:/usr/local/bin/gap /tmp/gap-amd64
+          docker cp gap-extract-amd64:/usr/local/bin/gap-server /tmp/gap-server-amd64
+          docker rm gap-extract-amd64
+
+          # Verify
+          file /tmp/gap-amd64 /tmp/gap-server-amd64
