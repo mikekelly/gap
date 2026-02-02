@@ -2,15 +2,15 @@
   <img src="gap_header.png" alt="Gap Header" width="100%">
 </p>
 
-### Give AI agents secure access to your APIs - without sharing your credentials.
+### Give AI agents secure access to your accounts - without sharing your credentials.
 
 ## The Problem
 
-AI agents need to call APIs on your behalf - access your cloud services, interact with third-party tools. But how do you give them access? Today's approach is not ideal: agents are entrusted with access to API credentials - even MCPs don't keep them out of reach. 
+AI agents need to access secured accounts on your behalf - manage your email, update a todo, publish something online. But how do you give them access? Today's approach is not ideal: agents are entrusted with access to API credentials - even MCPs don't keep them out of reach. 
 
 ## The Solution
 
-Gap lets you give agents API access without giving them your credentials.
+Gap lets you give agents (like Claude Code, Codex, OpenClaw) access to your accounts without giving them your credentials.
 
 Agents can only access secure APIs by going via Gap. You give them a Gap token - not your API keys. When they make a request to an API you've gapped, Gap injects your credentials for them. The agent never sees the credentials.
 
@@ -37,6 +37,8 @@ Agents can only access secure APIs by going via Gap. You give them a Gap token -
 1. Download `Gap.dmg` from the [latest GitHub release](https://github.com/mikekelly/gap/releases/latest)
 2. Open the DMG and drag Gap to Applications
 3. Launch Gap from Applications
+
+Follow the instructions to set a password for managing your gap. **Don't store this anywhere an agent could get at it (eg. a notes app), ideally just remember it.**
 
 Install a gap plugin for a given service (eg. Exa) and set credentials:
 
