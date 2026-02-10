@@ -2,6 +2,8 @@
 
 Raw thoughts, not yet evaluated.
 
+- mitmproxy + gap to provide transparent proxy (for monitoring) and explicit proxy (for credential injection)
+    - docker compose networking isn't suitable for this, look into kata and apple containers (https://github.com/mcrich23/container-compose)
 - certs from boot (linux user place in shared dir?)
 - In memory SurrealDB that flushes to disk ecrypted using secret stored in keychain (might be possible with SurrealDB + RocksDB)
 - **Disk-encrypted credential storage (macOS)**: Store credentials on disk encrypted with a single master key stored in keychain. Reduces keychain prompts from N (one per credential) to 1 (just the master key). Would make Homebrew distribution much more usable for users with multiple plugins.
