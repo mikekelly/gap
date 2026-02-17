@@ -505,6 +505,7 @@ where
                         plugin_name: Some(plugin_info.name),
                         plugin_sha: plugin_info.commit_sha,
                         source_hash: plugin_info.source_hash,
+                        request_headers: plugin_info.scrubbed_headers,
                     };
                     if let Err(e) = db_log.log_activity(&entry).await {
                         tracing::warn!("Failed to log activity: {}", e);
@@ -580,6 +581,7 @@ where
                         plugin_name: Some(plugin_info.name),
                         plugin_sha: plugin_info.commit_sha,
                         source_hash: plugin_info.source_hash,
+                        request_headers: plugin_info.scrubbed_headers,
                     };
                     if let Err(e) = db_log.log_activity(&entry).await {
                         tracing::warn!("Failed to log activity: {}", e);
@@ -998,5 +1000,18 @@ mod tests {
         assert_eq!(activity[0].status, 200);
         assert_eq!(activity[0].plugin_name, Some("test-hyper".to_string()));
         assert_eq!(activity[0].plugin_sha, None);
+
+        // Verify scrubbed request headers were logged
+        assert!(activity[0].request_headers.is_some());
+        let headers_json = activity[0].request_headers.as_ref().unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(headers_json).unwrap();
+        // Credential value "my-secret-key" should be redacted in the logged headers
+        let auth_value = parsed.get("Authorization")
+            .or_else(|| parsed.get("authorization"))
+            .expect("Authorization header should be present");
+        assert!(auth_value.as_str().unwrap().contains("[REDACTED]"),
+            "Credential should be scrubbed, got: {}", auth_value);
+        assert!(!auth_value.as_str().unwrap().contains("my-secret-key"),
+            "Raw credential should not appear in logged headers");
     }
 }

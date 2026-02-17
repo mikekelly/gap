@@ -39,7 +39,8 @@ CREATE TABLE IF NOT EXISTS access_logs (
     status INTEGER NOT NULL,
     plugin_name TEXT,
     plugin_sha TEXT,
-    source_hash TEXT
+    source_hash TEXT,
+    request_headers TEXT
 );
 
 CREATE INDEX IF NOT EXISTS idx_access_logs_timestamp ON access_logs(timestamp);
@@ -151,6 +152,7 @@ impl GapDatabase {
         let _ = self.conn.execute("ALTER TABLE access_logs ADD COLUMN plugin_name TEXT", ()).await;
         let _ = self.conn.execute("ALTER TABLE access_logs ADD COLUMN plugin_sha TEXT", ()).await;
         let _ = self.conn.execute("ALTER TABLE access_logs ADD COLUMN source_hash TEXT", ()).await;
+        let _ = self.conn.execute("ALTER TABLE access_logs ADD COLUMN request_headers TEXT", ()).await;
 
         // Migrate plugin_versions for append-only plugin storage
         let _ = self.conn.execute("ALTER TABLE plugin_versions ADD COLUMN hosts TEXT NOT NULL DEFAULT '[]'", ()).await;
@@ -595,7 +597,7 @@ impl GapDatabase {
     pub async fn log_activity(&self, entry: &ActivityEntry) -> Result<()> {
         self.conn
             .execute(
-                "INSERT INTO access_logs (timestamp, method, url, agent_id, status, plugin_name, plugin_sha, source_hash) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                "INSERT INTO access_logs (timestamp, method, url, agent_id, status, plugin_name, plugin_sha, source_hash, request_headers) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
                 libsql::params![
                     entry.timestamp.to_rfc3339(),
                     entry.method.as_str(),
@@ -604,7 +606,8 @@ impl GapDatabase {
                     entry.status as i64,
                     entry.plugin_name.as_deref().unwrap_or(""),
                     entry.plugin_sha.as_deref().unwrap_or(""),
-                    entry.source_hash.as_deref().unwrap_or("")
+                    entry.source_hash.as_deref().unwrap_or(""),
+                    entry.request_headers.as_deref().unwrap_or("")
                 ],
             )
             .await
@@ -616,10 +619,10 @@ impl GapDatabase {
     pub async fn get_activity(&self, limit: Option<u32>) -> Result<Vec<ActivityEntry>> {
         let query = match limit {
             Some(n) => format!(
-                "SELECT timestamp, method, url, agent_id, status, plugin_name, plugin_sha, source_hash FROM access_logs ORDER BY timestamp DESC LIMIT {}",
+                "SELECT timestamp, method, url, agent_id, status, plugin_name, plugin_sha, source_hash, request_headers FROM access_logs ORDER BY timestamp DESC LIMIT {}",
                 n
             ),
-            None => "SELECT timestamp, method, url, agent_id, status, plugin_name, plugin_sha, source_hash FROM access_logs ORDER BY timestamp DESC".to_string(),
+            None => "SELECT timestamp, method, url, agent_id, status, plugin_name, plugin_sha, source_hash, request_headers FROM access_logs ORDER BY timestamp DESC".to_string(),
         };
         let mut rows = self
             .conn
@@ -634,7 +637,7 @@ impl GapDatabase {
         let mut rows = self
             .conn
             .query(
-                "SELECT timestamp, method, url, agent_id, status, plugin_name, plugin_sha, source_hash FROM access_logs WHERE timestamp >= ?1 ORDER BY timestamp DESC",
+                "SELECT timestamp, method, url, agent_id, status, plugin_name, plugin_sha, source_hash, request_headers FROM access_logs WHERE timestamp >= ?1 ORDER BY timestamp DESC",
                 libsql::params![since.to_rfc3339()],
             )
             .await
@@ -658,6 +661,8 @@ impl GapDatabase {
                 row.get(6).map_err(|e| GapError::database(e.to_string()))?;
             let source_hash_raw: String =
                 row.get(7).map_err(|e| GapError::database(e.to_string()))?;
+            let request_headers_raw: String =
+                row.get(8).map_err(|e| GapError::database(e.to_string()))?;
 
             let timestamp = DateTime::parse_from_rfc3339(&ts_str)
                 .map_err(|e| GapError::database(format!("Invalid timestamp: {}", e)))?
@@ -682,6 +687,11 @@ impl GapDatabase {
             } else {
                 Some(source_hash_raw)
             };
+            let request_headers = if request_headers_raw.is_empty() {
+                None
+            } else {
+                Some(request_headers_raw)
+            };
 
             result.push(ActivityEntry {
                 timestamp,
@@ -692,6 +702,7 @@ impl GapDatabase {
                 plugin_name,
                 plugin_sha,
                 source_hash,
+                request_headers,
             });
         }
         Ok(result)
@@ -995,6 +1006,7 @@ mod tests {
             plugin_name: None,
             plugin_sha: None,
             source_hash: None,
+            request_headers: None,
         };
         db.log_activity(&entry).await.unwrap();
 
@@ -1020,6 +1032,7 @@ mod tests {
                 plugin_name: None,
                 plugin_sha: None,
                 source_hash: None,
+                request_headers: None,
             };
             db.log_activity(&entry).await.unwrap();
         }
@@ -1048,6 +1061,7 @@ mod tests {
             plugin_name: None,
             plugin_sha: None,
             source_hash: None,
+            request_headers: None,
         })
         .await
         .unwrap();
@@ -1062,6 +1076,7 @@ mod tests {
             plugin_name: None,
             plugin_sha: None,
             source_hash: None,
+            request_headers: None,
         })
         .await
         .unwrap();
@@ -1084,6 +1099,7 @@ mod tests {
             plugin_name: None,
             plugin_sha: None,
             source_hash: None,
+            request_headers: None,
         };
         db.log_activity(&entry).await.unwrap();
 
@@ -1105,6 +1121,7 @@ mod tests {
             plugin_name: Some("exa".to_string()),
             plugin_sha: Some("abc1234".to_string()),
             source_hash: None,
+            request_headers: None,
         };
         db.log_activity(&entry).await.unwrap();
 
@@ -1127,6 +1144,7 @@ mod tests {
             plugin_name: None,
             plugin_sha: None,
             source_hash: None,
+            request_headers: None,
         };
         db.log_activity(&entry).await.unwrap();
 
@@ -1149,12 +1167,61 @@ mod tests {
             plugin_name: Some("exa".to_string()),
             plugin_sha: Some("abc1234".to_string()),
             source_hash: Some("deadbeef1234".to_string()),
+            request_headers: None,
         };
         db.log_activity(&entry).await.unwrap();
 
         let logs = db.get_activity(None).await.unwrap();
         assert_eq!(logs.len(), 1);
         assert_eq!(logs[0].source_hash, Some("deadbeef1234".to_string()));
+    }
+
+    #[tokio::test]
+    async fn test_activity_with_request_headers() {
+        let db = GapDatabase::in_memory().await.unwrap();
+
+        let headers_json = r#"{"Authorization":"Bearer [REDACTED]","Host":"api.example.com"}"#;
+        let entry = ActivityEntry {
+            timestamp: Utc::now(),
+            method: "GET".to_string(),
+            url: "https://api.example.com/data".to_string(),
+            agent_id: Some("agent-1".to_string()),
+            status: 200,
+            plugin_name: Some("exa".to_string()),
+            plugin_sha: None,
+            source_hash: None,
+            request_headers: Some(headers_json.to_string()),
+        };
+        db.log_activity(&entry).await.unwrap();
+
+        let logs = db.get_activity(None).await.unwrap();
+        assert_eq!(logs.len(), 1);
+        assert_eq!(
+            logs[0].request_headers,
+            Some(headers_json.to_string())
+        );
+    }
+
+    #[tokio::test]
+    async fn test_activity_without_request_headers() {
+        let db = GapDatabase::in_memory().await.unwrap();
+
+        let entry = ActivityEntry {
+            timestamp: Utc::now(),
+            method: "GET".to_string(),
+            url: "https://api.example.com/data".to_string(),
+            agent_id: None,
+            status: 200,
+            plugin_name: None,
+            plugin_sha: None,
+            source_hash: None,
+            request_headers: None,
+        };
+        db.log_activity(&entry).await.unwrap();
+
+        let logs = db.get_activity(None).await.unwrap();
+        assert_eq!(logs.len(), 1);
+        assert_eq!(logs[0].request_headers, None);
     }
 
     // ── Plugin Version History ──────────────────────────────────────

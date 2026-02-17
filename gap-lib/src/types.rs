@@ -284,6 +284,8 @@ pub struct ActivityEntry {
     pub plugin_sha: Option<String>,
     /// SHA-256 hash of the plugin source code that handled this request
     pub source_hash: Option<String>,
+    /// JSON string of post-transform request headers with credential values scrubbed
+    pub request_headers: Option<String>,
 }
 
 // --- Registry-origin types (migrated from registry.rs) ---

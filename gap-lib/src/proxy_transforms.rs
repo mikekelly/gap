@@ -8,6 +8,8 @@ use crate::http_utils::{parse_http_request, serialize_http_request};
 use crate::plugin_matcher::find_matching_plugin;
 use crate::plugin_runtime::PluginRuntime;
 use crate::types::{GAPCredentials, GAPRequest};
+use base64::Engine;
+use std::collections::HashMap;
 use tracing::{debug, warn};
 
 /// Load all credential fields for a plugin from GapDatabase
@@ -34,6 +36,63 @@ pub struct PluginInfo {
     pub name: String,
     pub commit_sha: Option<String>,
     pub source_hash: Option<String>,
+    /// JSON string of post-transform request headers with credential values scrubbed
+    pub scrubbed_headers: Option<String>,
+}
+
+/// Scrub credential values from post-transform request headers.
+///
+/// Replaces literal credential values, their base64 encodings, and
+/// Basic auth headers containing credentials with `[REDACTED]`.
+/// Returns a JSON object string of the scrubbed headers.
+fn scrub_headers(request: &GAPRequest, credentials: &HashMap<String, String>) -> String {
+    let mut headers: Vec<(String, String)> = request
+        .headers
+        .iter()
+        .map(|(k, v)| (k.clone(), v.clone()))
+        .collect();
+
+    for (_field_name, cred_value) in credentials {
+        if cred_value.is_empty() {
+            continue;
+        }
+
+        // 1. Handle Basic auth headers: decode base64, check for credential, redact whole token
+        for header in &mut headers {
+            if header.1.starts_with("Basic ") {
+                let b64_part = &header.1[6..];
+                if let Ok(decoded) = base64::engine::general_purpose::STANDARD.decode(b64_part) {
+                    if let Ok(decoded_str) = String::from_utf8(decoded) {
+                        if decoded_str.contains(cred_value) {
+                            header.1 = "Basic [REDACTED]".to_string();
+                        }
+                    }
+                }
+            }
+        }
+
+        // 2. Base64-encoded value replacement (before literal, since literal may be substring)
+        let b64_value = base64::engine::general_purpose::STANDARD.encode(cred_value);
+        for header in &mut headers {
+            if header.1.contains(&b64_value) {
+                header.1 = header.1.replace(&b64_value, "[REDACTED]");
+            }
+        }
+
+        // 3. Literal value replacement
+        for header in &mut headers {
+            if header.1.contains(cred_value) {
+                header.1 = header.1.replace(cred_value, "[REDACTED]");
+            }
+        }
+    }
+
+    // Serialize as JSON object (deterministic key order via BTreeMap)
+    let header_map: std::collections::BTreeMap<&str, &str> = headers
+        .iter()
+        .map(|(k, v)| (k.as_str(), v.as_str()))
+        .collect();
+    serde_json::to_string(&header_map).unwrap_or_default()
 }
 
 /// Apply plugin transforms to a GAPRequest
@@ -71,12 +130,6 @@ pub async fn transform_request(
         }
     };
 
-    let plugin_info = PluginInfo {
-        name: plugin.name.clone(),
-        commit_sha: plugin.commit_sha.clone(),
-        source_hash: plugin.source_hash.clone(),
-    };
-
     // Load credentials for the plugin
     let credentials = load_plugin_credentials(&plugin.name, db).await?;
 
@@ -107,6 +160,17 @@ pub async fn transform_request(
     };
 
     debug!("Transform executed successfully");
+
+    // Scrub credential values from post-transform headers for audit logging.
+    // This MUST happen here — credentials should never reach the logging code unscrubbed.
+    let scrubbed = scrub_headers(&transformed_request, &credentials.credentials);
+
+    let plugin_info = PluginInfo {
+        name: plugin.name.clone(),
+        commit_sha: plugin.commit_sha.clone(),
+        source_hash: plugin.source_hash.clone(),
+        scrubbed_headers: Some(scrubbed),
+    };
 
     Ok((transformed_request, plugin_info))
 }
@@ -263,5 +327,129 @@ mod tests {
 
         let result_str = String::from_utf8_lossy(&result);
         assert!(result_str.contains("Authorization: Bearer secret-key-123"));
+    }
+
+    #[test]
+    fn test_scrub_headers_literal_bearer_token() {
+        let request = GAPRequest::new("GET", "https://api.test.com/data")
+            .with_header("Authorization", "Bearer sk-secret-123")
+            .with_header("Host", "api.test.com");
+
+        let mut credentials = HashMap::new();
+        credentials.insert("api_key".to_string(), "sk-secret-123".to_string());
+
+        let scrubbed = scrub_headers(&request, &credentials);
+        let parsed: serde_json::Value = serde_json::from_str(&scrubbed).unwrap();
+
+        assert_eq!(parsed["Authorization"], "Bearer [REDACTED]");
+        // Non-credential headers should be preserved
+        assert_eq!(parsed["Host"], "api.test.com");
+    }
+
+    #[test]
+    fn test_scrub_headers_basic_auth() {
+        // Basic auth: base64("user:password")
+        let encoded = base64::engine::general_purpose::STANDARD.encode("user:my-secret-pw");
+        let request = GAPRequest::new("GET", "https://api.test.com/data")
+            .with_header("Authorization", &format!("Basic {}", encoded));
+
+        let mut credentials = HashMap::new();
+        credentials.insert("password".to_string(), "my-secret-pw".to_string());
+
+        let scrubbed = scrub_headers(&request, &credentials);
+        let parsed: serde_json::Value = serde_json::from_str(&scrubbed).unwrap();
+
+        assert_eq!(parsed["Authorization"], "Basic [REDACTED]");
+    }
+
+    #[test]
+    fn test_scrub_headers_base64_encoded_value() {
+        // Credential value appears as base64 in a custom header
+        let secret = "my-api-key";
+        let b64_secret = base64::engine::general_purpose::STANDARD.encode(secret);
+        let request = GAPRequest::new("GET", "https://api.test.com/data")
+            .with_header("X-Custom-Auth", &format!("Token {}", b64_secret));
+
+        let mut credentials = HashMap::new();
+        credentials.insert("api_key".to_string(), secret.to_string());
+
+        let scrubbed = scrub_headers(&request, &credentials);
+        let parsed: serde_json::Value = serde_json::from_str(&scrubbed).unwrap();
+
+        // The base64-encoded value should be redacted
+        assert!(!parsed["X-Custom-Auth"].as_str().unwrap().contains(&b64_secret));
+        assert!(parsed["X-Custom-Auth"].as_str().unwrap().contains("[REDACTED]"));
+    }
+
+    #[test]
+    fn test_scrub_headers_multiple_credentials() {
+        let request = GAPRequest::new("POST", "https://api.test.com/data")
+            .with_header("Authorization", "Bearer first-secret")
+            .with_header("X-Api-Key", "second-secret");
+
+        let mut credentials = HashMap::new();
+        credentials.insert("token".to_string(), "first-secret".to_string());
+        credentials.insert("api_key".to_string(), "second-secret".to_string());
+
+        let scrubbed = scrub_headers(&request, &credentials);
+        let parsed: serde_json::Value = serde_json::from_str(&scrubbed).unwrap();
+
+        assert_eq!(parsed["Authorization"], "Bearer [REDACTED]");
+        assert_eq!(parsed["X-Api-Key"], "[REDACTED]");
+    }
+
+    #[test]
+    fn test_scrub_headers_empty_credentials_preserved() {
+        let request = GAPRequest::new("GET", "https://api.test.com/data")
+            .with_header("Authorization", "Bearer token-value")
+            .with_header("Host", "api.test.com");
+
+        let credentials = HashMap::new();
+
+        let scrubbed = scrub_headers(&request, &credentials);
+        let parsed: serde_json::Value = serde_json::from_str(&scrubbed).unwrap();
+
+        // With no credentials to scrub, headers should be preserved as-is
+        assert_eq!(parsed["Authorization"], "Bearer token-value");
+        assert_eq!(parsed["Host"], "api.test.com");
+    }
+
+    #[test]
+    fn test_scrub_headers_skips_empty_credential_values() {
+        let request = GAPRequest::new("GET", "https://api.test.com/data")
+            .with_header("Authorization", "Bearer real-token");
+
+        let mut credentials = HashMap::new();
+        credentials.insert("empty_field".to_string(), "".to_string());
+        credentials.insert("token".to_string(), "real-token".to_string());
+
+        let scrubbed = scrub_headers(&request, &credentials);
+        let parsed: serde_json::Value = serde_json::from_str(&scrubbed).unwrap();
+
+        // Empty credential values should not cause issues
+        assert_eq!(parsed["Authorization"], "Bearer [REDACTED]");
+    }
+
+    #[tokio::test]
+    async fn test_transform_request_returns_scrubbed_headers() {
+        let db = GapDatabase::in_memory().await.unwrap();
+        setup_test_plugin(&db).await;
+
+        let request = GAPRequest::new("GET", "https://api.test.com/data")
+            .with_header("Host", "api.test.com");
+
+        let (_result, plugin_info) = transform_request(request, "api.test.com", &db)
+            .await
+            .expect("transform should succeed");
+
+        // scrubbed_headers should be set
+        assert!(plugin_info.scrubbed_headers.is_some());
+        let scrubbed = plugin_info.scrubbed_headers.unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&scrubbed).unwrap();
+
+        // The credential value "secret-key-123" should be redacted
+        assert_eq!(parsed["Authorization"], "Bearer [REDACTED]");
+        // Non-credential headers preserved
+        assert_eq!(parsed["Host"], "api.test.com");
     }
 }
