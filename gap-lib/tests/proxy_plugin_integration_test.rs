@@ -224,7 +224,8 @@ async fn test_proxy_plugin_execution_flow() {
 }
 
 // Use the actual implementations from gap_lib
-use gap_lib::{parse_http_request, serialize_http_request, find_matching_plugin};
+use gap_lib::http_utils::{parse_http_request, serialize_http_request};
+use gap_lib::find_matching_plugin;
 use gap_lib::proxy_transforms::parse_and_transform;
 
 /// Test the complete proxy transform pipeline

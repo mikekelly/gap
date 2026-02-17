@@ -17,7 +17,9 @@ pub mod tls;
 pub mod types;
 
 pub use error::{GapError, Result};
-pub use http_utils::{parse_http_request, serialize_http_request};
+// parse_http_request and serialize_http_request are now test-only utilities.
+// They remain pub in http_utils for integration test access but are no longer
+// re-exported from the crate root since no production code depends on them.
 pub use paths::ca_cert_path;
 pub use plugin_matcher::find_matching_plugin;
 pub use plugin_runtime::PluginRuntime;

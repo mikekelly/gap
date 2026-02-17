@@ -276,8 +276,9 @@ async fn handle_connection(
     let upstream_stream = connect_upstream(&hostname, port, upstream_connector).await?;
     debug!("Upstream TLS established");
 
-    // Bidirectional proxy with HTTP transformation
-    proxy_streams_with_transform(agent_stream, upstream_stream, &hostname, &*store, &*registry).await?;
+    // Bidirectional proxy with HTTP transformation via hyper
+    // hyper handles ALL requests per connection (not just the first one)
+    proxy_via_hyper(agent_stream, upstream_stream, hostname, store, registry).await?;
 
     Ok(())
 }
@@ -422,120 +423,84 @@ async fn connect_upstream(
     Ok(tls_stream)
 }
 
-/// Proxy data bidirectionally with HTTP request transformation
-async fn proxy_streams_with_transform<A, U>(
-    mut agent: A,
-    mut upstream: U,
-    hostname: &str,
-    store: &dyn SecretStore,
-    registry: &Registry,
+/// Proxy HTTP requests between agent and upstream using hyper.
+///
+/// Replaces the old `proxy_streams_with_transform()`: instead of only transforming
+/// the first request then falling back to raw byte copying, this function uses hyper
+/// to parse and transform ALL HTTP requests on the connection.
+///
+/// Architecture:
+/// - Agent side: hyper server reads HTTP/1.1 requests from the agent
+/// - For each request: convert to GAPRequest, apply plugin transforms, convert back
+/// - Upstream side: hyper client forwards the transformed request
+/// - Response flows back to agent unchanged
+async fn proxy_via_hyper<A, U>(
+    agent_stream: A,
+    upstream_stream: U,
+    hostname: String,
+    store: Arc<dyn SecretStore>,
+    registry: Arc<Registry>,
 ) -> Result<()>
 where
-    A: AsyncReadExt + AsyncWriteExt + Unpin,
-    U: AsyncReadExt + AsyncWriteExt + Unpin,
+    A: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
+    U: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
 {
-    use crate::proxy_transforms::parse_and_transform;
+    use hyper::client::conn::http1 as client_http1;
+    use hyper::server::conn::http1 as server_http1;
+    use hyper::service::service_fn;
+    use hyper_util::rt::TokioIo;
+    use http_body_util::BodyExt;
 
-    // Read the first HTTP request from agent
-    let mut buffer = Vec::new();
-    let mut temp_buf = [0u8; 8192];
+    // Client-side: handshake with upstream
+    let upstream_io = TokioIo::new(upstream_stream);
+    let (sender, conn) = client_http1::handshake(upstream_io).await?;
+    tokio::spawn(async move { let _ = conn.await; });
 
-    // Read until we have a complete HTTP request (ends with \r\n\r\n or \n\n)
-    loop {
-        let n = agent.read(&mut temp_buf).await
-            .map_err(|e| GapError::network(format!("Failed to read from agent: {}", e)))?;
+    // Wrap sender in Arc<Mutex> because http1::SendRequest is not Clone
+    // and send_request takes &mut self. HTTP/1.1 is sequential anyway.
+    let sender = Arc::new(tokio::sync::Mutex::new(sender));
 
-        if n == 0 {
-            // Connection closed
-            return Ok(());
+    // Server-side: serve agent connection, transforming each request
+    let agent_io = TokioIo::new(agent_stream);
+
+    let service = service_fn(move |req: hyper::Request<hyper::body::Incoming>| {
+        let hostname = hostname.clone();
+        let store = Arc::clone(&store);
+        let registry = Arc::clone(&registry);
+        let sender = Arc::clone(&sender);
+
+        async move {
+            // Collect the incoming body
+            let (parts, body) = req.into_parts();
+            let body_bytes = body.collect().await
+                .map_err(|e| GapError::network(e.to_string()))?
+                .to_bytes();
+            let req = hyper::Request::from_parts(parts, ());
+
+            // Convert to GAPRequest
+            let gap_req = hyper_to_gap_request(&req, body_bytes, &hostname);
+
+            // Apply plugin transforms (credential injection, etc.)
+            let gap_req = crate::proxy_transforms::transform_request(
+                gap_req, &hostname, store.as_ref(), &registry
+            ).await?;
+
+            // Convert back to hyper request
+            let hyper_req = gap_request_to_hyper(&gap_req)?;
+
+            // Forward to upstream
+            let mut sender = sender.lock().await;
+            let resp = sender.send_request(hyper_req).await
+                .map_err(|e| GapError::network(e.to_string()))?;
+
+            Ok::<_, GapError>(resp)
         }
+    });
 
-        buffer.extend_from_slice(&temp_buf[..n]);
-
-        // Check if we have a complete request
-        if buffer.windows(4).any(|w| w == b"\r\n\r\n") || buffer.windows(2).any(|w| w == b"\n\n") {
-            break;
-        }
-
-        // Safety: don't read forever
-        if buffer.len() > 1024 * 1024 {
-            return Err(GapError::protocol("HTTP request too large"));
-        }
-    }
-
-    // Transform the request
-    let transformed_bytes = parse_and_transform(&buffer, hostname, store, registry).await?;
-
-    // Forward transformed request to upstream
-    upstream.write_all(&transformed_bytes).await
-        .map_err(|e| GapError::network(format!("Failed to write to upstream: {}", e)))?;
-
-    debug!("Forwarded transformed request to upstream");
-
-    // Now do standard bidirectional proxying for the rest of the connection
-    let (mut agent_read, mut agent_write) = tokio::io::split(agent);
-    let (mut upstream_read, mut upstream_write) = tokio::io::split(upstream);
-
-    let agent_to_upstream = async {
-        tokio::io::copy(&mut agent_read, &mut upstream_write)
-            .await
-            .map_err(|e| GapError::network(format!("Agent to upstream copy failed: {}", e)))
-    };
-
-    let upstream_to_agent = async {
-        tokio::io::copy(&mut upstream_read, &mut agent_write)
-            .await
-            .map_err(|e| GapError::network(format!("Upstream to agent copy failed: {}", e)))
-    };
-
-    tokio::select! {
-        result = agent_to_upstream => {
-            debug!("Agent to upstream finished: {:?}", result);
-            result?;
-        }
-        result = upstream_to_agent => {
-            debug!("Upstream to agent finished: {:?}", result);
-            result?;
-        }
-    }
-
-    Ok(())
-}
-
-/// Proxy data bidirectionally between agent and upstream
-#[allow(dead_code)]
-async fn proxy_streams<A, U>(agent: A, upstream: U) -> Result<()>
-where
-    A: AsyncReadExt + AsyncWriteExt + Unpin,
-    U: AsyncReadExt + AsyncWriteExt + Unpin,
-{
-    let (mut agent_read, mut agent_write) = tokio::io::split(agent);
-    let (mut upstream_read, mut upstream_write) = tokio::io::split(upstream);
-
-    // Spawn two tasks for bidirectional copying
-    let agent_to_upstream = async {
-        tokio::io::copy(&mut agent_read, &mut upstream_write)
-            .await
-            .map_err(|e| GapError::network(format!("Agent to upstream copy failed: {}", e)))
-    };
-
-    let upstream_to_agent = async {
-        tokio::io::copy(&mut upstream_read, &mut agent_write)
-            .await
-            .map_err(|e| GapError::network(format!("Upstream to agent copy failed: {}", e)))
-    };
-
-    // Run both until either completes
-    tokio::select! {
-        result = agent_to_upstream => {
-            debug!("Agent to upstream finished: {:?}", result);
-            result?;
-        }
-        result = upstream_to_agent => {
-            debug!("Upstream to agent finished: {:?}", result);
-            result?;
-        }
-    }
+    server_http1::Builder::new()
+        .serve_connection(agent_io, service)
+        .await
+        .map_err(|e| GapError::network(e.to_string()))?;
 
     Ok(())
 }
@@ -544,7 +509,6 @@ where
 ///
 /// Used by the hyper-based proxy pipeline to convert incoming requests
 /// into the format expected by `transform_request()`.
-#[allow(dead_code)] // Will be used by proxy_via_hyper in Phase 1B
 fn hyper_to_gap_request<B>(
     req: &hyper::Request<B>,
     body_bytes: bytes::Bytes,
@@ -582,7 +546,6 @@ fn hyper_to_gap_request<B>(
 ///
 /// Used by the hyper-based proxy pipeline to convert transformed requests
 /// back into hyper format for forwarding upstream.
-#[allow(dead_code)] // Will be used by proxy_via_hyper in Phase 1B
 fn gap_request_to_hyper(
     req: &crate::types::GAPRequest,
 ) -> Result<hyper::Request<http_body_util::Full<bytes::Bytes>>> {
@@ -863,5 +826,122 @@ mod tests {
         assert_eq!(roundtripped.body, original.body);
         // Headers should be present (hyper lowercases header names)
         assert_eq!(roundtripped.get_header("content-type"), Some(&"text/plain".to_string()));
+    }
+
+    /// Test proxy_via_hyper: transforms requests through hyper HTTP pipeline.
+    ///
+    /// Sets up a mock "upstream" HTTP/1.1 server behind a DuplexStream,
+    /// and verifies that proxy_via_hyper correctly:
+    /// 1. Receives the HTTP request from the agent side
+    /// 2. Applies plugin transforms (credential injection)
+    /// 3. Forwards the transformed request upstream
+    /// 4. Returns the upstream response to the agent
+    #[tokio::test]
+    async fn test_proxy_via_hyper_transforms_and_forwards() {
+        use crate::registry::{PluginEntry, Registry};
+        use crate::storage::FileStore;
+        use http_body_util::{BodyExt, Full};
+        use hyper_util::rt::TokioIo;
+
+        // -- Setup store with plugin + credentials --
+        let temp_dir = tempfile::tempdir().expect("create temp dir");
+        let store = Arc::new(
+            FileStore::new(temp_dir.path().to_path_buf())
+                .await
+                .expect("create FileStore"),
+        ) as Arc<dyn SecretStore>;
+        let registry = Arc::new(Registry::new(Arc::clone(&store)));
+
+        // Plugin that injects Authorization header
+        let plugin_code = r#"
+        var plugin = {
+            name: "test-hyper",
+            matchPatterns: ["api.test.com"],
+            credentialSchema: ["api_key"],
+            transform: function(request, credentials) {
+                request.headers["Authorization"] = "Bearer " + credentials.api_key;
+                return request;
+            }
+        };
+        "#;
+        store.set("plugin:test-hyper", plugin_code.as_bytes()).await.unwrap();
+        let plugin_entry = PluginEntry {
+            name: "test-hyper".to_string(),
+            hosts: vec!["api.test.com".to_string()],
+            credential_schema: vec!["api_key".to_string()],
+            commit_sha: None,
+        };
+        registry.add_plugin(&plugin_entry).await.unwrap();
+        registry.set_credential("test-hyper", "api_key", "my-secret-key").await.unwrap();
+
+        // -- Create paired DuplexStreams --
+        // Agent side: agent_client writes HTTP requests, proxy reads them
+        let (agent_client, agent_proxy) = tokio::io::duplex(8192);
+        // Upstream side: proxy writes transformed requests, upstream_server reads them
+        let (upstream_proxy, upstream_server) = tokio::io::duplex(8192);
+
+        // -- Spawn a mock upstream HTTP server --
+        let upstream_handle = tokio::spawn(async move {
+            let io = TokioIo::new(upstream_server);
+            hyper::server::conn::http1::Builder::new()
+                .serve_connection(
+                    io,
+                    hyper::service::service_fn(|req: hyper::Request<hyper::body::Incoming>| async move {
+                        // Capture the Authorization header the proxy injected
+                        let auth = req.headers()
+                            .get("authorization")
+                            .map(|v| v.to_str().unwrap_or("").to_string())
+                            .unwrap_or_default();
+
+                        let body = format!("auth={}", auth);
+                        Ok::<_, std::convert::Infallible>(
+                            hyper::Response::new(Full::new(bytes::Bytes::from(body)))
+                        )
+                    }),
+                )
+                .await
+                .expect("upstream server error");
+        });
+
+        // -- Spawn proxy_via_hyper --
+        let proxy_store = Arc::clone(&store);
+        let proxy_registry = Arc::clone(&registry);
+        let proxy_handle = tokio::spawn(async move {
+            proxy_via_hyper(
+                agent_proxy,
+                upstream_proxy,
+                "api.test.com".to_string(),
+                proxy_store,
+                proxy_registry,
+            )
+            .await
+        });
+
+        // -- Agent sends a request through the proxy --
+        let agent_io = TokioIo::new(agent_client);
+        let (mut sender, conn) = hyper::client::conn::http1::handshake(agent_io).await
+            .expect("agent handshake");
+        tokio::spawn(async move { let _ = conn.await; });
+
+        let req = hyper::Request::builder()
+            .method("GET")
+            .uri("/data?q=test")
+            .header("Host", "api.test.com")
+            .body(Full::new(bytes::Bytes::new()))
+            .unwrap();
+
+        let resp = sender.send_request(req).await.expect("send request");
+        assert_eq!(resp.status(), 200);
+
+        let body_bytes = resp.into_body().collect().await.unwrap().to_bytes();
+        let body_str = String::from_utf8(body_bytes.to_vec()).unwrap();
+
+        // The upstream server should have received the injected Authorization header
+        assert_eq!(body_str, "auth=Bearer my-secret-key");
+
+        // Clean up
+        drop(sender);
+        let _ = proxy_handle.await;
+        let _ = upstream_handle.await;
     }
 }
