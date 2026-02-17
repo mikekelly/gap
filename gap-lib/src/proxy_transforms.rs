@@ -42,8 +42,8 @@ pub struct PluginInfo {
 
 /// Scrub credential values from post-transform request headers.
 ///
-/// Replaces literal credential values, their base64 encodings, and
-/// Basic auth headers containing credentials with `[REDACTED]`.
+/// Replaces literal credential values, their base64 encodings, hex encodings,
+/// and Basic auth headers containing credentials with `[REDACTED]`.
 /// Returns a JSON object string of the scrubbed headers.
 fn scrub_headers(request: &GAPRequest, credentials: &HashMap<String, String>) -> String {
     let mut headers: Vec<(String, String)> = request
@@ -71,7 +71,7 @@ fn scrub_headers(request: &GAPRequest, credentials: &HashMap<String, String>) ->
             }
         }
 
-        // 2. Base64-encoded value replacement (before literal, since literal may be substring)
+        // 2. Base64-encoded value replacement
         let b64_value = base64::engine::general_purpose::STANDARD.encode(cred_value);
         for header in &mut headers {
             if header.1.contains(&b64_value) {
@@ -79,7 +79,15 @@ fn scrub_headers(request: &GAPRequest, credentials: &HashMap<String, String>) ->
             }
         }
 
-        // 3. Literal value replacement
+        // 3. Hex-encoded value replacement (plugins have GAP.util.hex())
+        let hex_value = hex::encode(cred_value.as_bytes());
+        for header in &mut headers {
+            if header.1.contains(&hex_value) {
+                header.1 = header.1.replace(&hex_value, "[REDACTED]");
+            }
+        }
+
+        // 4. Literal value replacement
         for header in &mut headers {
             if header.1.contains(cred_value) {
                 header.1 = header.1.replace(cred_value, "[REDACTED]");
@@ -379,6 +387,24 @@ mod tests {
         // The base64-encoded value should be redacted
         assert!(!parsed["X-Custom-Auth"].as_str().unwrap().contains(&b64_secret));
         assert!(parsed["X-Custom-Auth"].as_str().unwrap().contains("[REDACTED]"));
+    }
+
+    #[test]
+    fn test_scrub_headers_hex_encoded_value() {
+        // Credential value appears as hex in a custom header (via GAP.util.hex())
+        let secret = "my-api-key";
+        let hex_secret = hex::encode(secret.as_bytes());
+        let request = GAPRequest::new("GET", "https://api.test.com/data")
+            .with_header("X-Hex-Auth", &hex_secret);
+
+        let mut credentials = HashMap::new();
+        credentials.insert("api_key".to_string(), secret.to_string());
+
+        let scrubbed = scrub_headers(&request, &credentials);
+        let parsed: serde_json::Value = serde_json::from_str(&scrubbed).unwrap();
+
+        assert!(!parsed["X-Hex-Auth"].as_str().unwrap().contains(&hex_secret));
+        assert_eq!(parsed["X-Hex-Auth"], "[REDACTED]");
     }
 
     #[test]
