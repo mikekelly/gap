@@ -274,6 +274,8 @@ fn uuid_v4() -> String {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ActivityEntry {
     pub timestamp: DateTime<Utc>,
+    /// Hex request correlation ID for tracing
+    pub request_id: Option<String>,
     pub method: String,
     pub url: String,
     pub agent_id: Option<String>,
@@ -286,6 +288,27 @@ pub struct ActivityEntry {
     pub source_hash: Option<String>,
     /// JSON string of post-transform request headers with credential values scrubbed
     pub request_headers: Option<String>,
+}
+
+/// Filter for querying activity logs
+#[derive(Debug, Default, Clone)]
+pub struct ActivityFilter {
+    /// Filter by URL domain (LIKE match)
+    pub domain: Option<String>,
+    /// Filter by URL path prefix (LIKE match)
+    pub path: Option<String>,
+    /// Filter by plugin name (exact match)
+    pub plugin: Option<String>,
+    /// Filter by agent ID (exact match)
+    pub agent: Option<String>,
+    /// Filter by HTTP method (exact match)
+    pub method: Option<String>,
+    /// Entries after this time
+    pub since: Option<DateTime<Utc>>,
+    /// Filter by request correlation ID (exact match)
+    pub request_id: Option<String>,
+    /// Max results (default 100)
+    pub limit: Option<u32>,
 }
 
 // --- Registry-origin types (migrated from registry.rs) ---

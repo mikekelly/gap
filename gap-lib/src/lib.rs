@@ -31,5 +31,5 @@ pub use database::GapDatabase;
 pub use tls::CertificateAuthority;
 pub use types::{
     GAPCredentials, GAPPlugin, GAPRequest, AgentToken, Config, ActivityEntry,
-    CredentialEntry, PluginEntry, TokenEntry, TokenMetadata,
+    ActivityFilter, CredentialEntry, PluginEntry, TokenEntry, TokenMetadata,
 };

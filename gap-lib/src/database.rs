@@ -33,6 +33,7 @@ CREATE TABLE IF NOT EXISTS credentials (
 CREATE TABLE IF NOT EXISTS access_logs (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     timestamp TEXT NOT NULL,
+    request_id TEXT,
     method TEXT NOT NULL,
     url TEXT NOT NULL,
     agent_id TEXT,
@@ -153,6 +154,7 @@ impl GapDatabase {
         let _ = self.conn.execute("ALTER TABLE access_logs ADD COLUMN plugin_sha TEXT", ()).await;
         let _ = self.conn.execute("ALTER TABLE access_logs ADD COLUMN source_hash TEXT", ()).await;
         let _ = self.conn.execute("ALTER TABLE access_logs ADD COLUMN request_headers TEXT", ()).await;
+        let _ = self.conn.execute("ALTER TABLE access_logs ADD COLUMN request_id TEXT", ()).await;
 
         // Migrate plugin_versions for append-only plugin storage
         let _ = self.conn.execute("ALTER TABLE plugin_versions ADD COLUMN hosts TEXT NOT NULL DEFAULT '[]'", ()).await;
@@ -597,9 +599,10 @@ impl GapDatabase {
     pub async fn log_activity(&self, entry: &ActivityEntry) -> Result<()> {
         self.conn
             .execute(
-                "INSERT INTO access_logs (timestamp, method, url, agent_id, status, plugin_name, plugin_sha, source_hash, request_headers) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                "INSERT INTO access_logs (timestamp, request_id, method, url, agent_id, status, plugin_name, plugin_sha, source_hash, request_headers) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
                 libsql::params![
                     entry.timestamp.to_rfc3339(),
+                    entry.request_id.as_deref().unwrap_or(""),
                     entry.method.as_str(),
                     entry.url.as_str(),
                     entry.agent_id.as_deref().unwrap_or(""),
@@ -617,92 +620,129 @@ impl GapDatabase {
 
     /// Get recent activity, ordered newest-first.
     pub async fn get_activity(&self, limit: Option<u32>) -> Result<Vec<ActivityEntry>> {
-        let query = match limit {
-            Some(n) => format!(
-                "SELECT timestamp, method, url, agent_id, status, plugin_name, plugin_sha, source_hash, request_headers FROM access_logs ORDER BY timestamp DESC LIMIT {}",
-                n
-            ),
-            None => "SELECT timestamp, method, url, agent_id, status, plugin_name, plugin_sha, source_hash, request_headers FROM access_logs ORDER BY timestamp DESC".to_string(),
+        let filter = crate::types::ActivityFilter {
+            limit: limit.or(Some(100)),
+            ..Default::default()
         };
-        let mut rows = self
-            .conn
-            .query(&query, ())
-            .await
-            .map_err(|e| GapError::database(e.to_string()))?;
-        self.rows_to_activity(&mut rows).await
+        self.query_activity(&filter).await
     }
 
     /// Get activity entries since a given timestamp, newest-first.
     pub async fn get_activity_since(&self, since: DateTime<Utc>) -> Result<Vec<ActivityEntry>> {
+        let filter = crate::types::ActivityFilter {
+            since: Some(since),
+            ..Default::default()
+        };
+        self.query_activity(&filter).await
+    }
+
+    /// Query activity logs with flexible filtering.
+    ///
+    /// All filter fields are optional. When not set, that filter is skipped.
+    /// Results are ordered by id DESC (newest first). Default limit is 100.
+    pub async fn query_activity(&self, filter: &crate::types::ActivityFilter) -> Result<Vec<ActivityEntry>> {
+        let select = "SELECT timestamp, request_id, method, url, agent_id, status, plugin_name, plugin_sha, source_hash, request_headers FROM access_logs";
+
+        let mut conditions: Vec<String> = Vec::new();
+        let mut params: Vec<libsql::Value> = Vec::new();
+        let mut idx = 1u32;
+
+        if let Some(ref domain) = filter.domain {
+            conditions.push(format!("url LIKE ?{}", idx));
+            params.push(libsql::Value::Text(format!("%://{}%", domain)));
+            idx += 1;
+        }
+        if let Some(ref path) = filter.path {
+            conditions.push(format!("url LIKE ?{}", idx));
+            params.push(libsql::Value::Text(format!("%{}%", path)));
+            idx += 1;
+        }
+        if let Some(ref plugin) = filter.plugin {
+            conditions.push(format!("plugin_name = ?{}", idx));
+            params.push(libsql::Value::Text(plugin.clone()));
+            idx += 1;
+        }
+        if let Some(ref agent) = filter.agent {
+            conditions.push(format!("agent_id = ?{}", idx));
+            params.push(libsql::Value::Text(agent.clone()));
+            idx += 1;
+        }
+        if let Some(ref method) = filter.method {
+            conditions.push(format!("method = ?{}", idx));
+            params.push(libsql::Value::Text(method.clone()));
+            idx += 1;
+        }
+        if let Some(ref since) = filter.since {
+            conditions.push(format!("timestamp >= ?{}", idx));
+            params.push(libsql::Value::Text(since.to_rfc3339()));
+            idx += 1;
+        }
+        if let Some(ref request_id) = filter.request_id {
+            conditions.push(format!("request_id = ?{}", idx));
+            params.push(libsql::Value::Text(request_id.clone()));
+            // idx += 1; // not needed, last param
+        }
+
+        let where_clause = if conditions.is_empty() {
+            String::new()
+        } else {
+            format!(" WHERE {}", conditions.join(" AND "))
+        };
+
+        let limit = filter.limit.unwrap_or(100);
+        let query = format!("{}{} ORDER BY id DESC LIMIT {}", select, where_clause, limit);
+
         let mut rows = self
             .conn
-            .query(
-                "SELECT timestamp, method, url, agent_id, status, plugin_name, plugin_sha, source_hash, request_headers FROM access_logs WHERE timestamp >= ?1 ORDER BY timestamp DESC",
-                libsql::params![since.to_rfc3339()],
-            )
+            .query(&query, params)
             .await
             .map_err(|e| GapError::database(e.to_string()))?;
         self.rows_to_activity(&mut rows).await
     }
 
     /// Helper: convert activity rows into `Vec<ActivityEntry>`.
+    ///
+    /// Columns expected: timestamp, request_id, method, url, agent_id, status,
+    ///                   plugin_name, plugin_sha, source_hash, request_headers
     async fn rows_to_activity(&self, rows: &mut libsql::Rows) -> Result<Vec<ActivityEntry>> {
         let mut result = Vec::new();
         while let Some(row) = rows.next().await.map_err(|e| GapError::database(e.to_string()))? {
             let ts_str: String = row.get(0).map_err(|e| GapError::database(e.to_string()))?;
-            let method: String = row.get(1).map_err(|e| GapError::database(e.to_string()))?;
-            let url: String = row.get(2).map_err(|e| GapError::database(e.to_string()))?;
+            let request_id_raw: String =
+                row.get(1).map_err(|e| GapError::database(e.to_string()))?;
+            let method: String = row.get(2).map_err(|e| GapError::database(e.to_string()))?;
+            let url: String = row.get(3).map_err(|e| GapError::database(e.to_string()))?;
             let agent_id_raw: String =
-                row.get(3).map_err(|e| GapError::database(e.to_string()))?;
-            let status_i64: i64 = row.get(4).map_err(|e| GapError::database(e.to_string()))?;
+                row.get(4).map_err(|e| GapError::database(e.to_string()))?;
+            let status_i64: i64 = row.get(5).map_err(|e| GapError::database(e.to_string()))?;
             let plugin_name_raw: String =
-                row.get(5).map_err(|e| GapError::database(e.to_string()))?;
-            let plugin_sha_raw: String =
                 row.get(6).map_err(|e| GapError::database(e.to_string()))?;
-            let source_hash_raw: String =
+            let plugin_sha_raw: String =
                 row.get(7).map_err(|e| GapError::database(e.to_string()))?;
-            let request_headers_raw: String =
+            let source_hash_raw: String =
                 row.get(8).map_err(|e| GapError::database(e.to_string()))?;
+            let request_headers_raw: String =
+                row.get(9).map_err(|e| GapError::database(e.to_string()))?;
 
             let timestamp = DateTime::parse_from_rfc3339(&ts_str)
                 .map_err(|e| GapError::database(format!("Invalid timestamp: {}", e)))?
                 .with_timezone(&Utc);
-            let agent_id = if agent_id_raw.is_empty() {
-                None
-            } else {
-                Some(agent_id_raw)
-            };
-            let plugin_name = if plugin_name_raw.is_empty() {
-                None
-            } else {
-                Some(plugin_name_raw)
-            };
-            let plugin_sha = if plugin_sha_raw.is_empty() {
-                None
-            } else {
-                Some(plugin_sha_raw)
-            };
-            let source_hash = if source_hash_raw.is_empty() {
-                None
-            } else {
-                Some(source_hash_raw)
-            };
-            let request_headers = if request_headers_raw.is_empty() {
-                None
-            } else {
-                Some(request_headers_raw)
-            };
+
+            fn empty_to_none(s: String) -> Option<String> {
+                if s.is_empty() { None } else { Some(s) }
+            }
 
             result.push(ActivityEntry {
                 timestamp,
+                request_id: empty_to_none(request_id_raw),
                 method,
                 url,
-                agent_id,
+                agent_id: empty_to_none(agent_id_raw),
                 status: status_i64 as u16,
-                plugin_name,
-                plugin_sha,
-                source_hash,
-                request_headers,
+                plugin_name: empty_to_none(plugin_name_raw),
+                plugin_sha: empty_to_none(plugin_sha_raw),
+                source_hash: empty_to_none(source_hash_raw),
+                request_headers: empty_to_none(request_headers_raw),
             });
         }
         Ok(result)
@@ -999,6 +1039,7 @@ mod tests {
 
         let entry = ActivityEntry {
             timestamp: Utc::now(),
+            request_id: None,
             method: "GET".to_string(),
             url: "https://api.example.com/users".to_string(),
             agent_id: Some("agent-1".to_string()),
@@ -1025,6 +1066,7 @@ mod tests {
         for i in 0..5 {
             let entry = ActivityEntry {
                 timestamp: Utc::now() + Duration::seconds(i),
+                request_id: None,
                 method: "GET".to_string(),
                 url: format!("https://api.example.com/{}", i),
                 agent_id: None,
@@ -1054,6 +1096,7 @@ mod tests {
         // Old entry
         db.log_activity(&ActivityEntry {
             timestamp: past,
+            request_id: None,
             method: "GET".to_string(),
             url: "https://old.example.com".to_string(),
             agent_id: None,
@@ -1069,6 +1112,7 @@ mod tests {
         // Recent entry
         db.log_activity(&ActivityEntry {
             timestamp: now,
+            request_id: None,
             method: "POST".to_string(),
             url: "https://new.example.com".to_string(),
             agent_id: Some("agent-2".to_string()),
@@ -1092,6 +1136,7 @@ mod tests {
 
         let entry = ActivityEntry {
             timestamp: Utc::now(),
+            request_id: None,
             method: "DELETE".to_string(),
             url: "https://api.example.com/resource".to_string(),
             agent_id: None,
@@ -1114,6 +1159,7 @@ mod tests {
 
         let entry = ActivityEntry {
             timestamp: Utc::now(),
+            request_id: None,
             method: "GET".to_string(),
             url: "https://api.example.com/data".to_string(),
             agent_id: Some("agent-1".to_string()),
@@ -1137,6 +1183,7 @@ mod tests {
 
         let entry = ActivityEntry {
             timestamp: Utc::now(),
+            request_id: None,
             method: "GET".to_string(),
             url: "https://api.example.com/data".to_string(),
             agent_id: None,
@@ -1160,6 +1207,7 @@ mod tests {
 
         let entry = ActivityEntry {
             timestamp: Utc::now(),
+            request_id: None,
             method: "GET".to_string(),
             url: "https://api.example.com/data".to_string(),
             agent_id: Some("agent-1".to_string()),
@@ -1183,6 +1231,7 @@ mod tests {
         let headers_json = r#"{"Authorization":"Bearer [REDACTED]","Host":"api.example.com"}"#;
         let entry = ActivityEntry {
             timestamp: Utc::now(),
+            request_id: None,
             method: "GET".to_string(),
             url: "https://api.example.com/data".to_string(),
             agent_id: Some("agent-1".to_string()),
@@ -1208,6 +1257,7 @@ mod tests {
 
         let entry = ActivityEntry {
             timestamp: Utc::now(),
+            request_id: None,
             method: "GET".to_string(),
             url: "https://api.example.com/data".to_string(),
             agent_id: None,
@@ -1222,6 +1272,266 @@ mod tests {
         let logs = db.get_activity(None).await.unwrap();
         assert_eq!(logs.len(), 1);
         assert_eq!(logs[0].request_headers, None);
+    }
+
+    // ── Filtered Activity Queries ──────────────────────────────────
+
+    /// Helper: seed diverse activity entries for query_activity tests
+    async fn seed_activity(db: &GapDatabase) {
+        let entries = vec![
+            ActivityEntry {
+                timestamp: Utc::now() - Duration::seconds(5),
+                request_id: Some("aaa0000000000001".to_string()),
+                method: "GET".to_string(),
+                url: "https://api.example.com/users".to_string(),
+                agent_id: Some("agent-1".to_string()),
+                status: 200,
+                plugin_name: Some("exa".to_string()),
+                plugin_sha: None,
+                source_hash: None,
+                request_headers: None,
+            },
+            ActivityEntry {
+                timestamp: Utc::now() - Duration::seconds(4),
+                request_id: Some("aaa0000000000002".to_string()),
+                method: "POST".to_string(),
+                url: "https://api.example.com/data".to_string(),
+                agent_id: Some("agent-1".to_string()),
+                status: 201,
+                plugin_name: Some("exa".to_string()),
+                plugin_sha: None,
+                source_hash: None,
+                request_headers: None,
+            },
+            ActivityEntry {
+                timestamp: Utc::now() - Duration::seconds(3),
+                request_id: Some("bbb0000000000003".to_string()),
+                method: "GET".to_string(),
+                url: "https://other.service.io/health".to_string(),
+                agent_id: Some("agent-2".to_string()),
+                status: 200,
+                plugin_name: Some("github".to_string()),
+                plugin_sha: None,
+                source_hash: None,
+                request_headers: None,
+            },
+            ActivityEntry {
+                timestamp: Utc::now() - Duration::seconds(2),
+                request_id: Some("ccc0000000000004".to_string()),
+                method: "DELETE".to_string(),
+                url: "https://api.example.com/items/42".to_string(),
+                agent_id: Some("agent-2".to_string()),
+                status: 204,
+                plugin_name: None,
+                plugin_sha: None,
+                source_hash: None,
+                request_headers: None,
+            },
+        ];
+        for entry in &entries {
+            db.log_activity(entry).await.unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn test_query_activity_empty_filter_returns_all() {
+        let db = GapDatabase::in_memory().await.unwrap();
+        seed_activity(&db).await;
+
+        let filter = crate::types::ActivityFilter::default();
+        let results = db.query_activity(&filter).await.unwrap();
+        assert_eq!(results.len(), 4);
+        // Newest first (ORDER BY id DESC)
+        assert_eq!(results[0].method, "DELETE");
+    }
+
+    #[tokio::test]
+    async fn test_query_activity_filter_by_domain() {
+        let db = GapDatabase::in_memory().await.unwrap();
+        seed_activity(&db).await;
+
+        let filter = crate::types::ActivityFilter {
+            domain: Some("api.example.com".to_string()),
+            ..Default::default()
+        };
+        let results = db.query_activity(&filter).await.unwrap();
+        assert_eq!(results.len(), 3); // 3 entries with api.example.com
+    }
+
+    #[tokio::test]
+    async fn test_query_activity_filter_by_plugin() {
+        let db = GapDatabase::in_memory().await.unwrap();
+        seed_activity(&db).await;
+
+        let filter = crate::types::ActivityFilter {
+            plugin: Some("exa".to_string()),
+            ..Default::default()
+        };
+        let results = db.query_activity(&filter).await.unwrap();
+        assert_eq!(results.len(), 2); // 2 entries with plugin "exa"
+    }
+
+    #[tokio::test]
+    async fn test_query_activity_filter_by_method() {
+        let db = GapDatabase::in_memory().await.unwrap();
+        seed_activity(&db).await;
+
+        let filter = crate::types::ActivityFilter {
+            method: Some("GET".to_string()),
+            ..Default::default()
+        };
+        let results = db.query_activity(&filter).await.unwrap();
+        assert_eq!(results.len(), 2); // 2 GET requests
+    }
+
+    #[tokio::test]
+    async fn test_query_activity_filter_by_agent() {
+        let db = GapDatabase::in_memory().await.unwrap();
+        seed_activity(&db).await;
+
+        let filter = crate::types::ActivityFilter {
+            agent: Some("agent-2".to_string()),
+            ..Default::default()
+        };
+        let results = db.query_activity(&filter).await.unwrap();
+        assert_eq!(results.len(), 2); // 2 entries from agent-2
+    }
+
+    #[tokio::test]
+    async fn test_query_activity_filter_by_request_id() {
+        let db = GapDatabase::in_memory().await.unwrap();
+        seed_activity(&db).await;
+
+        let filter = crate::types::ActivityFilter {
+            request_id: Some("bbb0000000000003".to_string()),
+            ..Default::default()
+        };
+        let results = db.query_activity(&filter).await.unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].url, "https://other.service.io/health");
+    }
+
+    #[tokio::test]
+    async fn test_query_activity_filter_by_path() {
+        let db = GapDatabase::in_memory().await.unwrap();
+        seed_activity(&db).await;
+
+        let filter = crate::types::ActivityFilter {
+            path: Some("/users".to_string()),
+            ..Default::default()
+        };
+        let results = db.query_activity(&filter).await.unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].url, "https://api.example.com/users");
+    }
+
+    #[tokio::test]
+    async fn test_query_activity_combined_filters() {
+        let db = GapDatabase::in_memory().await.unwrap();
+        seed_activity(&db).await;
+
+        // Filter by domain + method — should match only GET on api.example.com
+        let filter = crate::types::ActivityFilter {
+            domain: Some("api.example.com".to_string()),
+            method: Some("GET".to_string()),
+            ..Default::default()
+        };
+        let results = db.query_activity(&filter).await.unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].url, "https://api.example.com/users");
+    }
+
+    #[tokio::test]
+    async fn test_query_activity_with_limit() {
+        let db = GapDatabase::in_memory().await.unwrap();
+        seed_activity(&db).await;
+
+        let filter = crate::types::ActivityFilter {
+            limit: Some(2),
+            ..Default::default()
+        };
+        let results = db.query_activity(&filter).await.unwrap();
+        assert_eq!(results.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn test_query_activity_filter_by_since() {
+        let db = GapDatabase::in_memory().await.unwrap();
+
+        let past = Utc::now() - Duration::hours(2);
+        let recent = Utc::now() - Duration::minutes(5);
+
+        // Old entry
+        db.log_activity(&ActivityEntry {
+            timestamp: past,
+            request_id: None,
+            method: "GET".to_string(),
+            url: "https://old.example.com".to_string(),
+            agent_id: None,
+            status: 200,
+            plugin_name: None,
+            plugin_sha: None,
+            source_hash: None,
+            request_headers: None,
+        }).await.unwrap();
+
+        // Recent entry
+        db.log_activity(&ActivityEntry {
+            timestamp: Utc::now(),
+            request_id: None,
+            method: "POST".to_string(),
+            url: "https://new.example.com".to_string(),
+            agent_id: None,
+            status: 201,
+            plugin_name: None,
+            plugin_sha: None,
+            source_hash: None,
+            request_headers: None,
+        }).await.unwrap();
+
+        let filter = crate::types::ActivityFilter {
+            since: Some(recent),
+            ..Default::default()
+        };
+        let results = db.query_activity(&filter).await.unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].method, "POST");
+    }
+
+    #[tokio::test]
+    async fn test_query_activity_request_id_stored_and_retrieved() {
+        let db = GapDatabase::in_memory().await.unwrap();
+
+        let entry = ActivityEntry {
+            timestamp: Utc::now(),
+            request_id: Some("deadbeef12345678".to_string()),
+            method: "GET".to_string(),
+            url: "https://api.example.com/test".to_string(),
+            agent_id: Some("agent-1".to_string()),
+            status: 200,
+            plugin_name: None,
+            plugin_sha: None,
+            source_hash: None,
+            request_headers: None,
+        };
+        db.log_activity(&entry).await.unwrap();
+
+        let logs = db.get_activity(None).await.unwrap();
+        assert_eq!(logs.len(), 1);
+        assert_eq!(logs[0].request_id, Some("deadbeef12345678".to_string()));
+    }
+
+    #[tokio::test]
+    async fn test_query_activity_no_match_returns_empty() {
+        let db = GapDatabase::in_memory().await.unwrap();
+        seed_activity(&db).await;
+
+        let filter = crate::types::ActivityFilter {
+            plugin: Some("nonexistent".to_string()),
+            ..Default::default()
+        };
+        let results = db.query_activity(&filter).await.unwrap();
+        assert_eq!(results.len(), 0);
     }
 
     // ── Plugin Version History ──────────────────────────────────────
