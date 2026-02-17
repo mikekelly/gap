@@ -46,7 +46,8 @@ All persistent data (tokens, plugins, credentials, config, activity) is stored i
 - `GapDatabase::in_memory()` for tests
 - `GapDatabase::open(path, key)` for encrypted production (macOS default, or via GAP_ENCRYPTION_KEY)
 - `GapDatabase::open_unencrypted(path)` for dev/testing (--data-dir or GAP_DATA_DIR)
-- Key provider selection: GAP_ENCRYPTION_KEY env > explicit data dir (unencrypted) > macOS keychain > unencrypted
+- Key provider selection: GAP_ENCRYPTION_KEY env > GAP_DISABLE_ENCRYPTION=1 (unencrypted, dev only) > macOS keychain > error
+- Data directory (--data-dir / GAP_DATA_DIR) affects only the DB file path, never encryption mode
 - Data types (`TokenEntry`, `PluginEntry`, `CredentialEntry`, `TokenMetadata`) live in `types.rs`
 
 ## Detailed Reference Documentation

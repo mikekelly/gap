@@ -197,11 +197,8 @@ async fn main() -> anyhow::Result<()> {
     }
 
     // Build configuration
-    // Track whether data dir was explicitly set (CLI arg or env var) to determine
-    // encryption mode: explicit data dir = dev/testing = unencrypted.
     let explicit_data_dir = args.data_dir.clone()
         .or_else(|| std::env::var("GAP_DATA_DIR").ok());
-    let data_dir_explicitly_set = explicit_data_dir.is_some();
 
     let config = Config::new()
         .with_proxy_port(args.proxy_port)
@@ -236,29 +233,31 @@ async fn main() -> anyhow::Result<()> {
 
     // Key provider selection precedence:
     // 1. GAP_ENCRYPTION_KEY env var -> EnvKeyProvider -> encrypted DB
-    // 2. GAP_DATA_DIR env var or --data-dir CLI arg -> unencrypted DB (dev/testing)
+    // 2. GAP_DISABLE_ENCRYPTION=1 -> unencrypted DB (dev/testing only)
     // 3. macOS (default) -> KeychainKeyProvider -> encrypted DB
-    // 4. Other platforms -> unencrypted DB
-    let db = if std::env::var("GAP_ENCRYPTION_KEY").is_ok() {
-        let provider = gap_lib::EnvKeyProvider;
-        let key = provider.get_key().await?;
-        tracing::info!("Using encryption key from GAP_ENCRYPTION_KEY");
-        Arc::new(GapDatabase::open(db_path_str, &key).await?)
-    } else if data_dir_explicitly_set {
-        tracing::info!("Data dir explicitly set; using unencrypted database");
-        Arc::new(GapDatabase::open_unencrypted(db_path_str).await?)
-    } else {
+    // 4. None of the above -> error (no encryption key available)
+    //
+    // NOTE: --data-dir / GAP_DATA_DIR control DB file path only, not encryption.
+    let db = match select_db_mode() {
+        DbMode::EnvKey => {
+            let provider = gap_lib::EnvKeyProvider;
+            let key = provider.get_key().await?;
+            tracing::info!("Using encryption key from GAP_ENCRYPTION_KEY");
+            Arc::new(GapDatabase::open(db_path_str, &key).await?)
+        }
+        DbMode::Unencrypted => {
+            tracing::warn!("Database encryption disabled");
+            Arc::new(GapDatabase::open_unencrypted(db_path_str).await?)
+        }
         #[cfg(target_os = "macos")]
-        {
+        DbMode::Keychain => {
             let provider = gap_lib::key_provider::KeychainKeyProvider;
             let key = provider.get_key().await?;
             tracing::info!("Using encryption key from macOS keychain");
             Arc::new(GapDatabase::open(db_path_str, &key).await?)
         }
-        #[cfg(not(target_os = "macos"))]
-        {
-            tracing::info!("Non-macOS platform; using unencrypted database");
-            Arc::new(GapDatabase::open_unencrypted(db_path_str).await?)
+        DbMode::Error => {
+            anyhow::bail!("No encryption key available. Set GAP_ENCRYPTION_KEY to provide one.");
         }
     };
     tracing::info!("Database opened at {}", db_path.display());
@@ -335,6 +334,44 @@ async fn main() -> anyhow::Result<()> {
         .await?;
 
     Ok(())
+}
+
+/// Describes which database mode to use based on environment.
+#[derive(Debug, PartialEq)]
+enum DbMode {
+    /// Use the key from GAP_ENCRYPTION_KEY env var.
+    EnvKey,
+    /// Explicitly unencrypted (GAP_DISABLE_ENCRYPTION=1). For dev/testing only.
+    Unencrypted,
+    /// Use macOS keychain (macOS default when no other option is set).
+    #[cfg(target_os = "macos")]
+    Keychain,
+    /// No key available — should return an error.
+    Error,
+}
+
+/// Determine which database mode to use based on environment variables.
+///
+/// Precedence:
+/// 1. GAP_ENCRYPTION_KEY → encrypted via env key
+/// 2. GAP_DISABLE_ENCRYPTION=1 → unencrypted (dev/testing only)
+/// 3. macOS default → encrypted via keychain
+/// 4. None of the above → error
+///
+/// The data directory (--data-dir / GAP_DATA_DIR) has no effect on encryption.
+fn select_db_mode() -> DbMode {
+    if std::env::var("GAP_ENCRYPTION_KEY").is_ok() {
+        return DbMode::EnvKey;
+    }
+    if std::env::var("GAP_DISABLE_ENCRYPTION").as_deref() == Ok("1") {
+        return DbMode::Unencrypted;
+    }
+    #[cfg(target_os = "macos")]
+    {
+        return DbMode::Keychain;
+    }
+    #[allow(unreachable_code)]
+    DbMode::Error
 }
 
 /// Load CA from database or generate a new one
@@ -419,6 +456,87 @@ async fn load_or_generate_mgmt_cert(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // Tests for select_db_mode — these manipulate env vars so they must run
+    // serially. Use std::sync::Mutex to serialise them within the test binary.
+    fn with_clean_env<F: FnOnce() -> R, R>(vars_to_clear: &[&str], f: F) -> R {
+        // Save and clear the specified env vars, run f, then restore.
+        let saved: Vec<_> = vars_to_clear
+            .iter()
+            .map(|k| (*k, std::env::var(k).ok()))
+            .collect();
+        for (k, _) in &saved {
+            std::env::remove_var(k);
+        }
+        let result = f();
+        for (k, v) in saved {
+            match v {
+                Some(val) => std::env::set_var(k, val),
+                None => std::env::remove_var(k),
+            }
+        }
+        result
+    }
+
+    #[test]
+    fn test_select_db_mode_env_key_takes_priority() {
+        // GAP_ENCRYPTION_KEY set → EnvKey, even if GAP_DISABLE_ENCRYPTION also set
+        with_clean_env(&["GAP_ENCRYPTION_KEY", "GAP_DISABLE_ENCRYPTION"], || {
+            std::env::set_var("GAP_ENCRYPTION_KEY", "somekey");
+            std::env::set_var("GAP_DISABLE_ENCRYPTION", "1");
+            assert_eq!(select_db_mode(), DbMode::EnvKey);
+        });
+    }
+
+    #[test]
+    fn test_select_db_mode_disable_encryption() {
+        // GAP_DISABLE_ENCRYPTION=1 (no GAP_ENCRYPTION_KEY) → Unencrypted
+        with_clean_env(&["GAP_ENCRYPTION_KEY", "GAP_DISABLE_ENCRYPTION"], || {
+            std::env::set_var("GAP_DISABLE_ENCRYPTION", "1");
+            assert_eq!(select_db_mode(), DbMode::Unencrypted);
+        });
+    }
+
+    #[test]
+    fn test_select_db_mode_disable_encryption_requires_value_one() {
+        // GAP_DISABLE_ENCRYPTION set to something other than "1" is NOT recognised
+        with_clean_env(&["GAP_ENCRYPTION_KEY", "GAP_DISABLE_ENCRYPTION"], || {
+            std::env::set_var("GAP_DISABLE_ENCRYPTION", "true");
+            // On macOS default is Keychain; on other platforms Error
+            let mode = select_db_mode();
+            assert_ne!(mode, DbMode::Unencrypted);
+        });
+    }
+
+    #[test]
+    fn test_select_db_mode_data_dir_does_not_affect_encryption() {
+        // Setting GAP_DATA_DIR must NOT change the encryption selection.
+        // On macOS this will be Keychain; on other platforms Error.
+        // In both cases it must NOT be Unencrypted.
+        with_clean_env(&["GAP_ENCRYPTION_KEY", "GAP_DISABLE_ENCRYPTION", "GAP_DATA_DIR"], || {
+            std::env::set_var("GAP_DATA_DIR", "/tmp/some/dir");
+            let mode = select_db_mode();
+            assert_ne!(mode, DbMode::Unencrypted);
+        });
+    }
+
+    #[test]
+    #[cfg(not(target_os = "macos"))]
+    fn test_select_db_mode_no_vars_returns_error_on_non_macos() {
+        // On non-macOS with no env vars set → Error
+        with_clean_env(&["GAP_ENCRYPTION_KEY", "GAP_DISABLE_ENCRYPTION"], || {
+            assert_eq!(select_db_mode(), DbMode::Error);
+        });
+    }
+
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn test_select_db_mode_no_vars_returns_keychain_on_macos() {
+        // On macOS with no env vars set → Keychain
+        with_clean_env(&["GAP_ENCRYPTION_KEY", "GAP_DISABLE_ENCRYPTION"], || {
+            assert_eq!(select_db_mode(), DbMode::Keychain);
+        });
+    }
 
     #[test]
     fn test_args_parsing() {
