@@ -669,6 +669,322 @@ async fn test_e2e_wrong_proxy_ca_rejected() {
     );
 }
 
+// ── H2 helpers ───────────────────────────────────────────────────────────────
+
+/// Spawn an echo HTTPS server that supports both HTTP/2 and HTTP/1.1 via ALPN.
+///
+/// Uses hyper's auto connection builder to handle both protocols.
+/// Returns the port the server is listening on.
+async fn spawn_echo_server_h2(server_ca: &CertificateAuthority) -> u16 {
+    use bytes::Bytes;
+    use http_body_util::Full;
+    use hyper::service::service_fn;
+    use hyper_util::rt::{TokioExecutor, TokioIo};
+    use hyper_util::server::conn::auto;
+    use rustls::pki_types::CertificateDer;
+    use tokio::net::TcpListener;
+    use tokio_rustls::TlsAcceptor;
+
+    let echo_port = portpicker::pick_unused_port().expect("pick echo port");
+
+    // Sign cert with test server CA
+    let (cert_der, key_der) = server_ca
+        .sign_for_hostname("localhost", None)
+        .expect("sign server cert for localhost");
+    let certs = vec![
+        CertificateDer::from(cert_der),
+        CertificateDer::from(server_ca.ca_cert_der()),
+    ];
+    let key_der =
+        rustls::pki_types::PrivateKeyDer::try_from(key_der).expect("parse echo server key");
+
+    let mut server_config = rustls::ServerConfig::builder()
+        .with_no_client_auth()
+        .with_single_cert(certs, key_der)
+        .expect("build echo server TLS config");
+    server_config.alpn_protocols = vec![b"h2".to_vec(), b"http/1.1".to_vec()];
+
+    let acceptor = TlsAcceptor::from(Arc::new(server_config));
+    let listener = TcpListener::bind(format!("127.0.0.1:{}", echo_port))
+        .await
+        .expect("bind echo server");
+
+    tokio::spawn(async move {
+        loop {
+            let (tcp, _) = match listener.accept().await {
+                Ok(s) => s,
+                Err(_) => break,
+            };
+            let acceptor = acceptor.clone();
+            tokio::spawn(async move {
+                let tls = match acceptor.accept(tcp).await {
+                    Ok(s) => s,
+                    Err(_) => return,
+                };
+                let io = TokioIo::new(tls);
+                let service =
+                    service_fn(|req: hyper::Request<hyper::body::Incoming>| async move {
+                        let method = req.method().to_string();
+                        let url = req.uri().to_string();
+                        let mut headers_json = String::from("{");
+                        let mut first = true;
+                        for (name, value) in req.headers() {
+                            if !first {
+                                headers_json.push(',');
+                            }
+                            first = false;
+                            headers_json.push_str(&format!(
+                                "\"{}\":\"{}\"",
+                                name.as_str(),
+                                value.to_str().unwrap_or("")
+                            ));
+                        }
+                        headers_json.push('}');
+                        let body = format!(
+                            "{{\"method\":\"{}\",\"url\":\"{}\",\"headers\":{},\"body\":\"\"}}",
+                            method, url, headers_json
+                        );
+                        Ok::<_, hyper::Error>(
+                            hyper::Response::builder()
+                                .status(200)
+                                .header("content-type", "application/json")
+                                .body(Full::new(Bytes::from(body)))
+                                .unwrap(),
+                        )
+                    });
+                let _ = auto::Builder::new(TokioExecutor::new())
+                    .serve_connection(io, service)
+                    .await;
+            });
+        }
+    });
+
+    echo_port
+}
+
+// ── H2 Tests ─────────────────────────────────────────────────────────────────
+
+/// End-to-end test for the proxy pipeline over HTTP/2.
+///
+/// Same as `test_full_e2e_proxy_pipeline` but the inner connection (after
+/// the CONNECT tunnel) uses HTTP/2 instead of HTTP/1.1:
+///
+///   Client --TLS(proxy CA, H1)--> Proxy (CONNECT) --TLS(proxy CA, H2)--> [proxy] --TLS(server CA, H2)--> Echo HTTPS Server
+///
+/// The CONNECT tunnel itself is always HTTP/1.1. H2 is negotiated via ALPN
+/// on the inner TLS handshake, and the proxy mirrors that on the upstream side.
+#[tokio::test]
+async fn test_e2e_h2_proxy_pipeline() {
+    use bytes::Bytes;
+    use http_body_util::{BodyExt, Full};
+    use hyper::client::conn::http2;
+    use hyper_util::rt::{TokioExecutor, TokioIo};
+
+    // Install default crypto provider for rustls
+    let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+
+    // --- Two CAs ---
+    let proxy_ca = CertificateAuthority::generate().expect("generate proxy CA");
+    let proxy_ca_cert_pem = proxy_ca.ca_cert_pem();
+
+    let server_ca = load_test_server_ca();
+    let server_ca_cert_pem = server_ca.ca_cert_pem();
+
+    // --- Spawn H2-capable echo HTTPS server (cert signed by test server CA) ---
+    let echo_port = spawn_echo_server_h2(&server_ca).await;
+
+    // --- Set up FileStore and Registry ---
+    let temp_dir = tempfile::tempdir().expect("create temp dir");
+    let store = Arc::new(
+        FileStore::new(temp_dir.path().to_path_buf())
+            .await
+            .expect("create FileStore"),
+    ) as Arc<dyn SecretStore>;
+    let registry = Arc::new(Registry::new(Arc::clone(&store)));
+
+    // --- Store plugin code ---
+    store
+        .set("plugin:test-server-gap", PLUGIN_CODE.as_bytes())
+        .await
+        .expect("store plugin code");
+
+    let plugin_entry = PluginEntry {
+        name: "test-server-gap".to_string(),
+        hosts: vec!["localhost".to_string()],
+        credential_schema: vec![
+            "test_credential_one".to_string(),
+            "test_credential_two".to_string(),
+        ],
+        commit_sha: None,
+    };
+    registry
+        .add_plugin(&plugin_entry)
+        .await
+        .expect("register plugin");
+
+    // --- Store credentials ---
+    registry
+        .set_credential("test-server-gap", "test_credential_one", "super-secret-42")
+        .await
+        .expect("set credential one");
+    registry
+        .set_credential("test-server-gap", "test_credential_two", "another-secret-99")
+        .await
+        .expect("set credential two");
+
+    // --- Store agent token ---
+    let token = AgentToken::new("e2e-h2-test-agent");
+    let token_value = token.token.clone();
+    let token_json = serde_json::to_vec(&token).expect("serialize token");
+    store
+        .set(&format!("token:{}", token.token), &token_json)
+        .await
+        .expect("store token");
+    let token_entry = TokenEntry {
+        token_value: token.token.clone(),
+        name: token.name.clone(),
+        created_at: token.created_at,
+    };
+    registry
+        .add_token(&token_entry)
+        .await
+        .expect("register token");
+
+    // --- Build upstream root certs that trust ONLY the test server CA ---
+    let upstream_root_certs = create_root_cert_store(&server_ca_cert_pem);
+
+    // --- Create proxy using the proxy CA ---
+    let proxy_port = portpicker::pick_unused_port().expect("pick proxy port");
+    let proxy = ProxyServer::new_with_upstream_tls(
+        proxy_port,
+        proxy_ca,
+        Arc::clone(&store),
+        Arc::clone(&registry),
+        upstream_root_certs,
+    )
+    .expect("create proxy");
+
+    std::mem::forget(temp_dir);
+
+    tokio::spawn(async move {
+        let _ = proxy.start().await;
+    });
+
+    tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+
+    // === Client connection flow ===
+
+    // Step 1: TCP connect to proxy
+    let tcp_stream = TcpStream::connect(format!("127.0.0.1:{}", proxy_port))
+        .await
+        .expect("TCP connect to proxy");
+
+    // Step 2: TLS handshake with proxy — client trusts ONLY the proxy CA
+    // No ALPN here — the outer connection to the proxy is always HTTP/1.1
+    let proxy_connector = create_tls_connector(&proxy_ca_cert_pem);
+    let server_name = ServerName::try_from("localhost").expect("localhost server name");
+    let mut proxy_tls = proxy_connector
+        .connect(server_name, tcp_stream)
+        .await
+        .expect("TLS handshake with proxy");
+
+    // Step 3: Send CONNECT to proxy (always HTTP/1.1)
+    let connect_request = format!(
+        "CONNECT localhost:{} HTTP/1.1\r\nHost: localhost:{}\r\nProxy-Authorization: Bearer {}\r\n\r\n",
+        echo_port, echo_port, token_value
+    );
+    proxy_tls
+        .write_all(connect_request.as_bytes())
+        .await
+        .expect("send CONNECT request");
+    proxy_tls.flush().await.expect("flush CONNECT");
+
+    // Step 4: Read "200 Connection Established"
+    let mut connect_response = vec![0u8; 1024];
+    let n = proxy_tls
+        .read(&mut connect_response)
+        .await
+        .expect("read CONNECT response");
+    let connect_response_str = String::from_utf8_lossy(&connect_response[..n]);
+    assert!(
+        connect_response_str.contains("200"),
+        "Expected 200 Connection Established, got: {}",
+        connect_response_str
+    );
+
+    // Step 5: Inner TLS handshake over the tunnel — request H2 via ALPN.
+    // The proxy detects `h2` ALPN and uses H2 on the upstream side too.
+    let inner_root_store = create_root_cert_store(&proxy_ca_cert_pem);
+    let mut inner_config = rustls::ClientConfig::builder()
+        .with_root_certificates((*inner_root_store).clone())
+        .with_no_client_auth();
+    inner_config.alpn_protocols = vec![b"h2".to_vec()];
+    let inner_connector = TlsConnector::from(Arc::new(inner_config));
+
+    let inner_server_name =
+        ServerName::try_from("localhost").expect("localhost server name for inner TLS");
+    let inner_tls = inner_connector
+        .connect(inner_server_name, proxy_tls)
+        .await
+        .expect("inner TLS handshake (H2 ALPN) with proxy tunnel");
+
+    // Step 6: H2 handshake and request via hyper
+    let io = TokioIo::new(inner_tls);
+    let (mut sender, conn) = http2::handshake(TokioExecutor::new(), io)
+        .await
+        .expect("H2 handshake");
+    tokio::spawn(async move {
+        let _ = conn.await;
+    });
+
+    let req = hyper::Request::builder()
+        .method("GET")
+        .uri(format!("https://localhost:{}/test", echo_port))
+        .body(Full::new(Bytes::new()))
+        .expect("build H2 request");
+
+    let resp = sender.send_request(req).await.expect("send H2 request");
+    let body_bytes = resp
+        .into_body()
+        .collect()
+        .await
+        .expect("collect H2 response body")
+        .to_bytes();
+    let body_str = String::from_utf8_lossy(&body_bytes);
+    let json: serde_json::Value =
+        serde_json::from_str(&body_str).expect("parse echo response JSON body");
+
+    // === Assertions — same as test_full_e2e_proxy_pipeline ===
+
+    let cred_one = json["headers"]["x-test-credential-one"]
+        .as_str()
+        .unwrap_or("");
+    assert_eq!(
+        cred_one, "super-secret-42",
+        "Expected X-Test-Credential-One to be 'super-secret-42', got: {:?}\nFull body: {}",
+        cred_one, body_str
+    );
+
+    let cred_two = json["headers"]["x-test-credential-two"]
+        .as_str()
+        .unwrap_or("");
+    assert_eq!(
+        cred_two, "another-secret-99",
+        "Expected X-Test-Credential-Two to be 'another-secret-99', got: {:?}\nFull body: {}",
+        cred_two, body_str
+    );
+
+    let method = json["method"].as_str().unwrap_or("");
+    assert_eq!(method, "GET", "Expected method GET, got: {}", method);
+
+    let url = json["url"].as_str().unwrap_or("");
+    assert!(
+        url.contains("/test"),
+        "Expected URL to contain '/test', got: {}",
+        url
+    );
+}
+
 // ── Fixture generator ─────────────────────────────────────────────────────────
 
 /// One-time helper to regenerate the checked-in test server CA fixture files.
