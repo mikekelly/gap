@@ -1,0 +1,93 @@
+#!/usr/bin/env bash
+# Build GAP from current source and run E2E tests via Docker Compose.
+#
+# Usage:
+#   bin/docker-test          # build + test
+#   bin/docker-test --no-build  # skip build, test existing image
+#   bin/docker-test --keep      # skip cleanup (leave containers running for debugging)
+
+set -euo pipefail
+
+# ── Colours ──────────────────────────────────────────────────────────────────
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+CYAN='\033[0;36m'
+BOLD='\033[1m'
+NC='\033[0m'
+
+step()  { echo -e "\n${CYAN}${BOLD}▶ $*${NC}"; }
+pass()  { echo -e "${GREEN}✓ $*${NC}"; }
+fail()  { echo -e "${RED}✗ $*${NC}"; }
+warn()  { echo -e "${YELLOW}⚠ $*${NC}"; }
+
+# ── Parse flags ───────────────────────────────────────────────────────────────
+BUILD=true
+KEEP=false
+
+for arg in "$@"; do
+    case "$arg" in
+        --no-build) BUILD=false ;;
+        --keep)     KEEP=true  ;;
+        -h|--help)
+            sed -n '2,6p' "$0"   # print the usage comment
+            exit 0
+            ;;
+        *)
+            echo "Unknown flag: $arg" >&2
+            exit 1
+            ;;
+    esac
+done
+
+# ── Resolve repo root ─────────────────────────────────────────────────────────
+# This script lives in <repo>/bin/, so the repo root is one level up.
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(dirname "$SCRIPT_DIR")"
+cd "$REPO_ROOT"
+
+# ── Cleanup trap ──────────────────────────────────────────────────────────────
+EXIT_CODE=0
+
+cleanup() {
+    if [ "$KEEP" = true ]; then
+        warn "Skipping cleanup (--keep). Containers left running."
+        warn "To clean up manually: docker compose --profile test down -v"
+        return
+    fi
+
+    step "Cleaning up containers and volumes"
+    docker compose --profile test down -v 2>&1 || true
+}
+
+trap 'cleanup' EXIT
+
+# ── Step 1: Build ─────────────────────────────────────────────────────────────
+if [ "$BUILD" = true ]; then
+    step "Building gap-server image from source"
+    docker compose build gap-server
+    pass "Build complete"
+else
+    warn "Skipping build (--no-build)"
+fi
+
+# ── Step 2: Run tests ─────────────────────────────────────────────────────────
+step "Starting services and running test suite"
+docker compose --profile test up \
+    --abort-on-container-exit \
+    --exit-code-from test-runner \
+    ; EXIT_CODE=$?
+
+# ── Summary ───────────────────────────────────────────────────────────────────
+echo ""
+if [ "$EXIT_CODE" -eq 0 ]; then
+    echo -e "${GREEN}${BOLD}╔══════════════════════════════╗${NC}"
+    echo -e "${GREEN}${BOLD}║           PASS               ║${NC}"
+    echo -e "${GREEN}${BOLD}╚══════════════════════════════╝${NC}"
+else
+    echo -e "${RED}${BOLD}╔══════════════════════════════╗${NC}"
+    echo -e "${RED}${BOLD}║           FAIL               ║${NC}"
+    echo -e "${RED}${BOLD}╚══════════════════════════════╝${NC}"
+fi
+
+exit "$EXIT_CODE"

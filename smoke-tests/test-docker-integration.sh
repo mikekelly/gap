@@ -245,6 +245,73 @@ else
     log_warn "Skipping token deletion (no token to delete)"
 fi
 
+# Test 12: Proxy smoke test (optional — requires internet access and CA cert)
+echo ""
+echo "Test 12: Proxy smoke test"
+echo "========================="
+#
+# The GAP proxy listens on port 9443 (HTTPS). Agents route requests through it
+# using CONNECT tunnelling. To trust the proxy's TLS and its MITM certificates,
+# a client needs to trust GAP's CA.
+#
+# The CA cert lives at /var/lib/gap/ca.crt inside the gap-server container.
+# The test-runner does not mount the gap-data volume, so we can't read it
+# directly. There is also no /ca API endpoint.
+#
+# We therefore fetch the CA cert from the gap-server container filesystem via
+# the network — this only works if a CA endpoint exists. If the cert isn't
+# accessible, we skip this test with a warning rather than failing the suite.
+
+PROXY_URL="https://gap-server:9443"
+CA_TMPFILE="/tmp/gap-ca.crt"
+PROXY_TEST_SKIPPED=false
+
+# Attempt 1: check for a /ca endpoint (may not exist)
+CA_HTTP_STATUS=$(curl -s -o "$CA_TMPFILE" -w "%{http_code}" "$GAP_SERVER_URL/ca" 2>/dev/null || true)
+
+if [ "$CA_HTTP_STATUS" = "200" ] && [ -s "$CA_TMPFILE" ]; then
+    log_pass "Fetched CA cert from /ca endpoint"
+else
+    # Attempt 2: the init response included ca_path — but that path is on the
+    # gap-server container. We can't reach it from here without a shared volume.
+    log_warn "CA cert not accessible via API (no /ca endpoint and gap-data volume not mounted)"
+    log_warn "Proxy smoke test requires either:"
+    log_warn "  • A /ca API endpoint on gap-server, OR"
+    log_warn "  • The gap-data volume mounted in the test-runner container"
+    log_warn "Skipping proxy smoke test — management API tests (1-11) are the primary coverage"
+    PROXY_TEST_SKIPPED=true
+fi
+
+if [ "$PROXY_TEST_SKIPPED" = false ]; then
+    # Check internet connectivity to httpbin.org
+    if ! curl -s --max-time 10 -o /dev/null "https://httpbin.org/get" 2>/dev/null; then
+        log_warn "httpbin.org not reachable — skipping proxy smoke test"
+        PROXY_TEST_SKIPPED=true
+    fi
+fi
+
+if [ "$PROXY_TEST_SKIPPED" = false ]; then
+    # Use curl's --proxy flag with HTTPS proxy support.
+    # We need to trust GAP's CA for both the proxy TLS connection and the
+    # MITM certificates GAP generates for upstream hosts.
+    #
+    # --proxy-cacert  trusts the CA for the proxy TLS handshake (CONNECT)
+    # --cacert        trusts the CA for the MITM certs on the upstream tunnel
+    PROXY_RESPONSE=$(curl -s \
+        --max-time 30 \
+        --proxy "$PROXY_URL" \
+        --proxy-cacert "$CA_TMPFILE" \
+        --cacert "$CA_TMPFILE" \
+        "https://httpbin.org/headers" 2>&1) || PROXY_EXIT=$?
+
+    if echo "$PROXY_RESPONSE" | grep -q '"Host"'; then
+        log_pass "Proxy smoke test passed — response received via GAP proxy"
+        log_pass "httpbin.org/headers response contains expected Host header"
+    else
+        log_fail "Proxy smoke test failed — unexpected response: $PROXY_RESPONSE"
+    fi
+fi
+
 echo ""
 echo -e "${GREEN}All Docker integration tests passed!${NC}"
 echo ""
