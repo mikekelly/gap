@@ -363,6 +363,132 @@ else
     fi
 fi
 
+# Tests 14-18: Activity filtering
+# These tests depend on proxy tests (12, 13) having generated activity entries.
+# If the proxy tests were skipped (no internet or no CA cert), we skip gracefully.
+
+echo ""
+echo "Test 14: Activity endpoint returns entries"
+echo "==========================================="
+
+PW_HASH="$(echo -n "$TEST_PASSWORD" | sha512sum | cut -d' ' -f1)"
+
+if [ "$PROXY_TEST_SKIPPED" = true ]; then
+    log_warn "Skipping activity tests (proxy tests were skipped — no activity data)"
+else
+    ACTIVITY_RESPONSE=$(curl -s \
+        -H "Content-Type: application/json" \
+        -d "{\"password_hash\": \"$PW_HASH\"}" \
+        "$GAP_SERVER_URL/activity")
+
+    ACTIVITY_COUNT=$(echo "$ACTIVITY_RESPONSE" | jq '.entries | length' 2>/dev/null || echo "0")
+
+    if [ "$ACTIVITY_COUNT" -gt 0 ] 2>/dev/null; then
+        log_pass "Activity endpoint returned $ACTIVITY_COUNT entries"
+    else
+        log_warn "Activity endpoint returned 0 entries (proxy requests may not have been logged yet)"
+    fi
+
+    # Test 15: Activity filtering by method
+    echo ""
+    echo "Test 15: Activity filtering by method"
+    echo "======================================"
+
+    METHOD_RESPONSE=$(curl -s \
+        -H "Content-Type: application/json" \
+        -d "{\"password_hash\": \"$PW_HASH\"}" \
+        "$GAP_SERVER_URL/activity?method=GET")
+
+    # Verify all returned entries have method "GET"
+    NON_GET_COUNT=$(echo "$METHOD_RESPONSE" | jq '[.entries[] | select(.method != "GET")] | length' 2>/dev/null || echo "0")
+    GET_COUNT=$(echo "$METHOD_RESPONSE" | jq '.entries | length' 2>/dev/null || echo "0")
+
+    if [ "$GET_COUNT" -gt 0 ] 2>/dev/null && [ "$NON_GET_COUNT" -eq 0 ] 2>/dev/null; then
+        log_pass "Activity method filter works: $GET_COUNT GET entries, 0 non-GET"
+    elif [ "$GET_COUNT" -eq 0 ] 2>/dev/null; then
+        log_warn "Activity method filter returned 0 entries — skipping assertion"
+    else
+        log_fail "Activity method filter returned non-GET entries (non_get=$NON_GET_COUNT)"
+    fi
+
+    # Test 16: Activity filtering by limit
+    echo ""
+    echo "Test 16: Activity filtering by limit"
+    echo "======================================"
+
+    LIMIT_RESPONSE=$(curl -s \
+        -H "Content-Type: application/json" \
+        -d "{\"password_hash\": \"$PW_HASH\"}" \
+        "$GAP_SERVER_URL/activity?limit=1")
+
+    LIMIT_COUNT=$(echo "$LIMIT_RESPONSE" | jq '.entries | length' 2>/dev/null || echo "0")
+
+    if [ "$LIMIT_COUNT" -eq 1 ] 2>/dev/null; then
+        log_pass "Activity limit filter works: got exactly 1 entry"
+    elif [ "$ACTIVITY_COUNT" -eq 0 ] 2>/dev/null; then
+        log_warn "No activity entries to limit — skipping assertion"
+    else
+        log_fail "Activity limit=1 returned $LIMIT_COUNT entries (expected 1)"
+    fi
+
+    # Test 17: Activity filtering by domain
+    echo ""
+    echo "Test 17: Activity filtering by domain"
+    echo "======================================"
+
+    DOMAIN_RESPONSE=$(curl -s \
+        -H "Content-Type: application/json" \
+        -d "{\"password_hash\": \"$PW_HASH\"}" \
+        "$GAP_SERVER_URL/activity?domain=httpbin.org")
+
+    DOMAIN_COUNT=$(echo "$DOMAIN_RESPONSE" | jq '.entries | length' 2>/dev/null || echo "0")
+
+    if [ "$DOMAIN_COUNT" -gt 0 ] 2>/dev/null; then
+        log_pass "Activity domain filter returned $DOMAIN_COUNT entries for httpbin.org"
+    else
+        log_warn "Activity domain filter returned 0 entries for httpbin.org — proxy requests may not have been logged"
+    fi
+
+    # Test 18: Activity entries contain expected audit fields
+    echo ""
+    echo "Test 18: Activity entries contain expected fields"
+    echo "=================================================="
+
+    FIELDS_RESPONSE=$(curl -s \
+        -H "Content-Type: application/json" \
+        -d "{\"password_hash\": \"$PW_HASH\"}" \
+        "$GAP_SERVER_URL/activity?limit=1")
+
+    ENTRY_COUNT=$(echo "$FIELDS_RESPONSE" | jq '.entries | length' 2>/dev/null || echo "0")
+
+    if [ "$ENTRY_COUNT" -gt 0 ] 2>/dev/null; then
+        ENTRY_KEYS=$(echo "$FIELDS_RESPONSE" | jq '.entries[0] | keys' 2>/dev/null || echo "[]")
+
+        # Check required base fields
+        MISSING_FIELDS=()
+        for field in method url status timestamp; do
+            if ! echo "$ENTRY_KEYS" | jq -e "index(\"$field\")" > /dev/null 2>&1; then
+                MISSING_FIELDS+=("$field")
+            fi
+        done
+
+        # Check audit fields (may be null but should be present as keys)
+        for field in request_id plugin_name plugin_sha source_hash request_headers; do
+            if ! echo "$ENTRY_KEYS" | jq -e "index(\"$field\")" > /dev/null 2>&1; then
+                MISSING_FIELDS+=("$field")
+            fi
+        done
+
+        if [ "${#MISSING_FIELDS[@]}" -eq 0 ]; then
+            log_pass "Activity entry contains all expected fields: $ENTRY_KEYS"
+        else
+            log_fail "Activity entry missing fields: ${MISSING_FIELDS[*]} (got: $ENTRY_KEYS)"
+        fi
+    else
+        log_warn "No activity entries to inspect fields — skipping field check"
+    fi
+fi
+
 echo ""
 echo -e "${GREEN}All Docker integration tests passed!${NC}"
 echo ""
