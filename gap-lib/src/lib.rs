@@ -29,4 +29,4 @@ pub use storage::{create_store, FileStore, SecretStore};
 #[cfg(target_os = "macos")]
 pub use storage::KeychainStore;
 pub use tls::CertificateAuthority;
-pub use types::{GAPCredentials, GAPPlugin, GAPRequest, AgentToken, Config};
+pub use types::{GAPCredentials, GAPPlugin, GAPRequest, AgentToken, Config, ActivityEntry};

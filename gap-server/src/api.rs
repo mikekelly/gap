@@ -7,7 +7,7 @@
 //! - Token management
 //! - Activity monitoring
 
-use gap_lib::{AgentToken, Registry, storage::SecretStore};
+use gap_lib::{AgentToken, ActivityEntry, Registry, storage::SecretStore};
 use argon2::{Argon2, PasswordHash, PasswordVerifier};
 use axum::{
     async_trait,
@@ -87,16 +87,6 @@ impl ApiState {
     pub async fn set_password_hash(&self, hash: String) {
         *self.password_hash.write().await = Some(hash);
     }
-}
-
-/// Activity log entry
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ActivityEntry {
-    pub timestamp: DateTime<Utc>,
-    pub method: String,
-    pub url: String,
-    pub agent_id: Option<String>,
-    pub status: u16,
 }
 
 /// Status response

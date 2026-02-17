@@ -264,6 +264,16 @@ fn uuid_v4() -> String {
     )
 }
 
+/// Activity log entry for proxy request tracking
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ActivityEntry {
+    pub timestamp: DateTime<Utc>,
+    pub method: String,
+    pub url: String,
+    pub agent_id: Option<String>,
+    pub status: u16,
+}
+
 // Serde helper for binary data
 mod serde_bytes {
     use serde::{Deserialize, Deserializer, Serializer};

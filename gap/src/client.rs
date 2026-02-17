@@ -210,9 +210,9 @@ pub struct RevokeTokenResponse {
 #[derive(Debug, Deserialize)]
 pub struct ActivityEntry {
     pub timestamp: String,
-    pub agent: String,
     pub method: String,
     pub url: String,
+    pub agent_id: Option<String>,
     pub status: u16,
 }
 

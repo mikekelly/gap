@@ -23,6 +23,10 @@ pub enum GapError {
     #[error("Storage error: {0}")]
     Storage(String),
 
+    /// Database errors
+    #[error("Database error: {0}")]
+    Database(String),
+
     /// TLS/Certificate errors
     #[error("TLS error: {0}")]
     Tls(String),
@@ -68,6 +72,11 @@ impl GapError {
     /// Create a storage error with context
     pub fn storage(msg: impl Into<String>) -> Self {
         Self::Storage(msg.into())
+    }
+
+    /// Create a database error with context
+    pub fn database(msg: impl Into<String>) -> Self {
+        Self::Database(msg.into())
     }
 
     /// Create a TLS error with context

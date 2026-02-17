@@ -23,9 +23,10 @@ pub async fn run(server_url: &str, follow: bool) -> Result<()> {
             println!("Recent Activity:");
             println!();
             for entry in response.entries {
+                let agent = entry.agent_id.as_deref().unwrap_or("-");
                 println!(
                     "[{}] {} {} {} -> {}",
-                    entry.timestamp, entry.agent, entry.method, entry.url, entry.status
+                    entry.timestamp, agent, entry.method, entry.url, entry.status
                 );
             }
         }
