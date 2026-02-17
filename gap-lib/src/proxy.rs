@@ -34,6 +34,10 @@ pub struct ProxyServer {
     upstream_root_certs: Arc<rustls::RootCertStore>,
     /// TLS acceptor for proxy connections (HTTPS on port 9443)
     proxy_acceptor: TlsAcceptor,
+    /// Optional broadcast sender for real-time activity streaming (SSE).
+    /// When set, each proxied request's ActivityEntry is sent here in addition
+    /// to being logged to the database.
+    activity_tx: Option<tokio::sync::broadcast::Sender<ActivityEntry>>,
 }
 
 impl ProxyServer {
@@ -79,6 +83,7 @@ impl ProxyServer {
             db,
             upstream_root_certs,
             proxy_acceptor,
+            activity_tx: None,
         })
     }
 
@@ -125,7 +130,15 @@ impl ProxyServer {
             db,
             upstream_root_certs,
             proxy_acceptor,
+            activity_tx: None,
         })
+    }
+
+    /// Set the broadcast sender for real-time activity streaming.
+    /// When set, each proxied request's ActivityEntry is broadcast in addition
+    /// to being logged to the database.
+    pub fn set_activity_broadcast(&mut self, tx: tokio::sync::broadcast::Sender<ActivityEntry>) {
+        self.activity_tx = Some(tx);
     }
 
     /// Create a new ProxyServer instance from a Vec of tokens (for backward compatibility in tests)
@@ -162,9 +175,10 @@ impl ProxyServer {
             let db = Arc::clone(&self.db);
             let upstream_root_certs = Arc::clone(&self.upstream_root_certs);
             let proxy_acceptor = self.proxy_acceptor.clone();
+            let activity_tx = self.activity_tx.clone();
 
             tokio::spawn(async move {
-                if let Err(e) = handle_connection(stream, ca, db, upstream_root_certs, proxy_acceptor).await {
+                if let Err(e) = handle_connection(stream, ca, db, upstream_root_certs, proxy_acceptor, activity_tx).await {
                     error!("Connection error: {}", e);
                 }
             });
@@ -179,6 +193,7 @@ async fn handle_connection(
     db: Arc<GapDatabase>,
     upstream_root_certs: Arc<rustls::RootCertStore>,
     proxy_acceptor: TlsAcceptor,
+    activity_tx: Option<tokio::sync::broadcast::Sender<ActivityEntry>>,
 ) -> Result<()> {
     // First, accept the TLS connection from the proxy client
     let tls_stream = proxy_acceptor
@@ -261,7 +276,7 @@ async fn handle_connection(
 
     // Bidirectional proxy with HTTP transformation via hyper
     // hyper handles ALL requests per connection (not just the first one)
-    proxy_via_hyper(agent_stream, upstream_stream, hostname, db, agent_token.name.clone(), is_h2).await?;
+    proxy_via_hyper(agent_stream, upstream_stream, hostname, db, agent_token.name.clone(), is_h2, activity_tx).await?;
 
     Ok(())
 }
@@ -433,6 +448,7 @@ async fn proxy_via_hyper<A, U>(
     db: Arc<GapDatabase>,
     agent_name: String,
     is_h2: bool,
+    activity_tx: Option<tokio::sync::broadcast::Sender<ActivityEntry>>,
 ) -> Result<()>
 where
     A: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
@@ -454,14 +470,17 @@ where
         tokio::spawn(async move { let _ = conn.await; });
 
         // H2 SendRequest is Clone, no Mutex needed (concurrent requests supported)
+        let activity_tx_h2 = activity_tx;
         let service = service_fn(move |req: hyper::Request<hyper::body::Incoming>| {
             let hostname = hostname.clone();
             let db = Arc::clone(&db);
             let agent_name = agent_name.clone();
             let mut sender = sender.clone();
+            let activity_tx = activity_tx_h2.clone();
 
             async move {
                 let request_id: u64 = rand::thread_rng().gen();
+                let request_id_str = format!("{:016x}", request_id);
                 let (parts, body) = req.into_parts();
                 let body_bytes = body.collect().await
                     .map_err(|e| GapError::network(e.to_string()))?
@@ -473,7 +492,7 @@ where
                 let url = gap_req.url.clone();
 
                 let span = tracing::info_span!("proxy_request",
-                    request_id = %format!("{:016x}", request_id),
+                    request_id = %request_id_str,
                     method = %method,
                     url = %url,
                 );
@@ -498,6 +517,7 @@ where
                 tokio::spawn(async move {
                     let entry = ActivityEntry {
                         timestamp: chrono::Utc::now(),
+                        request_id: Some(request_id_str),
                         method,
                         url,
                         agent_id: Some(agent_name_log),
@@ -509,6 +529,10 @@ where
                     };
                     if let Err(e) = db_log.log_activity(&entry).await {
                         tracing::warn!("Failed to log activity: {}", e);
+                    }
+                    // Broadcast to SSE subscribers (ignore errors if no receivers)
+                    if let Some(ref tx) = activity_tx {
+                        let _ = tx.send(entry);
                     }
                 });
 
@@ -529,14 +553,17 @@ where
         // and send_request takes &mut self. HTTP/1.1 is sequential anyway.
         let sender = Arc::new(tokio::sync::Mutex::new(sender));
 
+        let activity_tx_h1 = activity_tx;
         let service = service_fn(move |req: hyper::Request<hyper::body::Incoming>| {
             let hostname = hostname.clone();
             let db = Arc::clone(&db);
             let agent_name = agent_name.clone();
             let sender = Arc::clone(&sender);
+            let activity_tx = activity_tx_h1.clone();
 
             async move {
                 let request_id: u64 = rand::thread_rng().gen();
+                let request_id_str = format!("{:016x}", request_id);
                 let (parts, body) = req.into_parts();
                 let body_bytes = body.collect().await
                     .map_err(|e| GapError::network(e.to_string()))?
@@ -548,7 +575,7 @@ where
                 let url = gap_req.url.clone();
 
                 let span = tracing::info_span!("proxy_request",
-                    request_id = %format!("{:016x}", request_id),
+                    request_id = %request_id_str,
                     method = %method,
                     url = %url,
                 );
@@ -574,6 +601,7 @@ where
                 tokio::spawn(async move {
                     let entry = ActivityEntry {
                         timestamp: chrono::Utc::now(),
+                        request_id: Some(request_id_str),
                         method,
                         url,
                         agent_id: Some(agent_name_log),
@@ -585,6 +613,10 @@ where
                     };
                     if let Err(e) = db_log.log_activity(&entry).await {
                         tracing::warn!("Failed to log activity: {}", e);
+                    }
+                    // Broadcast to SSE subscribers (ignore errors if no receivers)
+                    if let Some(ref tx) = activity_tx {
+                        let _ = tx.send(entry);
                     }
                 });
 
@@ -957,6 +989,7 @@ mod tests {
                 proxy_db,
                 "test-agent".to_string(),
                 false, // is_h2 = false for H1
+                None,  // no activity broadcast
             )
             .await
         });

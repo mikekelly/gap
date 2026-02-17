@@ -274,12 +274,16 @@ async fn main() -> anyhow::Result<()> {
     let initial_tokens = db.list_tokens().await?;
     tracing::info!("Loaded {} agent tokens from storage", initial_tokens.len());
 
-    // Create ProxyServer with database
-    let proxy = ProxyServer::new(
+    // Create broadcast channel for real-time activity streaming (SSE)
+    let (activity_tx, _activity_rx) = tokio::sync::broadcast::channel(1000);
+
+    // Create ProxyServer with database and activity broadcast
+    let mut proxy = ProxyServer::new(
         config.proxy_port,
         ca,
         Arc::clone(&db),
     )?;
+    proxy.set_activity_broadcast(activity_tx.clone());
 
     // Spawn proxy server in background
     let proxy_port = config.proxy_port;
@@ -306,13 +310,14 @@ async fn main() -> anyhow::Result<()> {
         mgmt_key_pem
     ).await?;
 
-    // Create API state with database and TLS config
-    let api_state = api::ApiState::new_with_tls(
+    // Create API state with database, TLS config, and activity broadcast
+    let mut api_state = api::ApiState::new_with_tls(
         config.proxy_port,
         config.api_port,
         Arc::clone(&db),
         tls_config.clone(),
     );
+    api_state.activity_tx = Some(activity_tx);
 
     // Load persisted password hash from database (if server was previously initialized)
     if let Ok(Some(hash)) = db.get_password_hash().await {

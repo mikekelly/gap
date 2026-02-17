@@ -14,14 +14,19 @@ use argon2::{Argon2, PasswordHash, PasswordVerifier};
 use axum::{
     async_trait,
     body::Bytes,
-    extract::{FromRequestParts, Path, State},
+    extract::{FromRequestParts, Path, Query, State},
     http::{request::Parts, StatusCode},
-    response::{IntoResponse, Response},
+    response::{
+        sse::{Event, KeepAlive, Sse},
+        IntoResponse, Response,
+    },
     routing::{delete, get, post},
     Json, Router,
 };
 use chrono::{DateTime, Utc};
+use futures::stream::Stream;
 use serde::{Deserialize, Serialize};
+use std::convert::Infallible;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
@@ -40,6 +45,8 @@ pub struct ApiState {
     pub db: Arc<GapDatabase>,
     /// TLS configuration for hot-reloading certificates
     pub tls_config: Option<axum_server::tls_rustls::RustlsConfig>,
+    /// Broadcast channel for real-time activity streaming (SSE)
+    pub activity_tx: Option<tokio::sync::broadcast::Sender<ActivityEntry>>,
 }
 
 impl ApiState {
@@ -52,6 +59,7 @@ impl ApiState {
             password_hash: Arc::new(RwLock::new(None)),
             db,
             tls_config: None,
+            activity_tx: None,
         }
     }
 
@@ -69,6 +77,25 @@ impl ApiState {
             password_hash: Arc::new(RwLock::new(None)),
             db,
             tls_config: Some(tls_config),
+            activity_tx: None,
+        }
+    }
+
+    /// Create ApiState with broadcast channel for activity streaming
+    pub fn new_with_broadcast(
+        proxy_port: u16,
+        api_port: u16,
+        db: Arc<GapDatabase>,
+        activity_tx: tokio::sync::broadcast::Sender<ActivityEntry>,
+    ) -> Self {
+        Self {
+            start_time: std::time::Instant::now(),
+            proxy_port,
+            api_port,
+            password_hash: Arc::new(RwLock::new(None)),
+            db,
+            tls_config: None,
+            activity_tx: Some(activity_tx),
         }
     }
 
@@ -221,6 +248,20 @@ pub struct ActivityResponse {
     pub entries: Vec<ActivityEntry>,
 }
 
+/// Query parameters for GET /activity
+#[derive(Debug, Deserialize, Default)]
+pub struct ActivityQuery {
+    pub domain: Option<String>,
+    pub path: Option<String>,
+    pub plugin: Option<String>,
+    pub agent: Option<String>,
+    pub method: Option<String>,
+    /// ISO 8601 timestamp string
+    pub since: Option<String>,
+    pub request_id: Option<String>,
+    pub limit: Option<u32>,
+}
+
 /// Init request
 #[derive(Debug, Deserialize)]
 pub struct InitRequest {
@@ -306,6 +347,7 @@ pub fn create_router(state: ApiState) -> Router {
             post(set_credential).delete(delete_credential),
         )
         .route("/activity", get(get_activity).post(post_activity))
+        .route("/activity/stream", get(activity_stream))
         .route("/v1/management-cert", post(rotate_management_cert))
         .with_state(state)
 }
@@ -821,24 +863,50 @@ async fn delete_credential(
     Ok(StatusCode::OK)
 }
 
-/// GET /activity - Get recent activity (requires auth)
+/// Convert ActivityQuery to ActivityFilter
+fn query_to_filter(q: &ActivityQuery) -> gap_lib::ActivityFilter {
+    gap_lib::ActivityFilter {
+        domain: q.domain.clone(),
+        path: q.path.clone(),
+        plugin: q.plugin.clone(),
+        agent: q.agent.clone(),
+        method: q.method.clone(),
+        since: q.since.as_ref().and_then(|s| {
+            DateTime::parse_from_rfc3339(s).ok().map(|dt| dt.with_timezone(&Utc))
+        }),
+        request_id: q.request_id.clone(),
+        limit: q.limit.or(Some(100)),
+    }
+}
+
+/// GET /activity - Get recent activity (requires auth, supports query param filters)
 async fn get_activity(
+    State(state): State<ApiState>,
+    Query(query): Query<ActivityQuery>,
+    body: Bytes,
+) -> Result<Json<ActivityResponse>, (StatusCode, String)> {
+    verify_auth::<serde_json::Value>(&state, &body).await?;
+
+    let filter = query_to_filter(&query);
+    let entries = state.db.query_activity(&filter).await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to get activity: {}", e)))?;
+    Ok(Json(ActivityResponse { entries }))
+}
+
+/// POST /activity - Get recent activity (requires auth, same as GET but without query params)
+async fn post_activity(
     State(state): State<ApiState>,
     body: Bytes,
 ) -> Result<Json<ActivityResponse>, (StatusCode, String)> {
     verify_auth::<serde_json::Value>(&state, &body).await?;
 
-    let entries = state.db.get_activity(Some(100)).await
+    let filter = gap_lib::ActivityFilter {
+        limit: Some(100),
+        ..Default::default()
+    };
+    let entries = state.db.query_activity(&filter).await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to get activity: {}", e)))?;
     Ok(Json(ActivityResponse { entries }))
-}
-
-/// POST /activity - Get recent activity (requires auth, same as GET)
-async fn post_activity(
-    State(state): State<ApiState>,
-    body: Bytes,
-) -> Result<Json<ActivityResponse>, (StatusCode, String)> {
-    get_activity(State(state), body).await
 }
 
 /// POST /v1/management-cert - Rotate management certificate (requires auth)
@@ -910,6 +978,95 @@ async fn rotate_management_cert(
         sans: req.sans,
         rotated: true,
     }))
+}
+
+/// Query parameters for filtering the activity SSE stream
+#[derive(Debug, Default, Deserialize)]
+pub struct ActivityStreamFilter {
+    pub domain: Option<String>,
+    pub plugin: Option<String>,
+    pub agent: Option<String>,
+    pub method: Option<String>,
+    pub path: Option<String>,
+    pub request_id: Option<String>,
+}
+
+/// Check if an activity entry matches the given filter criteria
+fn matches_filter(entry: &ActivityEntry, filter: &ActivityStreamFilter) -> bool {
+    if let Some(ref domain) = filter.domain {
+        if !entry.url.contains(domain) {
+            return false;
+        }
+    }
+    if let Some(ref plugin) = filter.plugin {
+        if entry.plugin_name.as_deref() != Some(plugin.as_str()) {
+            return false;
+        }
+    }
+    if let Some(ref agent) = filter.agent {
+        if entry.agent_id.as_deref() != Some(agent.as_str()) {
+            return false;
+        }
+    }
+    if let Some(ref method) = filter.method {
+        if entry.method != *method {
+            return false;
+        }
+    }
+    if let Some(ref path) = filter.path {
+        if !entry.url.contains(path) {
+            return false;
+        }
+    }
+    if let Some(ref request_id) = filter.request_id {
+        if entry.request_id.as_deref() != Some(request_id.as_str()) {
+            return false;
+        }
+    }
+    true
+}
+
+/// GET /activity/stream - Stream activity entries via Server-Sent Events (requires auth)
+async fn activity_stream(
+    State(state): State<ApiState>,
+    Query(filter): Query<ActivityStreamFilter>,
+    body: Bytes,
+) -> Result<Sse<impl Stream<Item = Result<Event, Infallible>>>, (StatusCode, String)> {
+    verify_auth::<serde_json::Value>(&state, &body).await?;
+
+    let tx = state.activity_tx.as_ref().ok_or_else(|| {
+        (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "Activity streaming not configured".to_string(),
+        )
+    })?;
+
+    let mut rx = tx.subscribe();
+
+    let stream = async_stream::stream! {
+        loop {
+            match rx.recv().await {
+                Ok(entry) => {
+                    if matches_filter(&entry, &filter) {
+                        if let Ok(json) = serde_json::to_string(&entry) {
+                            yield Ok(Event::default().event("activity").data(json));
+                        }
+                    }
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                    // Subscriber fell behind, log and continue
+                    tracing::warn!("SSE subscriber lagged by {} entries", n);
+                    continue;
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                    // Channel closed, end the stream
+                    break;
+                }
+            }
+        }
+    };
+
+    Ok(Sse::new(stream).keep_alive(KeepAlive::default()))
 }
 
 #[cfg(test)]
@@ -2155,5 +2312,214 @@ mod tests {
 
         // Cert should be different from initial (rotation occurred)
         assert_ne!(new_cert_pem, initial_cert_pem);
+    }
+
+    #[tokio::test]
+    async fn test_activity_stream_returns_sse_content_type() {
+        use argon2::password_hash::{rand_core::OsRng, SaltString};
+        use argon2::{Argon2, PasswordHasher};
+
+        let db = create_test_db().await;
+        let (activity_tx, _) = tokio::sync::broadcast::channel(100);
+        let state = ApiState::new_with_broadcast(9443, 9080, db, activity_tx);
+
+        // Set up password hash
+        let password = "testpass123";
+        let salt = SaltString::generate(&mut OsRng);
+        let argon2 = Argon2::default();
+        let password_hash = argon2.hash_password(password.as_bytes(), &salt).unwrap().to_string();
+        state.set_password_hash(password_hash).await;
+
+        let app = create_router(state);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/activity/stream")
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&serde_json::json!({
+                        "password_hash": password
+                    })).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let content_type = response.headers().get("content-type").unwrap().to_str().unwrap();
+        assert!(content_type.contains("text/event-stream"), "Expected SSE content type, got: {}", content_type);
+    }
+
+    #[tokio::test]
+    async fn test_activity_stream_requires_auth() {
+        let db = create_test_db().await;
+        let (activity_tx, _) = tokio::sync::broadcast::channel(100);
+        let state = ApiState::new_with_broadcast(9443, 9080, db, activity_tx);
+
+        let app = create_router(state);
+
+        // No password hash set on server, so auth should fail
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/activity/stream")
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&serde_json::json!({
+                        "password_hash": "wrongpass"
+                    })).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn test_activity_stream_receives_broadcast_entries() {
+        use argon2::password_hash::{rand_core::OsRng, SaltString};
+        use argon2::{Argon2, PasswordHasher};
+        let db = create_test_db().await;
+        let (activity_tx, _) = tokio::sync::broadcast::channel(100);
+        let state = ApiState::new_with_broadcast(9443, 9080, db, activity_tx.clone());
+
+        // Set up password hash
+        let password = "testpass123";
+        let salt = SaltString::generate(&mut OsRng);
+        let argon2 = Argon2::default();
+        let password_hash = argon2.hash_password(password.as_bytes(), &salt).unwrap().to_string();
+        state.set_password_hash(password_hash).await;
+
+        let app = create_router(state);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/activity/stream")
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&serde_json::json!({
+                        "password_hash": password
+                    })).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+
+        // Send an activity entry through the broadcast channel
+        let entry = ActivityEntry {
+            timestamp: chrono::Utc::now(),
+            request_id: None,
+            method: "GET".to_string(),
+            url: "https://api.example.com/test".to_string(),
+            agent_id: Some("test-agent".to_string()),
+            status: 200,
+            plugin_name: Some("test-plugin".to_string()),
+            plugin_sha: None,
+            source_hash: None,
+            request_headers: None,
+        };
+        activity_tx.send(entry.clone()).unwrap();
+
+        // Read the SSE response body
+        let mut body = response.into_body();
+        let chunk = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            http_body_util::BodyExt::frame(&mut body),
+        )
+        .await
+        .expect("should receive data within timeout")
+        .expect("should have a frame")
+        .expect("frame should be ok");
+
+        let data = chunk.into_data().expect("should be data frame");
+        let text = String::from_utf8(data.to_vec()).unwrap();
+
+        // SSE format: "event: activity\ndata: {...}\n\n"
+        assert!(text.contains("event: activity"), "SSE event should have 'activity' type, got: {}", text);
+        assert!(text.contains("api.example.com"), "SSE data should contain the URL, got: {}", text);
+    }
+
+    #[tokio::test]
+    async fn test_activity_stream_filters_entries() {
+        use argon2::password_hash::{rand_core::OsRng, SaltString};
+        use argon2::{Argon2, PasswordHasher};
+
+        let db = create_test_db().await;
+        let (activity_tx, _) = tokio::sync::broadcast::channel(100);
+        let state = ApiState::new_with_broadcast(9443, 9080, db, activity_tx.clone());
+
+        // Set up password hash
+        let password = "testpass123";
+        let salt = SaltString::generate(&mut OsRng);
+        let argon2 = Argon2::default();
+        let password_hash = argon2.hash_password(password.as_bytes(), &salt).unwrap().to_string();
+        state.set_password_hash(password_hash).await;
+
+        let app = create_router(state);
+
+        // Request with domain filter
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/activity/stream?domain=api.example.com")
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&serde_json::json!({
+                        "password_hash": password
+                    })).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+
+        // Send a matching entry
+        let matching_entry = ActivityEntry {
+            timestamp: chrono::Utc::now(),
+            request_id: None,
+            method: "GET".to_string(),
+            url: "https://api.example.com/test".to_string(),
+            agent_id: Some("test-agent".to_string()),
+            status: 200,
+            plugin_name: None,
+            plugin_sha: None,
+            source_hash: None,
+            request_headers: None,
+        };
+        // Send a non-matching entry first
+        let non_matching_entry = ActivityEntry {
+            timestamp: chrono::Utc::now(),
+            request_id: None,
+            method: "POST".to_string(),
+            url: "https://other-api.com/data".to_string(),
+            agent_id: Some("test-agent".to_string()),
+            status: 201,
+            plugin_name: None,
+            plugin_sha: None,
+            source_hash: None,
+            request_headers: None,
+        };
+        activity_tx.send(non_matching_entry).unwrap();
+        activity_tx.send(matching_entry).unwrap();
+
+        // Read the SSE response body - should only get the matching entry
+        let mut body = response.into_body();
+        let chunk = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            http_body_util::BodyExt::frame(&mut body),
+        )
+        .await
+        .expect("should receive data within timeout")
+        .expect("should have a frame")
+        .expect("frame should be ok");
+
+        let data = chunk.into_data().expect("should be data frame");
+        let text = String::from_utf8(data.to_vec()).unwrap();
+
+        // Should contain the matching entry, not the non-matching one
+        assert!(text.contains("api.example.com"), "Should contain matching entry");
+        assert!(!text.contains("other-api.com"), "Should not contain non-matching entry");
     }
 }
