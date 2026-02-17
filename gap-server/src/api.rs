@@ -7,7 +7,9 @@
 //! - Token management
 //! - Activity monitoring
 
-use gap_lib::{AgentToken, ActivityEntry, Registry, storage::SecretStore};
+use gap_lib::{AgentToken, ActivityEntry};
+use gap_lib::database::GapDatabase;
+use gap_lib::registry::PluginEntry;
 use argon2::{Argon2, PasswordHash, PasswordVerifier};
 use axum::{
     async_trait,
@@ -34,32 +36,21 @@ pub struct ApiState {
     pub api_port: u16,
     /// Password hash (Argon2)
     pub password_hash: Arc<RwLock<Option<String>>>,
-    /// Recent activity log
-    pub activity: Arc<RwLock<Vec<ActivityEntry>>>,
-    /// Shared storage backend
-    pub store: Arc<dyn SecretStore>,
-    /// Registry for centralized metadata storage
-    pub registry: Arc<Registry>,
+    /// Embedded database for all persistent storage
+    pub db: Arc<GapDatabase>,
     /// TLS configuration for hot-reloading certificates
     pub tls_config: Option<axum_server::tls_rustls::RustlsConfig>,
 }
 
 impl ApiState {
-    /// Create ApiState with storage backend and registry
-    pub fn new(
-        proxy_port: u16,
-        api_port: u16,
-        store: Arc<dyn SecretStore>,
-        registry: Arc<Registry>,
-    ) -> Self {
+    /// Create ApiState with database backend
+    pub fn new(proxy_port: u16, api_port: u16, db: Arc<GapDatabase>) -> Self {
         Self {
             start_time: std::time::Instant::now(),
             proxy_port,
             api_port,
             password_hash: Arc::new(RwLock::new(None)),
-            activity: Arc::new(RwLock::new(Vec::new())),
-            store,
-            registry,
+            db,
             tls_config: None,
         }
     }
@@ -68,8 +59,7 @@ impl ApiState {
     pub fn new_with_tls(
         proxy_port: u16,
         api_port: u16,
-        store: Arc<dyn SecretStore>,
-        registry: Arc<Registry>,
+        db: Arc<GapDatabase>,
         tls_config: axum_server::tls_rustls::RustlsConfig,
     ) -> Self {
         Self {
@@ -77,9 +67,7 @@ impl ApiState {
             proxy_port,
             api_port,
             password_hash: Arc::new(RwLock::new(None)),
-            activity: Arc::new(RwLock::new(Vec::new())),
-            store,
-            registry,
+            db,
             tls_config: Some(tls_config),
         }
     }
@@ -352,8 +340,8 @@ async fn init(
             return Err((StatusCode::CONFLICT, "Server already initialized".to_string()));
         }
     }
-    // Also check registry for persisted password
-    if state.registry.is_initialized().await.unwrap_or(false) {
+    // Also check database for persisted password
+    if state.db.is_initialized().await.unwrap_or(false) {
         return Err((StatusCode::CONFLICT, "Server already initialized".to_string()));
     }
 
@@ -372,19 +360,19 @@ async fn init(
     // Store password hash in memory
     state.set_password_hash(password_hash.clone()).await;
 
-    // Persist password hash to registry
-    state.registry.set_password_hash(&password_hash).await
+    // Persist password hash to database
+    state.db.set_password_hash(&password_hash).await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to save password hash: {}", e)))?;
 
-    // Load the existing CA from storage (it was already generated at server startup)
-    let ca_cert_pem = state.store
-        .get("ca:cert")
+    // Load the existing CA from database (it was already generated at server startup)
+    let ca_cert_pem = state.db
+        .get_config("ca:cert")
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to load CA cert: {}", e)))?
         .ok_or_else(|| (StatusCode::INTERNAL_SERVER_ERROR, "CA not found in storage".to_string()))?;
 
-    let ca_key_pem = state.store
-        .get("ca:key")
+    let ca_key_pem = state.db
+        .get_config("ca:key")
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to load CA key: {}", e)))?
         .ok_or_else(|| (StatusCode::INTERNAL_SERVER_ERROR, "CA key not found in storage".to_string()))?;
@@ -418,16 +406,16 @@ async fn init(
     let mgmt_key_pem = gap_lib::tls::der_to_pem(&mgmt_key_der, "PRIVATE KEY");
 
     // Store management cert and key
-    state.store.set("mgmt:cert", mgmt_cert_pem.as_bytes()).await
+    state.db.set_config("mgmt:cert", mgmt_cert_pem.as_bytes()).await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to store management cert: {}", e)))?;
 
-    state.store.set("mgmt:key", mgmt_key_pem.as_bytes()).await
+    state.db.set_config("mgmt:key", mgmt_key_pem.as_bytes()).await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to store management key: {}", e)))?;
 
     // Store the SANs used (for reference)
     let sans_json = serde_json::to_vec(&management_sans)
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to serialize SANs: {}", e)))?;
-    state.store.set("mgmt:sans", &sans_json).await
+    state.db.set_config("mgmt:sans", &sans_json).await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to store management SANs: {}", e)))?;
 
     Ok(Json(InitResponse { ca_path }))
@@ -441,18 +429,16 @@ async fn get_plugins(
 ) -> Result<Json<PluginsResponse>, (StatusCode, String)> {
     verify_auth::<serde_json::Value>(&state, &body).await?;
 
-    // Get plugins from registry
-    let plugin_entries = state.registry.list_plugins().await
+    // Get plugins from database
+    let plugin_entries = state.db.list_plugins().await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to list plugins: {}", e)))?;
 
     // Convert PluginEntry to PluginInfo
-    // PluginEntry has: name, hosts, credential_schema
-    // PluginInfo has: name, match_patterns, credential_schema
     let plugins = plugin_entries
         .into_iter()
         .map(|entry| PluginInfo {
             name: entry.name,
-            match_patterns: entry.hosts,  // hosts maps to match_patterns
+            match_patterns: entry.hosts,
             credential_schema: entry.credential_schema,
         })
         .collect();
@@ -467,18 +453,16 @@ async fn post_plugins(
 ) -> Result<Json<PluginsResponse>, (StatusCode, String)> {
     verify_auth::<serde_json::Value>(&state, &body).await?;
 
-    // Get plugins from registry
-    let plugin_entries = state.registry.list_plugins().await
+    // Get plugins from database
+    let plugin_entries = state.db.list_plugins().await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to list plugins: {}", e)))?;
 
     // Convert PluginEntry to PluginInfo
-    // PluginEntry has: name, hosts, credential_schema
-    // PluginInfo has: name, match_patterns, credential_schema
     let plugins = plugin_entries
         .into_iter()
         .map(|entry| PluginInfo {
             name: entry.name,
-            match_patterns: entry.hosts,  // hosts maps to match_patterns
+            match_patterns: entry.hosts,
             credential_schema: entry.credential_schema,
         })
         .collect();
@@ -499,7 +483,7 @@ async fn install_plugin(
     let plugin_name = parse_plugin_name(&req.name)?;
 
     // Check if plugin already exists
-    let exists = state.registry.has_plugin(&plugin_name).await
+    let exists = state.db.has_plugin(&plugin_name).await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to check plugin: {}", e)))?;
 
     if exists {
@@ -537,7 +521,7 @@ async fn uninstall_plugin(
         .into_owned();
 
     // Check if plugin exists
-    let exists = state.registry.has_plugin(&plugin_name).await
+    let exists = state.db.has_plugin(&plugin_name).await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to check plugin: {}", e)))?;
 
     if !exists {
@@ -547,14 +531,9 @@ async fn uninstall_plugin(
         ));
     }
 
-    // Remove plugin from registry
-    state.registry.remove_plugin(&plugin_name).await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to remove plugin from registry: {}", e)))?;
-
-    // Remove plugin code from SecretStore
-    let store_key = format!("plugin:{}", plugin_name);
-    state.store.delete(&store_key).await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to remove plugin code: {}", e)))?;
+    // Remove plugin from database (removes metadata + source, preserves credentials)
+    state.db.remove_plugin(&plugin_name).await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to remove plugin: {}", e)))?;
 
     tracing::info!("Uninstalled plugin: {}", plugin_name);
 
@@ -580,7 +559,7 @@ async fn update_plugin(
         .into_owned();
 
     // Check if plugin exists
-    let exists = state.registry.has_plugin(&plugin_name).await
+    let exists = state.db.has_plugin(&plugin_name).await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to check plugin: {}", e)))?;
 
     if !exists {
@@ -590,8 +569,8 @@ async fn update_plugin(
         ));
     }
 
-    // Remove old plugin from registry (but keep credentials)
-    state.registry.remove_plugin(&plugin_name).await
+    // Remove old plugin from database (but keep credentials)
+    state.db.remove_plugin(&plugin_name).await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to remove old plugin: {}", e)))?;
 
     // Clone, validate, and store new version
@@ -676,23 +655,15 @@ async fn clone_and_validate_plugin(
         (transformed_code, plugin, commit_sha)
     };
 
-    // Store plugin in SecretStore
-    let store_key = format!("plugin:{}", plugin_name);
-    state.store
-        .set(&store_key, transformed_code.as_bytes())
-        .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to store plugin: {}", e)))?;
-
-    // Add plugin to registry with commit SHA
-    use gap_lib::PluginEntry;
+    // Store plugin metadata and source code in database (single operation)
     let plugin_entry = PluginEntry {
         name: plugin.name.clone(),
         hosts: plugin.match_patterns.clone(),
         credential_schema: plugin.credential_schema.clone(),
         commit_sha: Some(commit_sha.clone()),
     };
-    state.registry.add_plugin(&plugin_entry).await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to add plugin to registry: {}", e)))?;
+    state.db.add_plugin(&plugin_entry, &transformed_code).await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to store plugin: {}", e)))?;
 
     Ok((plugin, commit_sha))
 }
@@ -723,8 +694,8 @@ async fn list_tokens(
 ) -> Result<Json<TokensResponse>, (StatusCode, String)> {
     verify_auth::<serde_json::Value>(&state, &body).await?;
 
-    // Use registry to list tokens
-    let token_entries = state.registry.list_tokens().await
+    // List tokens from database
+    let token_entries = state.db.list_tokens().await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to list tokens: {}", e)))?;
 
     // Convert TokenEntry to TokenResponse
@@ -760,21 +731,15 @@ async fn create_token(
     State(state): State<ApiState>,
     body: Bytes,
 ) -> Result<Json<TokenResponse>, (StatusCode, String)> {
-    use gap_lib::registry::TokenMetadata;
-
     let req: CreateTokenRequest = verify_auth(&state, &body).await?;
 
     // Create a new AgentToken
     let token = AgentToken::new(&req.name);
 
-    // Store token metadata directly in registry (no separate storage entry)
-    let metadata = TokenMetadata {
-        name: token.name.clone(),
-        created_at: token.created_at,
-    };
-    state.registry.add_token_with_metadata(&token.token, &metadata)
+    // Store token in database
+    state.db.add_token(&token.token, &token.name, token.created_at)
         .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to add token to registry: {}", e)))?;
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to add token: {}", e)))?;
 
     let token_value = token.token.clone();
 
@@ -798,8 +763,8 @@ async fn delete_token(
     verify_auth::<serde_json::Value>(&state, &body).await?;
 
     // The id is the token value
-    // Check if token exists in registry using O(1) lookup
-    let token = state.registry.get_token(&id)
+    // Check if token exists in database
+    let token = state.db.get_token(&id)
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to get token: {}", e)))?;
 
@@ -807,10 +772,10 @@ async fn delete_token(
         return Err((StatusCode::NOT_FOUND, format!("Token '{}' not found", id)));
     }
 
-    // Remove from registry (no separate storage deletion needed)
-    state.registry.remove_token(&id)
+    // Remove from database
+    state.db.remove_token(&id)
         .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to remove token from registry: {}", e)))?;
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to remove token: {}", e)))?;
 
     Ok(Json(serde_json::json!({
         "id": id,
@@ -826,8 +791,8 @@ async fn set_credential(
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
     let req: SetCredentialRequest = verify_auth(&state, &body).await?;
 
-    // Store credential directly in registry (no separate storage entry)
-    state.registry.set_credential(&plugin, &key, &req.value)
+    // Store credential in database
+    state.db.set_credential(&plugin, &key, &req.value)
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to set credential: {}", e)))?;
 
@@ -847,10 +812,10 @@ async fn delete_credential(
 ) -> Result<StatusCode, (StatusCode, String)> {
     verify_auth::<serde_json::Value>(&state, &body).await?;
 
-    // Remove from registry (no separate storage deletion needed)
-    state.registry.remove_credential(&plugin, &key)
+    // Remove credential from database
+    state.db.remove_credential(&plugin, &key)
         .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to remove credential from registry: {}", e)))?;
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to remove credential: {}", e)))?;
 
     tracing::info!("Deleting credential {}:{}", plugin, key);
     Ok(StatusCode::OK)
@@ -863,10 +828,9 @@ async fn get_activity(
 ) -> Result<Json<ActivityResponse>, (StatusCode, String)> {
     verify_auth::<serde_json::Value>(&state, &body).await?;
 
-    let activity = state.activity.read().await;
-    Ok(Json(ActivityResponse {
-        entries: activity.clone(),
-    }))
+    let entries = state.db.get_activity(Some(100)).await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to get activity: {}", e)))?;
+    Ok(Json(ActivityResponse { entries }))
 }
 
 /// POST /activity - Get recent activity (requires auth, same as GET)
@@ -887,15 +851,15 @@ async fn rotate_management_cert(
     // Verify authentication and extract request data
     let req: RotateManagementCertRequest = verify_auth(&state, &body).await?;
 
-    // Load the CA from storage
-    let ca_cert_pem = state.store
-        .get("ca:cert")
+    // Load the CA from database
+    let ca_cert_pem = state.db
+        .get_config("ca:cert")
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to load CA cert: {}", e)))?
         .ok_or_else(|| (StatusCode::INTERNAL_SERVER_ERROR, "CA not found in storage".to_string()))?;
 
-    let ca_key_pem = state.store
-        .get("ca:key")
+    let ca_key_pem = state.db
+        .get_config("ca:key")
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to load CA key: {}", e)))?
         .ok_or_else(|| (StatusCode::INTERNAL_SERVER_ERROR, "CA key not found in storage".to_string()))?;
@@ -918,16 +882,16 @@ async fn rotate_management_cert(
     let mgmt_key_pem = gap_lib::tls::der_to_pem(&mgmt_key_der, "PRIVATE KEY");
 
     // Store new management cert and key
-    state.store.set("mgmt:cert", mgmt_cert_pem.as_bytes()).await
+    state.db.set_config("mgmt:cert", mgmt_cert_pem.as_bytes()).await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to store management cert: {}", e)))?;
 
-    state.store.set("mgmt:key", mgmt_key_pem.as_bytes()).await
+    state.db.set_config("mgmt:key", mgmt_key_pem.as_bytes()).await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to store management key: {}", e)))?;
 
     // Store the SANs used (for reference)
     let sans_json = serde_json::to_vec(&req.sans)
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to serialize SANs: {}", e)))?;
-    state.store.set("mgmt:sans", &sans_json).await
+    state.db.set_config("mgmt:sans", &sans_json).await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to store management SANs: {}", e)))?;
 
     // Hot-reload TLS config if available
@@ -951,29 +915,21 @@ async fn rotate_management_cert(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use gap_lib::storage::{FileStore, SecretStore};
+    use gap_lib::database::GapDatabase;
     use axum::body::Body;
     use axum::http::Request;
     use serial_test::serial;
     use tower::ServiceExt; // for `oneshot`
 
-    /// Helper to create store and registry for testing
-    /// Returns (Store, Registry, TempDir) - keep the TempDir alive to prevent cleanup
-    async fn create_test_storage() -> (Arc<dyn SecretStore>, Arc<Registry>, tempfile::TempDir) {
-        let temp_dir = tempfile::tempdir().expect("create temp dir");
-        let store = Arc::new(
-            FileStore::new(temp_dir.path().to_path_buf())
-                .await
-                .expect("create FileStore"),
-        ) as Arc<dyn SecretStore>;
-        let registry = Arc::new(Registry::new(Arc::clone(&store)));
-        (store, registry, temp_dir)
+    /// Helper to create an in-memory database for testing
+    async fn create_test_db() -> Arc<GapDatabase> {
+        Arc::new(GapDatabase::in_memory().await.expect("create in-memory DB"))
     }
 
     #[tokio::test]
     async fn test_get_status_without_auth() {
-        let (store, registry, _temp_dir) = create_test_storage().await;
-        let state = ApiState::new(9443, 9080, store, registry);
+        let db = create_test_db().await;
+        let state = ApiState::new(9443, 9080, db);
         let app = create_router(state);
 
         let response = app
@@ -1021,8 +977,8 @@ mod tests {
         use argon2::password_hash::{rand_core::OsRng, SaltString};
         use argon2::{Argon2, PasswordHasher};
 
-        let (store, registry, _temp_dir) = create_test_storage().await;
-        let state = ApiState::new(9443, 9080, store, registry);
+        let db = create_test_db().await;
+        let state = ApiState::new(9443, 9080, db);
 
         // Set up password hash
         let password = "testpass123";
@@ -1058,8 +1014,8 @@ mod tests {
         use argon2::password_hash::{rand_core::OsRng, SaltString};
         use argon2::{Argon2, PasswordHasher};
 
-        let (store, registry, _temp_dir) = create_test_storage().await;
-        let state = ApiState::new(9443, 9080, store, registry);
+        let db = create_test_db().await;
+        let state = ApiState::new(9443, 9080, db);
 
         // Set up password hash
         let password = "testpass123";
@@ -1102,8 +1058,8 @@ mod tests {
         use argon2::password_hash::{rand_core::OsRng, SaltString};
         use argon2::{Argon2, PasswordHasher};
 
-        let (store, registry, _temp_dir) = create_test_storage().await;
-        let state = ApiState::new(9443, 9080, store, registry);
+        let db = create_test_db().await;
+        let state = ApiState::new(9443, 9080, db);
 
         // Set up password hash
         let password = "testpass123";
@@ -1148,8 +1104,8 @@ mod tests {
         use argon2::password_hash::{rand_core::OsRng, SaltString};
         use argon2::{Argon2, PasswordHasher};
 
-        let (store, registry, _temp_dir) = create_test_storage().await;
-        let state = ApiState::new(9443, 9080, store, registry);
+        let db = create_test_db().await;
+        let state = ApiState::new(9443, 9080, db);
 
         // Set up password hash
         let password = "testpass123";
@@ -1189,14 +1145,14 @@ mod tests {
         let temp_dir = tempfile::tempdir().expect("create temp dir");
         std::env::set_var("GAP_DATA_DIR", temp_dir.path());
 
-        let (store, registry, _temp_dir) = create_test_storage().await;
+        let db = create_test_db().await;
 
-        // Pre-create CA in storage (as server does at startup)
+        // Pre-create CA in database (as server does at startup)
         let ca = CertificateAuthority::generate().expect("generate CA");
-        store.set("ca:cert", ca.ca_cert_pem().as_bytes()).await.expect("store CA cert");
-        store.set("ca:key", ca.ca_key_pem().as_bytes()).await.expect("store CA key");
+        db.set_config("ca:cert", ca.ca_cert_pem().as_bytes()).await.expect("store CA cert");
+        db.set_config("ca:key", ca.ca_key_pem().as_bytes()).await.expect("store CA key");
 
-        let state = ApiState::new(9443, 9080, store, registry);
+        let state = ApiState::new(9443, 9080, db);
         let app = create_router(state.clone());
 
         let password = "testpass123";
@@ -1241,14 +1197,14 @@ mod tests {
         let temp_dir = tempfile::tempdir().expect("create temp dir");
         std::env::set_var("GAP_DATA_DIR", temp_dir.path());
 
-        let (store, registry, _temp_dir) = create_test_storage().await;
+        let db = create_test_db().await;
 
-        // Pre-create CA in storage (as server does at startup)
+        // Pre-create CA in database (as server does at startup)
         let ca = CertificateAuthority::generate().expect("generate CA");
-        store.set("ca:cert", ca.ca_cert_pem().as_bytes()).await.expect("store CA cert");
-        store.set("ca:key", ca.ca_key_pem().as_bytes()).await.expect("store CA key");
+        db.set_config("ca:cert", ca.ca_cert_pem().as_bytes()).await.expect("store CA cert");
+        db.set_config("ca:key", ca.ca_key_pem().as_bytes()).await.expect("store CA key");
 
-        let state = ApiState::new(9443, 9080, store, registry);
+        let state = ApiState::new(9443, 9080, db);
         let app = create_router(state.clone());
 
         let password = "testpass123";
@@ -1292,8 +1248,8 @@ mod tests {
         let temp_dir = tempfile::tempdir().expect("create temp dir");
         std::env::set_var("GAP_DATA_DIR", temp_dir.path());
 
-        let (store, registry, _temp_dir) = create_test_storage().await;
-        let state = ApiState::new(9443, 9080, store, registry);
+        let db = create_test_db().await;
+        let state = ApiState::new(9443, 9080, db);
 
         // Set up password hash
         let password = "testpass123";
@@ -1337,8 +1293,8 @@ mod tests {
         let temp_dir = tempfile::tempdir().expect("create temp dir");
         std::env::set_var("GAP_DATA_DIR", temp_dir.path());
 
-        let (store, registry, _temp_dir) = create_test_storage().await;
-        let state = ApiState::new(9443, 9080, store, registry);
+        let db = create_test_db().await;
+        let state = ApiState::new(9443, 9080, db);
 
         // Set up password hash
         let password = "testpass123";
@@ -1387,8 +1343,8 @@ mod tests {
         let temp_dir = tempfile::tempdir().expect("create temp dir");
         std::env::set_var("GAP_DATA_DIR", temp_dir.path());
 
-        let (store, registry, _temp_dir) = create_test_storage().await;
-        let state = ApiState::new(9443, 9080, store.clone(), registry.clone());
+        let db = create_test_db().await;
+        let state = ApiState::new(9443, 9080, Arc::clone(&db));
 
         // Set up password hash
         let password = "testpass123";
@@ -1418,15 +1374,15 @@ mod tests {
             .await
             .unwrap();
 
-        // Only verify registry if installation succeeded
+        // Only verify database if installation succeeded
         if response.status() == StatusCode::OK {
-            // Verify the plugin was added to the registry
-            let plugins = registry.list_plugins().await.expect("list plugins from registry");
+            // Verify the plugin was added to the database
+            let plugins = db.list_plugins().await.expect("list plugins from database");
 
             // Find the installed plugin
             let installed_plugin = plugins.iter()
                 .find(|p| p.name == "mikekelly/exa-gap")
-                .expect("plugin should be in registry");
+                .expect("plugin should be in database");
 
             // Verify plugin metadata
             assert!(!installed_plugin.hosts.is_empty(), "plugin should have at least one host");
@@ -1434,14 +1390,14 @@ mod tests {
         } else {
             // Test is inconclusive if GitHub clone fails, but that's okay
             // We verified the code path compiles and basic structure is correct
-            eprintln!("Plugin installation from GitHub failed (status: {:?}), skipping registry verification", response.status());
+            eprintln!("Plugin installation from GitHub failed (status: {:?}), skipping database verification", response.status());
         }
     }
 
     #[tokio::test]
     async fn test_install_plugin_requires_auth() {
-        let (store, registry, _temp_dir) = create_test_storage().await;
-        let state = ApiState::new(9443, 9080, store, registry);
+        let db = create_test_db().await;
+        let state = ApiState::new(9443, 9080, db);
         let app = create_router(state);
 
         // Try to install without password
@@ -1474,8 +1430,8 @@ mod tests {
         let temp_dir = tempfile::tempdir().expect("create temp dir");
         std::env::set_var("GAP_DATA_DIR", temp_dir.path());
 
-        let (store, registry, _temp_dir) = create_test_storage().await;
-        let state = ApiState::new(9443, 9080, store, registry);
+        let db = create_test_db().await;
+        let state = ApiState::new(9443, 9080, db);
 
         // Set up password hash
         let password = "testpass123";
@@ -1518,8 +1474,8 @@ mod tests {
         let temp_dir = tempfile::tempdir().expect("create temp dir");
         std::env::set_var("GAP_DATA_DIR", temp_dir.path());
 
-        let (store, registry, _temp_dir) = create_test_storage().await;
-        let state = ApiState::new(9443, 9080, store, registry);
+        let db = create_test_db().await;
+        let state = ApiState::new(9443, 9080, db);
 
         // Set up password hash
         let password = "testpass123";
@@ -1553,22 +1509,12 @@ mod tests {
 
     #[tokio::test]
     #[serial]
-    async fn test_api_uses_shared_store() {
-        use gap_lib::storage::FileStore;
+    async fn test_api_uses_shared_db() {
         use argon2::password_hash::{rand_core::OsRng, SaltString};
         use argon2::{Argon2, PasswordHasher};
 
-        // Create temp directory for shared storage
-        let temp_dir = tempfile::tempdir().expect("create temp dir");
-        let store = Arc::new(
-            FileStore::new(temp_dir.path().to_path_buf())
-                .await
-                .expect("create FileStore"),
-        ) as Arc<dyn SecretStore>;
-
-        // Create registry with shared store
-        let registry = Arc::new(Registry::new(Arc::clone(&store)));
-        let state = ApiState::new(9443, 9080, Arc::clone(&store), registry);
+        let db = create_test_db().await;
+        let state = ApiState::new(9443, 9080, Arc::clone(&db));
 
         // Set up password hash
         let password = "testpass123";
@@ -1577,7 +1523,7 @@ mod tests {
         let password_hash = argon2.hash_password(password.as_bytes(), &salt).unwrap().to_string();
         state.set_password_hash(password_hash).await;
 
-        // Now set a credential via the API (credentials are stored directly in registry)
+        // Now set a credential via the API
         let app = create_router(state.clone());
         let body = serde_json::json!({
             "password_hash": password,
@@ -1598,21 +1544,20 @@ mod tests {
 
         assert_eq!(response.status(), StatusCode::OK);
 
-        // Verify the credential was written to the registry (which uses the shared store)
-        // Credentials are now stored directly in the registry, not as separate storage entries
-        let credential = state.registry.get_credential("test-plugin", "api_key")
+        // Verify the credential was written to the database
+        let credential = db.get_credential("test-plugin", "api_key")
             .await
-            .expect("read from registry");
+            .expect("read from database");
         assert_eq!(
             credential,
             Some("api_write_value".to_string()),
-            "API endpoint should write to the registry using the shared store"
+            "API endpoint should write credentials to the database"
         );
     }
 
     #[tokio::test]
     #[serial]
-    async fn test_set_credential_updates_registry() {
+    async fn test_set_credential_updates_database() {
         use gap_lib::registry::CredentialEntry;
         use argon2::password_hash::{rand_core::OsRng, SaltString};
         use argon2::{Argon2, PasswordHasher};
@@ -1620,8 +1565,8 @@ mod tests {
         let temp_dir = tempfile::tempdir().expect("create temp dir");
         std::env::set_var("GAP_DATA_DIR", temp_dir.path());
 
-        let (store, registry, _temp_dir) = create_test_storage().await;
-        let state = ApiState::new(9443, 9080, store, registry.clone());
+        let db = create_test_db().await;
+        let state = ApiState::new(9443, 9080, Arc::clone(&db));
 
         // Set up password hash
         let password = "testpass123";
@@ -1652,8 +1597,8 @@ mod tests {
 
         assert_eq!(response.status(), StatusCode::OK);
 
-        // Verify the credential was added to the registry
-        let creds = registry.list_credentials().await.expect("list should succeed");
+        // Verify the credential was added to the database
+        let creds = db.list_credentials().await.expect("list should succeed");
         assert_eq!(creds.len(), 1);
         assert_eq!(creds[0], CredentialEntry {
             plugin: "exa".to_string(),
@@ -1663,16 +1608,15 @@ mod tests {
 
     #[tokio::test]
     #[serial]
-    async fn test_delete_credential_updates_registry() {
-        use gap_lib::registry::CredentialEntry;
+    async fn test_delete_credential_updates_database() {
         use argon2::password_hash::{rand_core::OsRng, SaltString};
         use argon2::{Argon2, PasswordHasher};
 
         let temp_dir = tempfile::tempdir().expect("create temp dir");
         std::env::set_var("GAP_DATA_DIR", temp_dir.path());
 
-        let (store, registry, _temp_dir) = create_test_storage().await;
-        let state = ApiState::new(9443, 9080, store, registry.clone());
+        let db = create_test_db().await;
+        let state = ApiState::new(9443, 9080, Arc::clone(&db));
 
         // Set up password hash
         let password = "testpass123";
@@ -1681,12 +1625,8 @@ mod tests {
         let password_hash = argon2.hash_password(password.as_bytes(), &salt).unwrap().to_string();
         state.set_password_hash(password_hash).await;
 
-        // Pre-populate registry with a credential
-        let cred = CredentialEntry {
-            plugin: "exa".to_string(),
-            field: "api_key".to_string(),
-        };
-        registry.add_credential(&cred).await.expect("add should succeed");
+        // Pre-populate database with a credential
+        db.set_credential("exa", "api_key", "some_value").await.expect("add should succeed");
 
         let app = create_router(state);
 
@@ -1709,8 +1649,8 @@ mod tests {
 
         assert_eq!(response.status(), StatusCode::OK);
 
-        // Verify the credential was removed from the registry
-        let creds = registry.list_credentials().await.expect("list should succeed");
+        // Verify the credential was removed from the database
+        let creds = db.list_credentials().await.expect("list should succeed");
         assert_eq!(creds.len(), 0);
     }
 
@@ -1724,8 +1664,8 @@ mod tests {
         let temp_dir = tempfile::tempdir().expect("create temp dir");
         std::env::set_var("GAP_DATA_DIR", temp_dir.path());
 
-        let (store, registry, _temp_dir) = create_test_storage().await;
-        let state = ApiState::new(9443, 9080, store, Arc::clone(&registry));
+        let db = create_test_db().await;
+        let state = ApiState::new(9443, 9080, Arc::clone(&db));
 
         // Set up password hash
         let password = "testpass123";
@@ -1775,8 +1715,8 @@ mod tests {
             .unwrap();
         assert_eq!(response2.status(), StatusCode::OK);
 
-        // Verify the registry only has ONE entry for this credential (no duplicates)
-        let creds = registry.list_credentials().await.expect("list should succeed");
+        // Verify the database only has ONE entry for this credential (no duplicates)
+        let creds = db.list_credentials().await.expect("list should succeed");
         assert_eq!(creds.len(), 1);
         assert_eq!(creds[0], CredentialEntry {
             plugin: "exa".to_string(),
@@ -1784,19 +1724,17 @@ mod tests {
         });
     }
 
-    // RED: Tests for registry integration with token endpoints
     #[tokio::test]
     #[serial]
-    async fn test_list_tokens_uses_registry() {
-        use gap_lib::registry::TokenEntry;
+    async fn test_list_tokens_uses_database() {
         use argon2::password_hash::{rand_core::OsRng, SaltString};
         use argon2::{Argon2, PasswordHasher};
 
         let temp_dir = tempfile::tempdir().expect("create temp dir");
         std::env::set_var("GAP_DATA_DIR", temp_dir.path());
 
-        let (store, registry, _temp_dir) = create_test_storage().await;
-        let state = ApiState::new(9443, 9080, store, registry.clone());
+        let db = create_test_db().await;
+        let state = ApiState::new(9443, 9080, Arc::clone(&db));
 
         // Set up password hash
         let password = "testpass123";
@@ -1805,14 +1743,9 @@ mod tests {
         let password_hash = argon2.hash_password(password.as_bytes(), &salt).unwrap().to_string();
         state.set_password_hash(password_hash).await;
 
-        // Add a token to the registry directly
+        // Add a token to the database directly
         let token_value = "gap_test_token_12345".to_string();
-        let token_entry = TokenEntry {
-            token_value: token_value.clone(),
-            name: "test-token".to_string(),
-            created_at: Utc::now(),
-        };
-        registry.add_token(&token_entry).await.expect("add token to registry");
+        db.add_token(&token_value, "test-token", Utc::now()).await.expect("add token to database");
 
         // List tokens via API
         let app = create_router(state);
@@ -1839,7 +1772,7 @@ mod tests {
             .unwrap();
         let tokens_response: TokensResponse = serde_json::from_slice(&body_bytes).unwrap();
 
-        // Verify the token from registry is in the response
+        // Verify the token from database is in the response
         assert_eq!(tokens_response.tokens.len(), 1);
         assert_eq!(tokens_response.tokens[0].id, token_value);
         assert_eq!(tokens_response.tokens[0].name, "test-token");
@@ -1848,15 +1781,15 @@ mod tests {
 
     #[tokio::test]
     #[serial]
-    async fn test_create_token_adds_to_registry() {
+    async fn test_create_token_adds_to_database() {
         use argon2::password_hash::{rand_core::OsRng, SaltString};
         use argon2::{Argon2, PasswordHasher};
 
         let temp_dir = tempfile::tempdir().expect("create temp dir");
         std::env::set_var("GAP_DATA_DIR", temp_dir.path());
 
-        let (store, registry, _temp_dir) = create_test_storage().await;
-        let state = ApiState::new(9443, 9080, store, registry.clone());
+        let db = create_test_db().await;
+        let state = ApiState::new(9443, 9080, Arc::clone(&db));
 
         // Set up password hash
         let password = "testpass123";
@@ -1891,8 +1824,8 @@ mod tests {
             .unwrap();
         let token_response: TokenResponse = serde_json::from_slice(&body_bytes).unwrap();
 
-        // Verify the token was added to the registry
-        let tokens = registry.list_tokens().await.expect("list tokens from registry");
+        // Verify the token was added to the database
+        let tokens = db.list_tokens().await.expect("list tokens from database");
         assert_eq!(tokens.len(), 1);
         assert_eq!(tokens[0].token_value, token_response.id);
         assert_eq!(tokens[0].name, "new-token");
@@ -1900,16 +1833,15 @@ mod tests {
 
     #[tokio::test]
     #[serial]
-    async fn test_delete_token_removes_from_registry() {
-        use gap_lib::registry::TokenEntry;
+    async fn test_delete_token_removes_from_database() {
         use argon2::password_hash::{rand_core::OsRng, SaltString};
         use argon2::{Argon2, PasswordHasher};
 
         let temp_dir = tempfile::tempdir().expect("create temp dir");
         std::env::set_var("GAP_DATA_DIR", temp_dir.path());
 
-        let (store, registry, _temp_dir) = create_test_storage().await;
-        let state = ApiState::new(9443, 9080, store.clone(), registry.clone());
+        let db = create_test_db().await;
+        let state = ApiState::new(9443, 9080, Arc::clone(&db));
 
         // Set up password hash
         let password = "testpass123";
@@ -1918,18 +1850,9 @@ mod tests {
         let password_hash = argon2.hash_password(password.as_bytes(), &salt).unwrap().to_string();
         state.set_password_hash(password_hash).await;
 
-        // Create a token and add it to both registry and storage
+        // Create a token and add it to the database
         let token = AgentToken::new("test-token");
-        let store_key = format!("token:{}", token.token);
-        let token_json = serde_json::to_vec(&token).expect("serialize token");
-        store.set(&store_key, &token_json).await.expect("store token");
-
-        let token_entry = TokenEntry {
-            token_value: token.token.clone(),
-            name: token.name.clone(),
-            created_at: token.created_at,
-        };
-        registry.add_token(&token_entry).await.expect("add token to registry");
+        db.add_token(&token.token, &token.name, token.created_at).await.expect("add token to database");
 
         // Delete token via API
         let app = create_router(state);
@@ -1951,9 +1874,9 @@ mod tests {
 
         assert_eq!(response.status(), StatusCode::OK);
 
-        // Verify the token was removed from the registry
-        let tokens = registry.list_tokens().await.expect("list tokens from registry");
-        assert_eq!(tokens.len(), 0, "Token should be removed from registry");
+        // Verify the token was removed from the database
+        let tokens = db.list_tokens().await.expect("list tokens from database");
+        assert_eq!(tokens.len(), 0, "Token should be removed from database");
     }
 
     #[tokio::test]
@@ -1964,14 +1887,14 @@ mod tests {
         let temp_dir = tempfile::tempdir().expect("create temp dir");
         std::env::set_var("GAP_DATA_DIR", temp_dir.path());
 
-        let (store, registry, _temp_dir) = create_test_storage().await;
+        let db = create_test_db().await;
 
-        // Pre-create CA in storage (as server does at startup)
+        // Pre-create CA in database (as server does at startup)
         let ca = CertificateAuthority::generate().expect("generate CA");
-        store.set("ca:cert", ca.ca_cert_pem().as_bytes()).await.expect("store CA cert");
-        store.set("ca:key", ca.ca_key_pem().as_bytes()).await.expect("store CA key");
+        db.set_config("ca:cert", ca.ca_cert_pem().as_bytes()).await.expect("store CA cert");
+        db.set_config("ca:key", ca.ca_key_pem().as_bytes()).await.expect("store CA key");
 
-        let state = ApiState::new(9443, 9080, store.clone(), registry);
+        let state = ApiState::new(9443, 9080, Arc::clone(&db));
         let app = create_router(state);
 
         let password = "testpass123";
@@ -1997,14 +1920,14 @@ mod tests {
         assert_eq!(response.status(), StatusCode::OK);
 
         // Verify management cert and key were stored
-        let mgmt_cert = store.get("mgmt:cert").await.expect("get mgmt:cert");
+        let mgmt_cert = db.get_config("mgmt:cert").await.expect("get mgmt:cert");
         assert!(mgmt_cert.is_some(), "Management cert should be stored");
 
-        let mgmt_key = store.get("mgmt:key").await.expect("get mgmt:key");
+        let mgmt_key = db.get_config("mgmt:key").await.expect("get mgmt:key");
         assert!(mgmt_key.is_some(), "Management key should be stored");
 
         // Verify the stored SANs
-        let mgmt_sans = store.get("mgmt:sans").await.expect("get mgmt:sans");
+        let mgmt_sans = db.get_config("mgmt:sans").await.expect("get mgmt:sans");
         assert!(mgmt_sans.is_some(), "Management SANs should be stored");
         let sans: Vec<String> = serde_json::from_slice(&mgmt_sans.unwrap()).expect("parse SANs JSON");
         assert_eq!(sans, vec!["DNS:example.com", "IP:192.168.1.1"]);
@@ -2018,14 +1941,14 @@ mod tests {
         let temp_dir = tempfile::tempdir().expect("create temp dir");
         std::env::set_var("GAP_DATA_DIR", temp_dir.path());
 
-        let (store, registry, _temp_dir) = create_test_storage().await;
+        let db = create_test_db().await;
 
-        // Pre-create CA in storage (as server does at startup)
+        // Pre-create CA in database (as server does at startup)
         let ca = CertificateAuthority::generate().expect("generate CA");
-        store.set("ca:cert", ca.ca_cert_pem().as_bytes()).await.expect("store CA cert");
-        store.set("ca:key", ca.ca_key_pem().as_bytes()).await.expect("store CA key");
+        db.set_config("ca:cert", ca.ca_cert_pem().as_bytes()).await.expect("store CA cert");
+        db.set_config("ca:key", ca.ca_key_pem().as_bytes()).await.expect("store CA key");
 
-        let state = ApiState::new(9443, 9080, store.clone(), registry);
+        let state = ApiState::new(9443, 9080, Arc::clone(&db));
         let app = create_router(state);
 
         let password = "testpass123";
@@ -2050,20 +1973,19 @@ mod tests {
         assert_eq!(response.status(), StatusCode::OK);
 
         // Verify management cert and key were stored
-        let mgmt_cert = store.get("mgmt:cert").await.expect("get mgmt:cert");
+        let mgmt_cert = db.get_config("mgmt:cert").await.expect("get mgmt:cert");
         assert!(mgmt_cert.is_some(), "Management cert should be stored");
 
-        let mgmt_key = store.get("mgmt:key").await.expect("get mgmt:key");
+        let mgmt_key = db.get_config("mgmt:key").await.expect("get mgmt:key");
         assert!(mgmt_key.is_some(), "Management key should be stored");
 
         // Verify the default SANs were used
-        let mgmt_sans = store.get("mgmt:sans").await.expect("get mgmt:sans");
+        let mgmt_sans = db.get_config("mgmt:sans").await.expect("get mgmt:sans");
         assert!(mgmt_sans.is_some(), "Management SANs should be stored");
         let sans: Vec<String> = serde_json::from_slice(&mgmt_sans.unwrap()).expect("parse SANs JSON");
         assert_eq!(sans, vec!["DNS:localhost", "IP:127.0.0.1", "IP:::1"]);
     }
 
-    // RED: Test for POST /v1/management-cert endpoint
     #[tokio::test]
     #[serial]
     async fn test_rotate_management_cert_endpoint() {
@@ -2074,22 +1996,22 @@ mod tests {
         let temp_dir = tempfile::tempdir().expect("create temp dir");
         std::env::set_var("GAP_DATA_DIR", temp_dir.path());
 
-        let (store, registry, _temp_dir) = create_test_storage().await;
+        let db = create_test_db().await;
 
-        // Pre-create CA in storage
+        // Pre-create CA in database
         let ca = CertificateAuthority::generate().expect("generate CA");
-        store.set("ca:cert", ca.ca_cert_pem().as_bytes()).await.expect("store CA cert");
-        store.set("ca:key", ca.ca_key_pem().as_bytes()).await.expect("store CA key");
+        db.set_config("ca:cert", ca.ca_cert_pem().as_bytes()).await.expect("store CA cert");
+        db.set_config("ca:key", ca.ca_key_pem().as_bytes()).await.expect("store CA key");
 
         // Pre-create initial management cert
         let initial_sans = vec!["DNS:localhost".to_string()];
         let (initial_cert_der, initial_key_der) = ca.sign_server_cert(&initial_sans).expect("sign initial cert");
         let initial_cert_pem = gap_lib::tls::der_to_pem(&initial_cert_der, "CERTIFICATE");
         let initial_key_pem = gap_lib::tls::der_to_pem(&initial_key_der, "PRIVATE KEY");
-        store.set("mgmt:cert", initial_cert_pem.as_bytes()).await.expect("store initial cert");
-        store.set("mgmt:key", initial_key_pem.as_bytes()).await.expect("store initial key");
+        db.set_config("mgmt:cert", initial_cert_pem.as_bytes()).await.expect("store initial cert");
+        db.set_config("mgmt:key", initial_key_pem.as_bytes()).await.expect("store initial key");
 
-        let state = ApiState::new(9443, 9080, store.clone(), registry);
+        let state = ApiState::new(9443, 9080, Arc::clone(&db));
 
         // Set up password hash
         let password = "testpass123";
@@ -2121,7 +2043,7 @@ mod tests {
         assert_eq!(response.status(), StatusCode::OK);
 
         // Verify new cert and key were stored
-        let new_cert = store.get("mgmt:cert").await.expect("get new cert");
+        let new_cert = db.get_config("mgmt:cert").await.expect("get new cert");
         assert!(new_cert.is_some());
         let new_cert_pem = String::from_utf8(new_cert.unwrap()).expect("parse cert PEM");
 
@@ -2143,8 +2065,8 @@ mod tests {
     #[tokio::test]
     #[serial]
     async fn test_rotate_management_cert_requires_auth() {
-        let (store, registry, _temp_dir) = create_test_storage().await;
-        let state = ApiState::new(9443, 9080, store, registry);
+        let db = create_test_db().await;
+        let state = ApiState::new(9443, 9080, db);
         let app = create_router(state);
 
         // Try to rotate without password
@@ -2178,24 +2100,24 @@ mod tests {
         let temp_dir = tempfile::tempdir().expect("create temp dir");
         std::env::set_var("GAP_DATA_DIR", temp_dir.path());
 
-        let (store, registry, _temp_dir) = create_test_storage().await;
+        let db = create_test_db().await;
 
-        // Pre-create CA in storage
+        // Pre-create CA in database
         let ca = CertificateAuthority::generate().expect("generate CA");
-        store.set("ca:cert", ca.ca_cert_pem().as_bytes()).await.expect("store CA cert");
-        store.set("ca:key", ca.ca_key_pem().as_bytes()).await.expect("store CA key");
+        db.set_config("ca:cert", ca.ca_cert_pem().as_bytes()).await.expect("store CA cert");
+        db.set_config("ca:key", ca.ca_key_pem().as_bytes()).await.expect("store CA key");
 
         // Pre-create initial management cert
         let initial_sans = vec!["DNS:localhost".to_string()];
         let (initial_cert_der, initial_key_der) = ca.sign_server_cert(&initial_sans).expect("sign initial cert");
         let initial_cert_pem = gap_lib::tls::der_to_pem(&initial_cert_der, "CERTIFICATE");
         let initial_key_pem = gap_lib::tls::der_to_pem(&initial_key_der, "PRIVATE KEY");
-        store.set("mgmt:cert", initial_cert_pem.as_bytes()).await.expect("store initial cert");
-        store.set("mgmt:key", initial_key_pem.as_bytes()).await.expect("store initial key");
+        db.set_config("mgmt:cert", initial_cert_pem.as_bytes()).await.expect("store initial cert");
+        db.set_config("mgmt:key", initial_key_pem.as_bytes()).await.expect("store initial key");
 
         // Create ApiState without TLS config (tls_config field will be None)
         // This simulates the scenario where hot-swap is optional
-        let state = ApiState::new(9443, 9080, store.clone(), registry);
+        let state = ApiState::new(9443, 9080, Arc::clone(&db));
 
         // Set up password hash
         let password = "testpass123";
@@ -2227,7 +2149,7 @@ mod tests {
         assert_eq!(response.status(), StatusCode::OK);
 
         // Verify new cert and key were stored
-        let new_cert = store.get("mgmt:cert").await.expect("get new cert");
+        let new_cert = db.get_config("mgmt:cert").await.expect("get new cert");
         assert!(new_cert.is_some());
         let new_cert_pem = String::from_utf8(new_cert.unwrap()).expect("parse cert PEM");
 
