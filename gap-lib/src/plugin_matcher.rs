@@ -2,10 +2,9 @@
 //!
 //! Provides functions to find plugins that match a given host.
 
+use crate::database::GapDatabase;
 use crate::error::Result;
 use crate::plugin_runtime::PluginRuntime;
-use crate::registry::Registry;
-use crate::storage::SecretStore;
 use crate::types::GAPPlugin;
 
 /// Check if a host pattern matches a given host
@@ -40,23 +39,21 @@ fn matches_host_pattern(pattern: &str, host: &str) -> bool {
 
 /// Find a plugin that matches the given host
 ///
-/// Uses the Registry to check plugin host patterns, then loads only the matched plugin code.
+/// Uses the GapDatabase to check plugin host patterns, then loads only the matched plugin code.
 /// Returns the first matching plugin, or None if no match is found.
 ///
 /// # Arguments
 /// * `host` - The hostname to match against (e.g., "api.example.com")
-/// * `store` - SecretStore to load plugin code from
-/// * `registry` - Registry to list available plugins
+/// * `db` - GapDatabase to list plugins and load plugin code from
 ///
 /// # Returns
 /// Option containing the matching plugin, or None
-pub async fn find_matching_plugin<S: SecretStore + ?Sized>(
+pub async fn find_matching_plugin(
     host: &str,
-    store: &S,
-    registry: &Registry,
+    db: &GapDatabase,
 ) -> Result<Option<GAPPlugin>> {
-    // Get all plugin entries from registry
-    let plugin_entries = registry.list_plugins().await?;
+    // Get all plugin entries from database
+    let plugin_entries = db.list_plugins().await?;
 
     // Find first plugin whose host patterns match (cheap string matching)
     for entry in plugin_entries {
@@ -64,13 +61,10 @@ pub async fn find_matching_plugin<S: SecretStore + ?Sized>(
         let host_matches = entry.hosts.iter().any(|pattern| matches_host_pattern(pattern, host));
 
         if host_matches {
-            // Only NOW load the plugin code from storage
-            let key = format!("plugin:{}", entry.name);
-            let plugin_code = store.get(&key).await?;
+            // Only NOW load the plugin code from database
+            let plugin_code = db.get_plugin_source(&entry.name).await?;
 
-            if let Some(code_bytes) = plugin_code {
-                let code = String::from_utf8_lossy(&code_bytes);
-
+            if let Some(code) = plugin_code {
                 // Create a runtime and load the plugin
                 let mut runtime = PluginRuntime::new()?;
                 if let Ok(plugin) = runtime.load_plugin_from_code(&entry.name, &code) {
@@ -86,9 +80,8 @@ pub async fn find_matching_plugin<S: SecretStore + ?Sized>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::registry::{PluginEntry, Registry};
-    use crate::storage::FileStore;
-    use std::sync::Arc;
+    use crate::database::GapDatabase;
+    use crate::registry::PluginEntry;
 
     // Test the host pattern matching logic
     #[test]
@@ -127,16 +120,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_find_matching_plugin_exact_match() {
-        let temp_dir = std::env::temp_dir().join(format!(
-            "gap_matcher_test_{}",
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-
-        let store = Arc::new(FileStore::new(temp_dir.clone()).await.unwrap());
-        let registry = Registry::new(Arc::clone(&store) as Arc<dyn SecretStore>);
+        let db = GapDatabase::in_memory().await.unwrap();
 
         let plugin_code = r#"
         var plugin = {
@@ -147,36 +131,22 @@ mod tests {
         };
         "#;
 
-        store.set("plugin:test", plugin_code.as_bytes()).await.unwrap();
-
-        // Add to registry
         let entry = PluginEntry {
             name: "test".to_string(),
             hosts: vec!["api.example.com".to_string()],
             credential_schema: vec![],
             commit_sha: None,
         };
-        registry.add_plugin(&entry).await.unwrap();
+        db.add_plugin(&entry, plugin_code).await.unwrap();
 
-        let result = find_matching_plugin("api.example.com", &*store, &registry).await.unwrap();
+        let result = find_matching_plugin("api.example.com", &db).await.unwrap();
         assert!(result.is_some());
         assert_eq!(result.unwrap().name, "test");
-
-        tokio::fs::remove_dir_all(temp_dir).await.ok();
     }
 
     #[tokio::test]
     async fn test_find_matching_plugin_wildcard() {
-        let temp_dir = std::env::temp_dir().join(format!(
-            "gap_matcher_wildcard_test_{}",
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-
-        let store = Arc::new(FileStore::new(temp_dir.clone()).await.unwrap());
-        let registry = Registry::new(Arc::clone(&store) as Arc<dyn SecretStore>);
+        let db = GapDatabase::in_memory().await.unwrap();
 
         let plugin_code = r#"
         var plugin = {
@@ -187,36 +157,22 @@ mod tests {
         };
         "#;
 
-        store.set("plugin:s3", plugin_code.as_bytes()).await.unwrap();
-
-        // Add to registry
         let entry = PluginEntry {
             name: "s3".to_string(),
             hosts: vec!["*.s3.amazonaws.com".to_string()],
             credential_schema: vec![],
             commit_sha: None,
         };
-        registry.add_plugin(&entry).await.unwrap();
+        db.add_plugin(&entry, plugin_code).await.unwrap();
 
-        let result = find_matching_plugin("bucket.s3.amazonaws.com", &*store, &registry).await.unwrap();
+        let result = find_matching_plugin("bucket.s3.amazonaws.com", &db).await.unwrap();
         assert!(result.is_some());
         assert_eq!(result.unwrap().name, "s3");
-
-        tokio::fs::remove_dir_all(temp_dir).await.ok();
     }
 
     #[tokio::test]
     async fn test_find_matching_plugin_no_match() {
-        let temp_dir = std::env::temp_dir().join(format!(
-            "gap_matcher_nomatch_test_{}",
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-
-        let store = Arc::new(FileStore::new(temp_dir.clone()).await.unwrap());
-        let registry = Registry::new(Arc::clone(&store) as Arc<dyn SecretStore>);
+        let db = GapDatabase::in_memory().await.unwrap();
 
         let plugin_code = r#"
         var plugin = {
@@ -227,43 +183,24 @@ mod tests {
         };
         "#;
 
-        store.set("plugin:test", plugin_code.as_bytes()).await.unwrap();
-
-        // Add to registry
         let entry = PluginEntry {
             name: "test".to_string(),
             hosts: vec!["api.example.com".to_string()],
             credential_schema: vec![],
             commit_sha: None,
         };
-        registry.add_plugin(&entry).await.unwrap();
+        db.add_plugin(&entry, plugin_code).await.unwrap();
 
-        let result = find_matching_plugin("api.other.com", &*store, &registry).await.unwrap();
+        let result = find_matching_plugin("api.other.com", &db).await.unwrap();
         assert!(result.is_none());
-
-        tokio::fs::remove_dir_all(temp_dir).await.ok();
     }
 
     #[tokio::test]
     async fn test_matches_using_registry_hosts_not_js() {
         // This test verifies that we use PluginEntry.hosts for matching,
-        // not JavaScript execution.
-        //
-        // Current behavior: loads JS for every plugin to check matches (inefficient)
-        // Desired behavior: check PluginEntry.hosts BEFORE loading JS
-        //
-        // We'll store INVALID JavaScript. If matching happens AFTER we check PluginEntry.hosts,
-        // we should still be able to reject non-matches efficiently.
-        let temp_dir = std::env::temp_dir().join(format!(
-            "gap_matcher_registry_test_{}",
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-
-        let store = Arc::new(FileStore::new(temp_dir.clone()).await.unwrap());
-        let registry = Registry::new(Arc::clone(&store) as Arc<dyn SecretStore>);
+        // not JavaScript execution. Non-matching plugins have invalid JS;
+        // if the matcher loads them, it will fail.
+        let db = GapDatabase::in_memory().await.unwrap();
 
         // Add three plugins with different host patterns
         let entry1 = PluginEntry {
@@ -272,7 +209,9 @@ mod tests {
             credential_schema: vec![],
             commit_sha: None,
         };
-        registry.add_plugin(&entry1).await.unwrap();
+        // Store INVALID JavaScript for the non-matching plugins
+        let invalid_code = "THIS IS NOT VALID JAVASCRIPT!!! { syntax error }";
+        db.add_plugin(&entry1, invalid_code).await.unwrap();
 
         let entry2 = PluginEntry {
             name: "nomatch2".to_string(),
@@ -280,21 +219,7 @@ mod tests {
             credential_schema: vec![],
             commit_sha: None,
         };
-        registry.add_plugin(&entry2).await.unwrap();
-
-        let entry3 = PluginEntry {
-            name: "match".to_string(),
-            hosts: vec!["api.example.com".to_string()],
-            credential_schema: vec![],
-            commit_sha: None,
-        };
-        registry.add_plugin(&entry3).await.unwrap();
-
-        // Store INVALID JavaScript for the non-matching plugins
-        // If the matcher loads these, it will fail
-        let invalid_code = "THIS IS NOT VALID JAVASCRIPT!!! { syntax error }";
-        store.set("plugin:nomatch1", invalid_code.as_bytes()).await.unwrap();
-        store.set("plugin:nomatch2", invalid_code.as_bytes()).await.unwrap();
+        db.add_plugin(&entry2, invalid_code).await.unwrap();
 
         // Store VALID JavaScript only for the matching plugin
         let valid_code = r#"
@@ -305,19 +230,16 @@ mod tests {
             transform: function(request, credentials) { return request; }
         };
         "#;
-        store.set("plugin:match", valid_code.as_bytes()).await.unwrap();
+        let entry3 = PluginEntry {
+            name: "match".to_string(),
+            hosts: vec!["api.example.com".to_string()],
+            credential_schema: vec![],
+            commit_sha: None,
+        };
+        db.add_plugin(&entry3, valid_code).await.unwrap();
 
-        // This should succeed by:
-        // 1. Checking PluginEntry.hosts for all three plugins
-        // 2. Finding that "match" matches "api.example.com"
-        // 3. Loading ONLY "match" plugin code (not the invalid ones)
-        // 4. Returning the matched plugin
-        //
-        // If we load invalid JS code, this test will fail
-        let result = find_matching_plugin("api.example.com", &*store, &registry).await.unwrap();
+        let result = find_matching_plugin("api.example.com", &db).await.unwrap();
         assert!(result.is_some());
         assert_eq!(result.unwrap().name, "match");
-
-        tokio::fs::remove_dir_all(temp_dir).await.ok();
     }
 }

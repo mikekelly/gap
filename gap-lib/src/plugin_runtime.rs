@@ -7,7 +7,7 @@
 //! - TextEncoder/TextDecoder
 //! - Sandbox restrictions (no fetch, eval, etc.)
 
-use crate::storage::SecretStore;
+use crate::database::GapDatabase;
 use crate::types::{GAPCredentials, GAPPlugin, GAPRequest};
 use crate::{GapError, Result};
 use base64::Engine;
@@ -568,28 +568,22 @@ impl PluginRuntime {
         Ok(plugin)
     }
 
-    /// Load a plugin from the SecretStore and execute it
+    /// Load a plugin from the GapDatabase and execute it
     ///
-    /// Loads the plugin JavaScript code from the store (key: `plugin:{name}`),
+    /// Loads the plugin JavaScript code from the database,
     /// executes it, and extracts the plugin metadata object.
     ///
     /// # Arguments
     /// * `name` - Plugin name to load
-    /// * `store` - SecretStore to retrieve plugin code from
+    /// * `db` - GapDatabase to retrieve plugin code from
     ///
     /// # Returns
     /// The loaded GAPPlugin with metadata
-    pub async fn load_plugin<S: SecretStore>(&mut self, name: &str, store: &S) -> Result<GAPPlugin> {
-        // Retrieve plugin code from store
-        let key = format!("plugin:{}", name);
-        let code = store.get(&key).await?
-            .ok_or_else(|| GapError::plugin(format!("Plugin '{}' not found in store", name)))?;
+    pub async fn load_plugin(&mut self, name: &str, db: &GapDatabase) -> Result<GAPPlugin> {
+        let code = db.get_plugin_source(name).await?
+            .ok_or_else(|| GapError::not_found(format!("Plugin '{}' not found", name)))?;
 
-        let code_str = String::from_utf8(code)
-            .map_err(|e| GapError::plugin(format!("Plugin code is not valid UTF-8: {}", e)))?;
-
-        // Use the common code loading logic
-        self.load_plugin_from_code(name, &code_str)
+        self.load_plugin_from_code(name, &code)
     }
 
     /// Extract plugin metadata from the JavaScript context
@@ -1117,10 +1111,10 @@ mod tests {
 
     #[tokio::test]
     async fn test_load_plugin() {
-        use crate::storage::FileStore;
+        use crate::database::GapDatabase;
+        use crate::registry::PluginEntry;
 
-        let temp_dir = std::env::temp_dir().join(format!("gap_test_{}", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
-        let store = FileStore::new(temp_dir.clone()).await.unwrap();
+        let db = GapDatabase::in_memory().await.unwrap();
 
         // Create a simple plugin
         let plugin_code = r#"
@@ -1134,17 +1128,20 @@ mod tests {
         };
         "#;
 
-        store.set("plugin:test-plugin", plugin_code.as_bytes()).await.unwrap();
+        let entry = PluginEntry {
+            name: "test-plugin".to_string(),
+            hosts: vec!["api.example.com".to_string()],
+            credential_schema: vec!["api_key".to_string()],
+            commit_sha: None,
+        };
+        db.add_plugin(&entry, plugin_code).await.unwrap();
 
         let mut runtime = PluginRuntime::new().unwrap();
-        let plugin = runtime.load_plugin("test-plugin", &store).await.unwrap();
+        let plugin = runtime.load_plugin("test-plugin", &db).await.unwrap();
 
         assert_eq!(plugin.name, "test-plugin");
         assert_eq!(plugin.match_patterns, vec!["api.example.com"]);
         assert_eq!(plugin.credential_schema, vec!["api_key"]);
-
-        // Cleanup
-        tokio::fs::remove_dir_all(temp_dir).await.ok();
     }
 
     #[test]

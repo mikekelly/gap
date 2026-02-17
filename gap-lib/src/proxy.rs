@@ -7,11 +7,10 @@
 //! - Bidirectional proxying (HTTP/1.1 and HTTP/2)
 //! - Bearer token authentication
 
+use crate::database::GapDatabase;
 use crate::error::{GapError, Result};
-use crate::registry::Registry;
-use crate::storage::SecretStore;
 use crate::tls::CertificateAuthority;
-use crate::types::AgentToken;
+use crate::types::{ActivityEntry, AgentToken};
 use rustls::pki_types::CertificateDer;
 use rustls::ServerConfig;
 use std::sync::Arc;
@@ -26,10 +25,8 @@ pub struct ProxyServer {
     port: u16,
     /// Certificate Authority for dynamic cert generation
     ca: Arc<CertificateAuthority>,
-    /// Secret store for loading plugins and credentials
-    store: Arc<dyn SecretStore>,
-    /// Registry for centralized metadata storage
-    registry: Arc<Registry>,
+    /// Database for tokens, plugins, credentials, and activity logging
+    db: Arc<GapDatabase>,
     /// Root certificates for upstream TLS connections.
     /// Stored as root certs (not a pre-built connector) so we can build
     /// per-connection connectors with ALPN matching the agent's negotiated protocol.
@@ -39,12 +36,11 @@ pub struct ProxyServer {
 }
 
 impl ProxyServer {
-    /// Create a new ProxyServer instance with secret store and registry
+    /// Create a new ProxyServer instance with GapDatabase
     pub fn new(
         port: u16,
         ca: CertificateAuthority,
-        store: Arc<dyn SecretStore>,
-        registry: Arc<Registry>,
+        db: Arc<GapDatabase>,
     ) -> Result<Self> {
         // Store root certs for building per-connection upstream TLS connectors
         let upstream_root_certs = Arc::new(rustls::RootCertStore {
@@ -79,8 +75,7 @@ impl ProxyServer {
         Ok(Self {
             port,
             ca: Arc::new(ca),
-            store,
-            registry,
+            db,
             upstream_root_certs,
             proxy_acceptor,
         })
@@ -95,8 +90,7 @@ impl ProxyServer {
     pub fn new_with_upstream_tls(
         port: u16,
         ca: CertificateAuthority,
-        store: Arc<dyn SecretStore>,
-        registry: Arc<Registry>,
+        db: Arc<GapDatabase>,
         upstream_root_certs: Arc<rustls::RootCertStore>,
     ) -> Result<Self> {
         // Generate localhost certificate for the proxy's TLS
@@ -127,8 +121,7 @@ impl ProxyServer {
         Ok(Self {
             port,
             ca: Arc::new(ca),
-            store,
-            registry,
+            db,
             upstream_root_certs,
             proxy_acceptor,
         })
@@ -137,35 +130,15 @@ impl ProxyServer {
     /// Create a new ProxyServer instance from a Vec of tokens (for backward compatibility in tests)
     #[cfg(test)]
     pub async fn new_from_vec_async(port: u16, ca: CertificateAuthority, tokens: Vec<AgentToken>) -> Result<Self> {
-        use crate::storage::FileStore;
-        use crate::registry::TokenEntry;
+        let db = Arc::new(GapDatabase::in_memory().await.expect("create in-memory db"));
 
-        // Create a temporary FileStore for testing
-        let temp_dir = tempfile::tempdir().expect("create temp dir");
-        let store = Arc::new(
-            FileStore::new(temp_dir.path().to_path_buf())
-                .await
-                .expect("create FileStore"),
-        ) as Arc<dyn SecretStore>;
-
-        let registry = Arc::new(Registry::new(Arc::clone(&store)));
-
-        // Pre-populate storage with tokens in new format (token:{value})
         for token in &tokens {
-            let token_json = serde_json::to_vec(&token).expect("serialize token");
-            let store_key = format!("token:{}", token.token);
-            store.set(&store_key, &token_json).await.expect("store token");
-
-            // Add to registry
-            let entry = TokenEntry {
-                token_value: token.token.clone(),
-                name: token.name.clone(),
-                created_at: token.created_at,
-            };
-            registry.add_token(&entry).await.expect("add token to registry");
+            db.add_token(&token.token, &token.name, token.created_at)
+                .await
+                .expect("add token to db");
         }
 
-        Self::new(port, ca, store, registry)
+        Self::new(port, ca, db)
     }
 
     /// Start the proxy server
@@ -185,13 +158,12 @@ impl ProxyServer {
             debug!("Accepted connection from {}", addr);
 
             let ca = Arc::clone(&self.ca);
-            let store = Arc::clone(&self.store);
-            let registry = Arc::clone(&self.registry);
+            let db = Arc::clone(&self.db);
             let upstream_root_certs = Arc::clone(&self.upstream_root_certs);
             let proxy_acceptor = self.proxy_acceptor.clone();
 
             tokio::spawn(async move {
-                if let Err(e) = handle_connection(stream, ca, store, registry, upstream_root_certs, proxy_acceptor).await {
+                if let Err(e) = handle_connection(stream, ca, db, upstream_root_certs, proxy_acceptor).await {
                     error!("Connection error: {}", e);
                 }
             });
@@ -203,8 +175,7 @@ impl ProxyServer {
 async fn handle_connection(
     stream: TcpStream,
     ca: Arc<CertificateAuthority>,
-    store: Arc<dyn SecretStore>,
-    registry: Arc<Registry>,
+    db: Arc<GapDatabase>,
     upstream_root_certs: Arc<rustls::RootCertStore>,
     proxy_acceptor: TlsAcceptor,
 ) -> Result<()> {
@@ -246,7 +217,7 @@ async fn handle_connection(
     }
 
     // Validate authentication
-    let _agent_token = validate_auth(&headers, &registry, &*store).await?;
+    let agent_token = validate_auth(&headers, &db).await?;
 
     // Get the underlying stream back from BufReader
     // The BufReader may have buffered bytes that are part of the TLS handshake,
@@ -289,7 +260,7 @@ async fn handle_connection(
 
     // Bidirectional proxy with HTTP transformation via hyper
     // hyper handles ALL requests per connection (not just the first one)
-    proxy_via_hyper(agent_stream, upstream_stream, hostname, store, registry, is_h2).await?;
+    proxy_via_hyper(agent_stream, upstream_stream, hostname, db, agent_token.name.clone(), is_h2).await?;
 
     Ok(())
 }
@@ -314,8 +285,7 @@ fn parse_connect_request(line: &str) -> Result<String> {
 /// Validate Proxy-Authorization header
 async fn validate_auth(
     headers: &[String],
-    registry: &Registry,
-    _store: &dyn SecretStore,
+    db: &GapDatabase,
 ) -> Result<AgentToken> {
     for header in headers {
         let header = header.trim();
@@ -329,9 +299,9 @@ async fn validate_auth(
                 return Err(GapError::auth("Invalid authorization scheme, expected Bearer"));
             };
 
-            // Check if token exists in registry using O(1) lookup
-            if let Some(metadata) = registry.get_token(&token_value).await? {
-                // Construct AgentToken from registry TokenMetadata
+            // Check if token exists in database
+            if let Some(metadata) = db.get_token(&token_value).await? {
+                // Construct AgentToken from TokenMetadata
                 let prefix = if token_value.len() >= 12 {
                     token_value[..12].to_string()
                 } else {
@@ -459,8 +429,8 @@ async fn proxy_via_hyper<A, U>(
     agent_stream: A,
     upstream_stream: U,
     hostname: String,
-    store: Arc<dyn SecretStore>,
-    registry: Arc<Registry>,
+    db: Arc<GapDatabase>,
+    agent_name: String,
     is_h2: bool,
 ) -> Result<()>
 where
@@ -485,8 +455,8 @@ where
         // H2 SendRequest is Clone, no Mutex needed (concurrent requests supported)
         let service = service_fn(move |req: hyper::Request<hyper::body::Incoming>| {
             let hostname = hostname.clone();
-            let store = Arc::clone(&store);
-            let registry = Arc::clone(&registry);
+            let db = Arc::clone(&db);
+            let agent_name = agent_name.clone();
             let mut sender = sender.clone();
 
             async move {
@@ -497,15 +467,35 @@ where
                 let req = hyper::Request::from_parts(parts, ());
 
                 let gap_req = hyper_to_gap_request(&req, body_bytes, &hostname);
+                let method = gap_req.method.clone();
+                let url = gap_req.url.clone();
 
                 let gap_req = crate::proxy_transforms::transform_request(
-                    gap_req, &hostname, store.as_ref(), &registry
+                    gap_req, &hostname, &*db
                 ).await?;
 
                 let hyper_req = gap_request_to_hyper(&gap_req)?;
 
                 let resp = sender.send_request(hyper_req).await
                     .map_err(|e| GapError::network(e.to_string()))?;
+
+                let status = resp.status().as_u16();
+
+                // Log activity asynchronously (don't block the response)
+                let db_log = Arc::clone(&db);
+                let agent_name_log = agent_name.clone();
+                tokio::spawn(async move {
+                    let entry = ActivityEntry {
+                        timestamp: chrono::Utc::now(),
+                        method,
+                        url,
+                        agent_id: Some(agent_name_log),
+                        status,
+                    };
+                    if let Err(e) = db_log.log_activity(&entry).await {
+                        tracing::warn!("Failed to log activity: {}", e);
+                    }
+                });
 
                 Ok::<_, GapError>(resp)
             }
@@ -526,8 +516,8 @@ where
 
         let service = service_fn(move |req: hyper::Request<hyper::body::Incoming>| {
             let hostname = hostname.clone();
-            let store = Arc::clone(&store);
-            let registry = Arc::clone(&registry);
+            let db = Arc::clone(&db);
+            let agent_name = agent_name.clone();
             let sender = Arc::clone(&sender);
 
             async move {
@@ -538,9 +528,11 @@ where
                 let req = hyper::Request::from_parts(parts, ());
 
                 let gap_req = hyper_to_gap_request(&req, body_bytes, &hostname);
+                let method = gap_req.method.clone();
+                let url = gap_req.url.clone();
 
                 let gap_req = crate::proxy_transforms::transform_request(
-                    gap_req, &hostname, store.as_ref(), &registry
+                    gap_req, &hostname, &*db
                 ).await?;
 
                 let hyper_req = gap_request_to_hyper(&gap_req)?;
@@ -548,6 +540,24 @@ where
                 let mut sender = sender.lock().await;
                 let resp = sender.send_request(hyper_req).await
                     .map_err(|e| GapError::network(e.to_string()))?;
+
+                let status = resp.status().as_u16();
+
+                // Log activity asynchronously (don't block the response)
+                let db_log = Arc::clone(&db);
+                let agent_name_log = agent_name.clone();
+                tokio::spawn(async move {
+                    let entry = ActivityEntry {
+                        timestamp: chrono::Utc::now(),
+                        method,
+                        url,
+                        agent_id: Some(agent_name_log),
+                        status,
+                    };
+                    if let Err(e) = db_log.log_activity(&entry).await {
+                        tracing::warn!("Failed to log activity: {}", e);
+                    }
+                });
 
                 Ok::<_, GapError>(resp)
             }
@@ -662,88 +672,42 @@ mod tests {
 
     #[tokio::test]
     async fn test_validate_auth_valid() {
-        use crate::storage::FileStore;
-        use crate::registry::TokenEntry;
+        let db = GapDatabase::in_memory().await.unwrap();
 
-        let temp_dir = tempfile::tempdir().expect("create temp dir");
-        let store = Arc::new(
-            FileStore::new(temp_dir.path().to_path_buf())
-                .await
-                .expect("create FileStore"),
-        ) as Arc<dyn crate::storage::SecretStore>;
-
-        let registry = Arc::new(crate::registry::Registry::new(Arc::clone(&store)));
-
-        // Create token and store it directly
         let token = AgentToken::new("Test Agent");
         let token_value = token.token.clone();
-        let token_json = serde_json::to_vec(&token).expect("serialize token");
-        let store_key = format!("token:{}", token.token);
-        store.set(&store_key, &token_json).await.expect("store token");
 
-        // Add to registry
-        let entry = TokenEntry {
-            token_value: token.token.clone(),
-            name: token.name.clone(),
-            created_at: token.created_at,
-        };
-        registry.add_token(&entry).await.expect("add token to registry");
+        db.add_token(&token.token, &token.name, token.created_at)
+            .await
+            .expect("add token to db");
 
         let headers = vec![format!("Proxy-Authorization: Bearer {}", token_value)];
 
-        let result = validate_auth(&headers, &registry, &*store).await;
+        let result = validate_auth(&headers, &db).await;
         assert!(result.is_ok());
     }
 
     #[tokio::test]
     async fn test_validate_auth_invalid_token() {
-        use crate::storage::FileStore;
-        use crate::registry::TokenEntry;
+        let db = GapDatabase::in_memory().await.unwrap();
 
-        let temp_dir = tempfile::tempdir().expect("create temp dir");
-        let store = Arc::new(
-            FileStore::new(temp_dir.path().to_path_buf())
-                .await
-                .expect("create FileStore"),
-        ) as Arc<dyn crate::storage::SecretStore>;
-
-        let registry = Arc::new(crate::registry::Registry::new(Arc::clone(&store)));
-
-        // Create token and store it directly
         let token = AgentToken::new("Test Agent");
-        let token_json = serde_json::to_vec(&token).expect("serialize token");
-        let store_key = format!("token:{}", token.token);
-        store.set(&store_key, &token_json).await.expect("store token");
-
-        // Add to registry
-        let entry = TokenEntry {
-            token_value: token.token.clone(),
-            name: token.name.clone(),
-            created_at: token.created_at,
-        };
-        registry.add_token(&entry).await.expect("add token to registry");
+        db.add_token(&token.token, &token.name, token.created_at)
+            .await
+            .expect("add token to db");
 
         let headers = vec!["Proxy-Authorization: Bearer wrong-token".to_string()];
 
-        let result = validate_auth(&headers, &registry, &*store).await;
+        let result = validate_auth(&headers, &db).await;
         assert!(result.is_err());
     }
 
     #[tokio::test]
     async fn test_validate_auth_missing() {
-        use crate::storage::FileStore;
-
-        let temp_dir = tempfile::tempdir().expect("create temp dir");
-        let store = Arc::new(
-            FileStore::new(temp_dir.path().to_path_buf())
-                .await
-                .expect("create FileStore"),
-        ) as Arc<dyn crate::storage::SecretStore>;
-
-        let registry = Arc::new(crate::registry::Registry::new(Arc::clone(&store)));
+        let db = GapDatabase::in_memory().await.unwrap();
         let headers = vec!["Host: example.com".to_string()];
 
-        let result = validate_auth(&headers, &registry, &*store).await;
+        let result = validate_auth(&headers, &db).await;
         assert!(result.is_err());
     }
 
@@ -893,21 +857,16 @@ mod tests {
     /// 2. Applies plugin transforms (credential injection)
     /// 3. Forwards the transformed request upstream
     /// 4. Returns the upstream response to the agent
+    /// 5. Logs activity to the database
     #[tokio::test]
     async fn test_proxy_via_hyper_transforms_and_forwards() {
-        use crate::registry::{PluginEntry, Registry};
-        use crate::storage::FileStore;
+        use crate::database::GapDatabase;
+        use crate::registry::PluginEntry;
         use http_body_util::{BodyExt, Full};
         use hyper_util::rt::TokioIo;
 
-        // -- Setup store with plugin + credentials --
-        let temp_dir = tempfile::tempdir().expect("create temp dir");
-        let store = Arc::new(
-            FileStore::new(temp_dir.path().to_path_buf())
-                .await
-                .expect("create FileStore"),
-        ) as Arc<dyn SecretStore>;
-        let registry = Arc::new(Registry::new(Arc::clone(&store)));
+        // -- Setup database with plugin + credentials --
+        let db = Arc::new(GapDatabase::in_memory().await.unwrap());
 
         // Plugin that injects Authorization header
         let plugin_code = r#"
@@ -921,15 +880,14 @@ mod tests {
             }
         };
         "#;
-        store.set("plugin:test-hyper", plugin_code.as_bytes()).await.unwrap();
         let plugin_entry = PluginEntry {
             name: "test-hyper".to_string(),
             hosts: vec!["api.test.com".to_string()],
             credential_schema: vec!["api_key".to_string()],
             commit_sha: None,
         };
-        registry.add_plugin(&plugin_entry).await.unwrap();
-        registry.set_credential("test-hyper", "api_key", "my-secret-key").await.unwrap();
+        db.add_plugin(&plugin_entry, plugin_code).await.unwrap();
+        db.set_credential("test-hyper", "api_key", "my-secret-key").await.unwrap();
 
         // -- Create paired DuplexStreams --
         // Agent side: agent_client writes HTTP requests, proxy reads them
@@ -961,15 +919,14 @@ mod tests {
         });
 
         // -- Spawn proxy_via_hyper (H1 mode) --
-        let proxy_store = Arc::clone(&store);
-        let proxy_registry = Arc::clone(&registry);
+        let proxy_db = Arc::clone(&db);
         let proxy_handle = tokio::spawn(async move {
             proxy_via_hyper(
                 agent_proxy,
                 upstream_proxy,
                 "api.test.com".to_string(),
-                proxy_store,
-                proxy_registry,
+                proxy_db,
+                "test-agent".to_string(),
                 false, // is_h2 = false for H1
             )
             .await
@@ -1001,5 +958,16 @@ mod tests {
         drop(sender);
         let _ = proxy_handle.await;
         let _ = upstream_handle.await;
+
+        // Give the spawned activity logger a moment to complete
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        // Verify activity was logged
+        let activity = db.get_activity(None).await.unwrap();
+        assert_eq!(activity.len(), 1);
+        assert_eq!(activity[0].method, "GET");
+        assert_eq!(activity[0].url, "https://api.test.com/data?q=test");
+        assert_eq!(activity[0].agent_id, Some("test-agent".to_string()));
+        assert_eq!(activity[0].status, 200);
     }
 }

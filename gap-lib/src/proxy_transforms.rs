@@ -2,28 +2,24 @@
 //!
 //! Handles HTTP parsing and plugin transform execution for the proxy.
 
+use crate::database::GapDatabase;
 use crate::error::{GapError, Result};
 use crate::http_utils::{parse_http_request, serialize_http_request};
 use crate::plugin_matcher::find_matching_plugin;
 use crate::plugin_runtime::PluginRuntime;
-use crate::registry::Registry;
-use crate::storage::SecretStore;
 use crate::types::{GAPCredentials, GAPRequest};
 use tracing::{debug, warn};
 
-/// Load all credential fields for a plugin from Registry
+/// Load all credential fields for a plugin from GapDatabase
 ///
-/// Credentials are now stored directly in the registry as a nested HashMap.
-/// No separate storage lookups needed.
-async fn load_plugin_credentials<S: SecretStore + ?Sized>(
+/// Credentials are stored in the database's credentials table.
+async fn load_plugin_credentials(
     plugin_name: &str,
-    _store: &S,
-    registry: &Registry,
+    db: &GapDatabase,
 ) -> Result<GAPCredentials> {
     let mut credentials = GAPCredentials::new();
 
-    // Get credentials directly from registry (they're stored there now)
-    if let Some(plugin_creds) = registry.get_plugin_credentials(plugin_name).await? {
+    if let Some(plugin_creds) = db.get_plugin_credentials(plugin_name).await? {
         for (field, value) in plugin_creds {
             credentials.set(&field, &value);
         }
@@ -40,15 +36,14 @@ async fn load_plugin_credentials<S: SecretStore + ?Sized>(
 ///
 /// CRITICAL: PluginRuntime is not Send - this function scopes the runtime
 /// in a sync block to ensure it is dropped before any `.await` points.
-pub async fn transform_request<S: SecretStore + ?Sized>(
+pub async fn transform_request(
     request: GAPRequest,
     hostname: &str,
-    store: &S,
-    registry: &Registry,
+    db: &GapDatabase,
 ) -> Result<GAPRequest> {
     // Find matching plugin
     // SECURITY: Only allow connections to hosts with registered plugins
-    let plugin = match find_matching_plugin(hostname, store, registry).await? {
+    let plugin = match find_matching_plugin(hostname, db).await? {
         Some(p) => {
             debug!("Found matching plugin: {}", p.name);
             p
@@ -63,7 +58,7 @@ pub async fn transform_request<S: SecretStore + ?Sized>(
     };
 
     // Load credentials for the plugin
-    let credentials = load_plugin_credentials(&plugin.name, store, registry).await?;
+    let credentials = load_plugin_credentials(&plugin.name, db).await?;
 
     // SECURITY: Only allow connections when credentials are configured
     if credentials.credentials.is_empty() {
@@ -79,12 +74,9 @@ pub async fn transform_request<S: SecretStore + ?Sized>(
 
     debug!("Loaded {} credential fields for plugin {}", credentials.credentials.len(), plugin.name);
 
-    // Load plugin code from storage
-    let plugin_key = format!("plugin:{}", plugin.name);
-    let plugin_code_bytes = store.get(&plugin_key).await?
+    // Load plugin code from database
+    let plugin_code = db.get_plugin_source(&plugin.name).await?
         .ok_or_else(|| GapError::plugin(format!("Plugin code not found for {}", plugin.name)))?;
-    let plugin_code = String::from_utf8(plugin_code_bytes)
-        .map_err(|e| GapError::plugin(format!("Invalid UTF-8 in plugin code: {}", e)))?;
 
     // Execute transform
     // CRITICAL: Scope the PluginRuntime to ensure it's dropped before any await
@@ -104,18 +96,17 @@ pub async fn transform_request<S: SecretStore + ?Sized>(
 /// Thin wrapper around `transform_request` that handles parse/serialize.
 /// CRITICAL: PluginRuntime is not Send - this function is scoped to ensure
 /// the runtime is dropped before any `.await` points.
-pub async fn parse_and_transform<S: SecretStore + ?Sized>(
+pub async fn parse_and_transform(
     request_bytes: &[u8],
     hostname: &str,
-    store: &S,
-    registry: &Registry,
+    db: &GapDatabase,
 ) -> Result<Vec<u8>> {
     // Parse HTTP request
     let request = parse_http_request(request_bytes)?;
     debug!("Parsed HTTP request: {} {}", request.method, request.url);
 
     // Apply transforms
-    let transformed_request = transform_request(request, hostname, store, registry).await?;
+    let transformed_request = transform_request(request, hostname, db).await?;
 
     // Serialize back to HTTP
     let transformed_bytes = serialize_http_request(&transformed_request)?;
@@ -126,33 +117,23 @@ pub async fn parse_and_transform<S: SecretStore + ?Sized>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::registry::{PluginEntry, Registry};
-    use crate::storage::FileStore;
+    use crate::database::GapDatabase;
+    use crate::registry::PluginEntry;
     use crate::types::GAPRequest;
-    use std::sync::Arc;
 
     #[tokio::test]
-    async fn test_load_plugin_credentials_uses_registry() {
-        let temp_dir = tempfile::tempdir().expect("create temp dir");
-        let store = Arc::new(
-            FileStore::new(temp_dir.path().to_path_buf())
-                .await
-                .expect("create FileStore"),
-        ) as Arc<dyn SecretStore>;
-        let registry = Registry::new(Arc::clone(&store));
+    async fn test_load_plugin_credentials_uses_database() {
+        let db = GapDatabase::in_memory().await.unwrap();
 
-        // Set credentials with actual values directly in registry
-        registry
-            .set_credential("exa", "api_key", "test-api-key-value")
+        // Set credentials
+        db.set_credential("exa", "api_key", "test-api-key-value")
             .await
             .expect("set credential");
-        registry
-            .set_credential("exa", "secret", "test-secret-value")
+        db.set_credential("exa", "secret", "test-secret-value")
             .await
             .expect("set credential");
 
-        // Load credentials using the new Registry-based approach
-        let credentials = load_plugin_credentials("exa", &*store, &registry)
+        let credentials = load_plugin_credentials("exa", &db)
             .await
             .expect("load credentials");
 
@@ -161,11 +142,8 @@ mod tests {
         assert_eq!(credentials.get("secret"), Some(&"test-secret-value".to_string()));
     }
 
-    /// Helper to set up a plugin + credentials in registry/store for testing
-    async fn setup_test_plugin(
-        store: &Arc<dyn SecretStore>,
-        registry: &Registry,
-    ) {
+    /// Helper to set up a plugin + credentials in database for testing
+    async fn setup_test_plugin(db: &GapDatabase) {
         let plugin_code = r#"
         var plugin = {
             name: "test-api",
@@ -177,32 +155,25 @@ mod tests {
             }
         };
         "#;
-        store.set("plugin:test-api", plugin_code.as_bytes()).await.unwrap();
         let plugin_entry = PluginEntry {
             name: "test-api".to_string(),
             hosts: vec!["api.test.com".to_string()],
             credential_schema: vec!["api_key".to_string()],
             commit_sha: None,
         };
-        registry.add_plugin(&plugin_entry).await.unwrap();
-        registry.set_credential("test-api", "api_key", "secret-key-123").await.unwrap();
+        db.add_plugin(&plugin_entry, plugin_code).await.unwrap();
+        db.set_credential("test-api", "api_key", "secret-key-123").await.unwrap();
     }
 
     #[tokio::test]
     async fn test_transform_request_applies_plugin() {
-        let temp_dir = tempfile::tempdir().expect("create temp dir");
-        let store = Arc::new(
-            FileStore::new(temp_dir.path().to_path_buf())
-                .await
-                .expect("create FileStore"),
-        ) as Arc<dyn SecretStore>;
-        let registry = Registry::new(Arc::clone(&store));
-        setup_test_plugin(&store, &registry).await;
+        let db = GapDatabase::in_memory().await.unwrap();
+        setup_test_plugin(&db).await;
 
         let request = GAPRequest::new("GET", "https://api.test.com/data")
             .with_header("Host", "api.test.com");
 
-        let result = transform_request(request, "api.test.com", &*store, &registry)
+        let result = transform_request(request, "api.test.com", &db)
             .await
             .expect("transform should succeed");
 
@@ -218,31 +189,19 @@ mod tests {
 
     #[tokio::test]
     async fn test_transform_request_rejects_unregistered_host() {
-        let temp_dir = tempfile::tempdir().expect("create temp dir");
-        let store = Arc::new(
-            FileStore::new(temp_dir.path().to_path_buf())
-                .await
-                .expect("create FileStore"),
-        ) as Arc<dyn SecretStore>;
-        let registry = Registry::new(Arc::clone(&store));
+        let db = GapDatabase::in_memory().await.unwrap();
 
         let request = GAPRequest::new("GET", "https://evil.com/data")
             .with_header("Host", "evil.com");
 
-        let result = transform_request(request, "evil.com", &*store, &registry).await;
+        let result = transform_request(request, "evil.com", &db).await;
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("not allowed"));
     }
 
     #[tokio::test]
     async fn test_transform_request_rejects_missing_credentials() {
-        let temp_dir = tempfile::tempdir().expect("create temp dir");
-        let store = Arc::new(
-            FileStore::new(temp_dir.path().to_path_buf())
-                .await
-                .expect("create FileStore"),
-        ) as Arc<dyn SecretStore>;
-        let registry = Registry::new(Arc::clone(&store));
+        let db = GapDatabase::in_memory().await.unwrap();
 
         // Add plugin but NO credentials
         let plugin_code = r#"
@@ -253,39 +212,30 @@ mod tests {
             transform: function(request, credentials) { return request; }
         };
         "#;
-        store.set("plugin:no-creds", plugin_code.as_bytes()).await.unwrap();
         let plugin_entry = PluginEntry {
             name: "no-creds".to_string(),
             hosts: vec!["api.nocreds.com".to_string()],
             credential_schema: vec!["api_key".to_string()],
             commit_sha: None,
         };
-        registry.add_plugin(&plugin_entry).await.unwrap();
+        db.add_plugin(&plugin_entry, plugin_code).await.unwrap();
 
         let request = GAPRequest::new("GET", "https://api.nocreds.com/data")
             .with_header("Host", "api.nocreds.com");
 
-        let result = transform_request(request, "api.nocreds.com", &*store, &registry).await;
+        let result = transform_request(request, "api.nocreds.com", &db).await;
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("credentials"));
     }
 
     #[tokio::test]
     async fn test_parse_and_transform_delegates_to_transform_request() {
-        // Verify that parse_and_transform produces the same result as
-        // parse -> transform_request -> serialize
-        let temp_dir = tempfile::tempdir().expect("create temp dir");
-        let store = Arc::new(
-            FileStore::new(temp_dir.path().to_path_buf())
-                .await
-                .expect("create FileStore"),
-        ) as Arc<dyn SecretStore>;
-        let registry = Registry::new(Arc::clone(&store));
-        setup_test_plugin(&store, &registry).await;
+        let db = GapDatabase::in_memory().await.unwrap();
+        setup_test_plugin(&db).await;
 
         let raw_http = b"GET /data HTTP/1.1\r\nHost: api.test.com\r\n\r\n";
 
-        let result = parse_and_transform(raw_http, "api.test.com", &*store, &registry)
+        let result = parse_and_transform(raw_http, "api.test.com", &db)
             .await
             .expect("parse_and_transform should succeed");
 
