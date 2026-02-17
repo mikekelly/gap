@@ -90,6 +90,54 @@ impl ProxyServer {
         })
     }
 
+    /// Create a new ProxyServer instance with a custom upstream TLS connector
+    ///
+    /// Same as `new()` but accepts a caller-provided `TlsConnector` for upstream
+    /// connections instead of building one from `webpki_roots`. This is useful
+    /// when the upstream server uses a private/internal CA (e.g., in tests or
+    /// enterprise environments with custom root CAs).
+    pub fn new_with_upstream_tls(
+        port: u16,
+        ca: CertificateAuthority,
+        store: Arc<dyn SecretStore>,
+        registry: Arc<Registry>,
+        upstream_connector: TlsConnector,
+    ) -> Result<Self> {
+        // Generate localhost certificate for the proxy's TLS
+        // Use "localhost" as the hostname since the proxy listens on 127.0.0.1
+        let (cert_der, key_der) = ca
+            .sign_for_hostname("localhost", None)
+            .map_err(|e| GapError::tls(format!("Failed to sign localhost certificate: {}", e)))?;
+
+        // Convert DER bytes to rustls types
+        // Include CA cert in chain so clients can verify
+        let certs = vec![
+            CertificateDer::from(cert_der),
+            CertificateDer::from(ca.ca_cert_der()),
+        ];
+
+        // Parse private key from DER
+        let key_der = rustls::pki_types::PrivateKeyDer::try_from(key_der)
+            .map_err(|e| GapError::tls(format!("Failed to parse key DER: {:?}", e)))?;
+
+        // Build server config for proxy TLS
+        let proxy_server_config = ServerConfig::builder()
+            .with_no_client_auth()
+            .with_single_cert(certs, key_der)
+            .map_err(|e| GapError::tls(format!("Failed to create proxy server config: {}", e)))?;
+
+        let proxy_acceptor = TlsAcceptor::from(Arc::new(proxy_server_config));
+
+        Ok(Self {
+            port,
+            ca: Arc::new(ca),
+            store,
+            registry,
+            upstream_connector,
+            proxy_acceptor,
+        })
+    }
+
     /// Create a new ProxyServer instance from a Vec of tokens (for backward compatibility in tests)
     #[cfg(test)]
     pub async fn new_from_vec_async(port: u16, ca: CertificateAuthority, tokens: Vec<AgentToken>) -> Result<Self> {
