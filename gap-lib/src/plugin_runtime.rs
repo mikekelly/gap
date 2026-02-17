@@ -709,6 +709,7 @@ impl PluginRuntime {
             match_patterns,
             credential_schema,
             transform,
+            commit_sha: None,
         })
     }
 

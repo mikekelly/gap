@@ -106,6 +106,8 @@ pub struct GAPPlugin {
     pub credential_schema: Vec<String>,
     /// JavaScript transform function source code
     pub transform: String,
+    /// Git commit SHA (short) of the installed plugin version
+    pub commit_sha: Option<String>,
 }
 
 impl GAPPlugin {
@@ -121,6 +123,7 @@ impl GAPPlugin {
             match_patterns,
             credential_schema,
             transform: transform.into(),
+            commit_sha: None,
         }
     }
 
@@ -272,6 +275,10 @@ pub struct ActivityEntry {
     pub url: String,
     pub agent_id: Option<String>,
     pub status: u16,
+    /// Name of the plugin that handled this request
+    pub plugin_name: Option<String>,
+    /// Git commit SHA of the plugin that handled this request
+    pub plugin_sha: Option<String>,
 }
 
 // --- Registry-origin types (migrated from registry.rs) ---

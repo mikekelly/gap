@@ -67,7 +67,8 @@ pub async fn find_matching_plugin(
             if let Some(code) = plugin_code {
                 // Create a runtime and load the plugin
                 let mut runtime = PluginRuntime::new()?;
-                if let Ok(plugin) = runtime.load_plugin_from_code(&entry.name, &code) {
+                if let Ok(mut plugin) = runtime.load_plugin_from_code(&entry.name, &code) {
+                    plugin.commit_sha = entry.commit_sha.clone();
                     return Ok(Some(plugin));
                 }
             }

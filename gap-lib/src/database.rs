@@ -43,7 +43,9 @@ CREATE TABLE IF NOT EXISTS access_logs (
     method TEXT NOT NULL,
     url TEXT NOT NULL,
     agent_id TEXT,
-    status INTEGER NOT NULL
+    status INTEGER NOT NULL,
+    plugin_name TEXT,
+    plugin_sha TEXT
 );
 
 CREATE INDEX IF NOT EXISTS idx_access_logs_timestamp ON access_logs(timestamp);
@@ -135,6 +137,11 @@ impl GapDatabase {
             .execute_batch(SCHEMA)
             .await
             .map_err(|e| GapError::database(format!("Failed to run migrations: {}", e)))?;
+
+        // Migration for existing DBs — ignore error if columns already exist
+        let _ = self.conn.execute("ALTER TABLE access_logs ADD COLUMN plugin_name TEXT", ()).await;
+        let _ = self.conn.execute("ALTER TABLE access_logs ADD COLUMN plugin_sha TEXT", ()).await;
+
         Ok(())
     }
 
@@ -522,17 +529,19 @@ impl GapDatabase {
     pub async fn log_activity(&self, entry: &ActivityEntry) -> Result<()> {
         self.conn
             .execute(
-                "INSERT INTO access_logs (timestamp, method, url, agent_id, status) VALUES (?1, ?2, ?3, ?4, ?5)",
+                "INSERT INTO access_logs (timestamp, method, url, agent_id, status, plugin_name, plugin_sha) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
                 libsql::params![
                     entry.timestamp.to_rfc3339(),
                     entry.method.as_str(),
                     entry.url.as_str(),
                     entry.agent_id.as_deref().unwrap_or(""),
-                    entry.status as i64
+                    entry.status as i64,
+                    entry.plugin_name.as_deref().unwrap_or(""),
+                    entry.plugin_sha.as_deref().unwrap_or("")
                 ],
             )
             .await
-            .map_err(|e| GapError::database(e.to_string()))?;
+            .map_err(|e| GapError::database(format!("Failed to log activity: {}", e)))?;
         Ok(())
     }
 
@@ -540,10 +549,10 @@ impl GapDatabase {
     pub async fn get_activity(&self, limit: Option<u32>) -> Result<Vec<ActivityEntry>> {
         let query = match limit {
             Some(n) => format!(
-                "SELECT timestamp, method, url, agent_id, status FROM access_logs ORDER BY timestamp DESC LIMIT {}",
+                "SELECT timestamp, method, url, agent_id, status, plugin_name, plugin_sha FROM access_logs ORDER BY timestamp DESC LIMIT {}",
                 n
             ),
-            None => "SELECT timestamp, method, url, agent_id, status FROM access_logs ORDER BY timestamp DESC".to_string(),
+            None => "SELECT timestamp, method, url, agent_id, status, plugin_name, plugin_sha FROM access_logs ORDER BY timestamp DESC".to_string(),
         };
         let mut rows = self
             .conn
@@ -558,7 +567,7 @@ impl GapDatabase {
         let mut rows = self
             .conn
             .query(
-                "SELECT timestamp, method, url, agent_id, status FROM access_logs WHERE timestamp >= ?1 ORDER BY timestamp DESC",
+                "SELECT timestamp, method, url, agent_id, status, plugin_name, plugin_sha FROM access_logs WHERE timestamp >= ?1 ORDER BY timestamp DESC",
                 libsql::params![since.to_rfc3339()],
             )
             .await
@@ -576,6 +585,10 @@ impl GapDatabase {
             let agent_id_raw: String =
                 row.get(3).map_err(|e| GapError::database(e.to_string()))?;
             let status_i64: i64 = row.get(4).map_err(|e| GapError::database(e.to_string()))?;
+            let plugin_name_raw: String =
+                row.get(5).map_err(|e| GapError::database(e.to_string()))?;
+            let plugin_sha_raw: String =
+                row.get(6).map_err(|e| GapError::database(e.to_string()))?;
 
             let timestamp = DateTime::parse_from_rfc3339(&ts_str)
                 .map_err(|e| GapError::database(format!("Invalid timestamp: {}", e)))?
@@ -585,6 +598,16 @@ impl GapDatabase {
             } else {
                 Some(agent_id_raw)
             };
+            let plugin_name = if plugin_name_raw.is_empty() {
+                None
+            } else {
+                Some(plugin_name_raw)
+            };
+            let plugin_sha = if plugin_sha_raw.is_empty() {
+                None
+            } else {
+                Some(plugin_sha_raw)
+            };
 
             result.push(ActivityEntry {
                 timestamp,
@@ -592,6 +615,8 @@ impl GapDatabase {
                 url,
                 agent_id,
                 status: status_i64 as u16,
+                plugin_name,
+                plugin_sha,
             });
         }
         Ok(result)
@@ -892,6 +917,8 @@ mod tests {
             url: "https://api.example.com/users".to_string(),
             agent_id: Some("agent-1".to_string()),
             status: 200,
+            plugin_name: None,
+            plugin_sha: None,
         };
         db.log_activity(&entry).await.unwrap();
 
@@ -914,6 +941,8 @@ mod tests {
                 url: format!("https://api.example.com/{}", i),
                 agent_id: None,
                 status: 200,
+                plugin_name: None,
+                plugin_sha: None,
             };
             db.log_activity(&entry).await.unwrap();
         }
@@ -939,6 +968,8 @@ mod tests {
             url: "https://old.example.com".to_string(),
             agent_id: None,
             status: 200,
+            plugin_name: None,
+            plugin_sha: None,
         })
         .await
         .unwrap();
@@ -950,6 +981,8 @@ mod tests {
             url: "https://new.example.com".to_string(),
             agent_id: Some("agent-2".to_string()),
             status: 201,
+            plugin_name: None,
+            plugin_sha: None,
         })
         .await
         .unwrap();
@@ -969,11 +1002,55 @@ mod tests {
             url: "https://api.example.com/resource".to_string(),
             agent_id: None,
             status: 204,
+            plugin_name: None,
+            plugin_sha: None,
         };
         db.log_activity(&entry).await.unwrap();
 
         let logs = db.get_activity(None).await.unwrap();
         assert_eq!(logs.len(), 1);
         assert_eq!(logs[0].agent_id, None);
+    }
+
+    #[tokio::test]
+    async fn test_activity_with_plugin_info() {
+        let db = GapDatabase::in_memory().await.unwrap();
+
+        let entry = ActivityEntry {
+            timestamp: Utc::now(),
+            method: "GET".to_string(),
+            url: "https://api.example.com/data".to_string(),
+            agent_id: Some("agent-1".to_string()),
+            status: 200,
+            plugin_name: Some("exa".to_string()),
+            plugin_sha: Some("abc1234".to_string()),
+        };
+        db.log_activity(&entry).await.unwrap();
+
+        let logs = db.get_activity(None).await.unwrap();
+        assert_eq!(logs.len(), 1);
+        assert_eq!(logs[0].plugin_name, Some("exa".to_string()));
+        assert_eq!(logs[0].plugin_sha, Some("abc1234".to_string()));
+    }
+
+    #[tokio::test]
+    async fn test_activity_with_no_plugin_info() {
+        let db = GapDatabase::in_memory().await.unwrap();
+
+        let entry = ActivityEntry {
+            timestamp: Utc::now(),
+            method: "GET".to_string(),
+            url: "https://api.example.com/data".to_string(),
+            agent_id: None,
+            status: 200,
+            plugin_name: None,
+            plugin_sha: None,
+        };
+        db.log_activity(&entry).await.unwrap();
+
+        let logs = db.get_activity(None).await.unwrap();
+        assert_eq!(logs.len(), 1);
+        assert_eq!(logs[0].plugin_name, None);
+        assert_eq!(logs[0].plugin_sha, None);
     }
 }

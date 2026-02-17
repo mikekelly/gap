@@ -214,6 +214,8 @@ pub struct ActivityEntry {
     pub url: String,
     pub agent_id: Option<String>,
     pub status: u16,
+    pub plugin_name: Option<String>,
+    pub plugin_sha: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]

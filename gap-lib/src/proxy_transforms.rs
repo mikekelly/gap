@@ -28,11 +28,20 @@ async fn load_plugin_credentials(
     Ok(credentials)
 }
 
+/// Plugin info returned alongside the transformed request
+#[derive(Debug)]
+pub struct PluginInfo {
+    pub name: String,
+    pub commit_sha: Option<String>,
+}
+
 /// Apply plugin transforms to a GAPRequest
 ///
 /// This is the core transformation logic: plugin lookup, credential loading,
 /// and JS transform execution. Used by both the legacy byte-based pipeline
 /// and the new hyper-based pipeline.
+///
+/// Returns the transformed request and info about the plugin that handled it.
 ///
 /// CRITICAL: PluginRuntime is not Send - this function scopes the runtime
 /// in a sync block to ensure it is dropped before any `.await` points.
@@ -40,12 +49,16 @@ pub async fn transform_request(
     request: GAPRequest,
     hostname: &str,
     db: &GapDatabase,
-) -> Result<GAPRequest> {
+) -> Result<(GAPRequest, PluginInfo)> {
     // Find matching plugin
     // SECURITY: Only allow connections to hosts with registered plugins
     let plugin = match find_matching_plugin(hostname, db).await? {
         Some(p) => {
-            debug!("Found matching plugin: {}", p.name);
+            debug!(
+                "Found matching plugin: {} (sha: {})",
+                p.name,
+                p.commit_sha.as_deref().unwrap_or("unknown")
+            );
             p
         }
         None => {
@@ -55,6 +68,11 @@ pub async fn transform_request(
                 hostname
             )));
         }
+    };
+
+    let plugin_info = PluginInfo {
+        name: plugin.name.clone(),
+        commit_sha: plugin.commit_sha.clone(),
     };
 
     // Load credentials for the plugin
@@ -88,7 +106,7 @@ pub async fn transform_request(
 
     debug!("Transform executed successfully");
 
-    Ok(transformed_request)
+    Ok((transformed_request, plugin_info))
 }
 
 /// Parse HTTP request bytes and apply plugin transforms
@@ -106,7 +124,7 @@ pub async fn parse_and_transform(
     debug!("Parsed HTTP request: {} {}", request.method, request.url);
 
     // Apply transforms
-    let transformed_request = transform_request(request, hostname, db).await?;
+    let (transformed_request, _plugin_info) = transform_request(request, hostname, db).await?;
 
     // Serialize back to HTTP
     let transformed_bytes = serialize_http_request(&transformed_request)?;
@@ -173,7 +191,7 @@ mod tests {
         let request = GAPRequest::new("GET", "https://api.test.com/data")
             .with_header("Host", "api.test.com");
 
-        let result = transform_request(request, "api.test.com", &db)
+        let (result, plugin_info) = transform_request(request, "api.test.com", &db)
             .await
             .expect("transform should succeed");
 
@@ -185,6 +203,8 @@ mod tests {
         // Method and URL should be preserved
         assert_eq!(result.method, "GET");
         assert_eq!(result.url, "https://api.test.com/data");
+        // Plugin info should be populated
+        assert_eq!(plugin_info.name, "test-api");
     }
 
     #[tokio::test]

@@ -17,7 +17,8 @@ use std::sync::Arc;
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{TcpListener, TcpStream};
 use tokio_rustls::{TlsAcceptor, TlsConnector};
-use tracing::{debug, error, info};
+use rand::Rng;
+use tracing::{debug, error, info, Instrument};
 
 /// ProxyServer handles MITM HTTPS proxy with agent authentication
 pub struct ProxyServer {
@@ -460,6 +461,7 @@ where
             let mut sender = sender.clone();
 
             async move {
+                let request_id: u64 = rand::thread_rng().gen();
                 let (parts, body) = req.into_parts();
                 let body_bytes = body.collect().await
                     .map_err(|e| GapError::network(e.to_string()))?
@@ -470,9 +472,15 @@ where
                 let method = gap_req.method.clone();
                 let url = gap_req.url.clone();
 
-                let gap_req = crate::proxy_transforms::transform_request(
+                let span = tracing::info_span!("proxy_request",
+                    request_id = %format!("{:016x}", request_id),
+                    method = %method,
+                    url = %url,
+                );
+
+                let (gap_req, plugin_info) = crate::proxy_transforms::transform_request(
                     gap_req, &hostname, &*db
-                ).await?;
+                ).instrument(span.clone()).await?;
 
                 let hyper_req = gap_request_to_hyper(&gap_req)?;
 
@@ -480,6 +488,9 @@ where
                     .map_err(|e| GapError::network(e.to_string()))?;
 
                 let status = resp.status().as_u16();
+                let _enter = span.enter();
+                debug!("Response status: {}", status);
+                drop(_enter);
 
                 // Log activity asynchronously (don't block the response)
                 let db_log = Arc::clone(&db);
@@ -491,6 +502,8 @@ where
                         url,
                         agent_id: Some(agent_name_log),
                         status,
+                        plugin_name: Some(plugin_info.name),
+                        plugin_sha: plugin_info.commit_sha,
                     };
                     if let Err(e) = db_log.log_activity(&entry).await {
                         tracing::warn!("Failed to log activity: {}", e);
@@ -521,6 +534,7 @@ where
             let sender = Arc::clone(&sender);
 
             async move {
+                let request_id: u64 = rand::thread_rng().gen();
                 let (parts, body) = req.into_parts();
                 let body_bytes = body.collect().await
                     .map_err(|e| GapError::network(e.to_string()))?
@@ -531,9 +545,15 @@ where
                 let method = gap_req.method.clone();
                 let url = gap_req.url.clone();
 
-                let gap_req = crate::proxy_transforms::transform_request(
+                let span = tracing::info_span!("proxy_request",
+                    request_id = %format!("{:016x}", request_id),
+                    method = %method,
+                    url = %url,
+                );
+
+                let (gap_req, plugin_info) = crate::proxy_transforms::transform_request(
                     gap_req, &hostname, &*db
-                ).await?;
+                ).instrument(span.clone()).await?;
 
                 let hyper_req = gap_request_to_hyper(&gap_req)?;
 
@@ -542,6 +562,9 @@ where
                     .map_err(|e| GapError::network(e.to_string()))?;
 
                 let status = resp.status().as_u16();
+                let _enter = span.enter();
+                debug!("Response status: {}", status);
+                drop(_enter);
 
                 // Log activity asynchronously (don't block the response)
                 let db_log = Arc::clone(&db);
@@ -553,6 +576,8 @@ where
                         url,
                         agent_id: Some(agent_name_log),
                         status,
+                        plugin_name: Some(plugin_info.name),
+                        plugin_sha: plugin_info.commit_sha,
                     };
                     if let Err(e) = db_log.log_activity(&entry).await {
                         tracing::warn!("Failed to log activity: {}", e);
@@ -969,5 +994,7 @@ mod tests {
         assert_eq!(activity[0].url, "https://api.test.com/data?q=test");
         assert_eq!(activity[0].agent_id, Some("test-agent".to_string()));
         assert_eq!(activity[0].status, 200);
+        assert_eq!(activity[0].plugin_name, Some("test-hyper".to_string()));
+        assert_eq!(activity[0].plugin_sha, None);
     }
 }
