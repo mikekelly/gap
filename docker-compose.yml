@@ -23,6 +23,7 @@ services:
       - gap-data:/var/lib/gap
     environment:
       - RUST_LOG=gap_server=info,gap_lib=info
+      - GAP_ENCRYPTION_KEY=${GAP_ENCRYPTION_KEY}
     restart: unless-stopped
     networks:
       - gap-network

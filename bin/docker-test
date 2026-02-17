@@ -40,6 +40,11 @@ for arg in "$@"; do
     esac
 done
 
+# ── Generate encryption key ───────────────────────────────────────────────────
+# Docker containers run Linux (no macOS keychain), so we supply a random key.
+# Exporting it here lets docker-compose interpolate ${GAP_ENCRYPTION_KEY} below.
+export GAP_ENCRYPTION_KEY=$(openssl rand -hex 32)
+
 # ── Resolve repo root ─────────────────────────────────────────────────────────
 # This script lives in <repo>/bin/, so the repo root is one level up.
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
