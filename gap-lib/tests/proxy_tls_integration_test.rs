@@ -6,9 +6,8 @@
 //! 3. Token authentication works over TLS
 //! 4. Invalid/missing tokens are rejected
 
+use gap_lib::database::GapDatabase;
 use gap_lib::proxy::ProxyServer;
-use gap_lib::registry::{Registry, TokenEntry};
-use gap_lib::storage::{FileStore, SecretStore};
 use gap_lib::tls::CertificateAuthority;
 use gap_lib::types::AgentToken;
 use rustls::pki_types::ServerName;
@@ -42,37 +41,15 @@ async fn create_test_proxy(port: u16, token: AgentToken) -> (ProxyServer, String
     let ca_cert_pem = ca.ca_cert_pem();
     let token_value = token.token.clone();
 
-    // Create a temporary FileStore for testing
-    let temp_dir = tempfile::tempdir().expect("create temp dir");
-    let store = Arc::new(
-        FileStore::new(temp_dir.path().to_path_buf())
-            .await
-            .expect("create FileStore"),
-    ) as Arc<dyn SecretStore>;
+    // Create an in-memory GapDatabase for testing
+    let db = Arc::new(GapDatabase::in_memory().await.expect("create in-memory db"));
 
-    let registry = Arc::new(Registry::new(Arc::clone(&store)));
-
-    // Store the token
-    let token_json = serde_json::to_vec(&token).expect("serialize token");
-    let store_key = format!("token:{}", token.token);
-    store
-        .set(&store_key, &token_json)
+    // Store the token in the database
+    db.add_token(&token.token, &token.name, token.created_at)
         .await
         .expect("store token");
 
-    // Add to registry
-    let entry = TokenEntry {
-        token_value: token.token.clone(),
-        name: token.name.clone(),
-        created_at: token.created_at,
-    };
-    registry.add_token(&entry).await.expect("add token to registry");
-
-    let proxy = ProxyServer::new(port, ca, store, registry).expect("create proxy");
-
-    // Leak the temp dir to prevent cleanup while proxy is running
-    // (In a real scenario, we'd handle this more carefully)
-    std::mem::forget(temp_dir);
+    let proxy = ProxyServer::new(port, ca, db).expect("create proxy");
 
     (proxy, ca_cert_pem, token_value)
 }

@@ -1,15 +1,15 @@
 //! End-to-End Integration Tests for GAP System
 //!
 //! Tests the complete lifecycle flows:
-//! 1. Server initialization (init → server starts)
-//! 2. Plugin installation (install → list shows plugin)
-//! 3. Credential setting (set → stored correctly)
-//! 4. Token management (create → list → revoke)
+//! 1. Server initialization (init -> server starts)
+//! 2. Plugin installation (install -> list shows plugin)
+//! 3. Credential setting (set -> stored correctly)
+//! 4. Token management (create -> list -> revoke)
 //!
 //! These tests use actual binaries and real HTTP endpoints to verify
 //! the full integration across CLI, API, and storage layers.
 
-use gap_lib::storage::{FileStore, SecretStore};
+use gap_lib::database::GapDatabase;
 use reqwest::{Client, StatusCode};
 use serde_json::json;
 use sha2::{Digest, Sha512};
@@ -164,7 +164,7 @@ impl Drop for TestServer {
 
 /// Test 1a: Server status endpoint (no auth required)
 ///
-/// Flow: server starts → status returns version info
+/// Flow: server starts -> status returns version info
 ///
 /// This test works on all platforms and doesn't require authentication.
 #[tokio::test]
@@ -191,7 +191,7 @@ async fn test_server_status_endpoint() {
 
 /// Test 1b: Server initialization flow
 ///
-/// Flow: init → server starts → status returns version info
+/// Flow: init -> server starts -> status returns version info
 ///
 /// Note: On macOS, the init endpoint uses KeychainStore which requires user interaction.
 /// This test is marked as ignored by default on macOS. Run with `--ignored` if you want
@@ -215,20 +215,15 @@ async fn test_server_initialization_flow() {
     assert!(status["version"].is_string());
 }
 
-/// Test 2: Plugin installation flow (via FileStore)
+/// Test 2: Plugin installation flow (via GapDatabase)
 ///
-/// Flow: install plugin to storage → verify can be loaded → verify metadata
-///
-/// Note: This test uses FileStore directly as the plugin installation
-/// API endpoint is not yet fully implemented in Phase 8.
+/// Flow: install plugin to database -> verify can be loaded -> verify metadata
 #[tokio::test]
 async fn test_plugin_installation_flow() {
     use gap_lib::plugin_runtime::PluginRuntime;
+    use gap_lib::registry::PluginEntry;
 
-    let temp_dir = tempfile::tempdir().expect("Failed to create temp dir");
-    let store = FileStore::new(temp_dir.path().to_path_buf())
-        .await
-        .expect("Failed to create store");
+    let db = GapDatabase::in_memory().await.expect("Failed to create in-memory db");
 
     // Create a test plugin
     let plugin_code = r#"
@@ -243,16 +238,21 @@ async fn test_plugin_installation_flow() {
     };
     "#;
 
-    // Install plugin to storage
-    store
-        .set("plugin:test-service", plugin_code.as_bytes())
+    // Install plugin to database
+    let plugin_entry = PluginEntry {
+        name: "test-service".to_string(),
+        hosts: vec!["api.test.com".to_string()],
+        credential_schema: vec!["api_key".to_string()],
+        commit_sha: None,
+    };
+    db.add_plugin(&plugin_entry, plugin_code)
         .await
         .expect("Failed to install plugin");
 
     // Verify plugin can be loaded
     let mut runtime = PluginRuntime::new().expect("Failed to create runtime");
     let plugin = runtime
-        .load_plugin("test-service", &store)
+        .load_plugin("test-service", &db)
         .await
         .expect("Failed to load plugin");
 
@@ -261,43 +261,42 @@ async fn test_plugin_installation_flow() {
     assert_eq!(plugin.match_patterns, vec!["api.test.com"]);
     assert_eq!(plugin.credential_schema, vec!["api_key"]);
 
-    // Verify plugin can be retrieved from storage
-    let retrieved = store.get("plugin:test-service").await.expect("Failed to get plugin");
+    // Verify plugin can be retrieved from database
+    let retrieved = db.get_plugin_source("test-service").await.expect("Failed to get plugin");
     assert!(retrieved.is_some());
 }
 
 /// Test 3: Credential setting flow
 ///
-/// Flow: set credential → verify stored correctly → retrieve via plugin execution
+/// Flow: set credential -> verify stored correctly -> retrieve via database
 #[tokio::test]
 async fn test_credential_setting_flow() {
-    let temp_dir = tempfile::tempdir().expect("Failed to create temp dir");
-    let store = FileStore::new(temp_dir.path().to_path_buf())
-        .await
-        .expect("Failed to create store");
+    let db = GapDatabase::in_memory().await.expect("Failed to create in-memory db");
 
     // Set a credential
-    let key = "plugin:test-service:api_key";
-    let value = "secret_key_12345";
-
-    store
-        .set(key, value.as_bytes())
+    db.set_credential("test-service", "api_key", "secret_key_12345")
         .await
         .expect("Failed to set credential");
 
     // Retrieve and verify
-    let retrieved = store.get(key).await.expect("Failed to get credential");
-    assert_eq!(retrieved, Some(value.as_bytes().to_vec()));
+    let retrieved = db.get_credential("test-service", "api_key")
+        .await
+        .expect("Failed to get credential");
+    assert_eq!(retrieved, Some("secret_key_12345".to_string()));
 
     // Verify can be deleted
-    store.delete(key).await.expect("Failed to delete");
-    let deleted = store.get(key).await.expect("Failed to get after delete");
+    db.remove_credential("test-service", "api_key")
+        .await
+        .expect("Failed to delete");
+    let deleted = db.get_credential("test-service", "api_key")
+        .await
+        .expect("Failed to get after delete");
     assert_eq!(deleted, None);
 }
 
 /// Test 4: Token management flow
 ///
-/// Flow: create token → list shows token → revoke → verify removed
+/// Flow: create token -> list shows token -> revoke -> verify removed
 ///
 /// Note: Requires server initialization which uses KeychainStore on macOS.
 #[tokio::test]
@@ -382,7 +381,7 @@ async fn test_token_management_flow() {
 
 /// Test 5: Complete integration flow
 ///
-/// Flow: init → install plugin → set credential → create token → verify proxy ready
+/// Flow: init -> install plugin -> set credential -> create token -> verify proxy ready
 ///
 /// Note: Requires server initialization which uses KeychainStore on macOS.
 #[tokio::test]
@@ -444,7 +443,7 @@ async fn test_complete_integration_flow() {
 
 /// Test 6: Token sharing between API and ProxyServer
 ///
-/// Flow: create token via API → verify proxy can authenticate with new token
+/// Flow: create token via API -> verify proxy can authenticate with new token
 ///
 /// This test ensures that tokens created dynamically via the Management API
 /// are immediately visible to the ProxyServer for authentication.

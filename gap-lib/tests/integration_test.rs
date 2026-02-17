@@ -1,33 +1,24 @@
 //! Integration tests for the GAP system
 //!
-//! Tests the full pipeline: FileStore -> PluginRuntime -> Transform execution
+//! Tests the full pipeline: GapDatabase -> PluginRuntime -> Transform execution
 
+use gap_lib::database::GapDatabase;
 use gap_lib::plugin_runtime::PluginRuntime;
-use gap_lib::storage::{FileStore, SecretStore};
+use gap_lib::registry::PluginEntry;
 use gap_lib::types::{GAPCredentials, GAPRequest};
 
 /// Integration test: Load test-api plugin and execute a transform
 ///
 /// This tests the complete flow:
-/// 1. Create a FileStore
+/// 1. Create an in-memory GapDatabase
 /// 2. Store the test-api plugin code
 /// 3. Create a PluginRuntime
-/// 4. Load the plugin from the store
+/// 4. Load the plugin from the database
 /// 5. Execute the transform function
 /// 6. Verify the Authorization header is set correctly
 #[tokio::test]
 async fn test_full_plugin_pipeline() {
-    // Create a temporary directory for the test store
-    let temp_dir = std::env::temp_dir().join(format!(
-        "gap_integration_test_{}",
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
-    ));
-
-    // Create FileStore
-    let store = FileStore::new(temp_dir.clone()).await.unwrap();
+    let db = GapDatabase::in_memory().await.unwrap();
 
     // Load test plugin code from the plugins directory
     let plugin_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -40,17 +31,20 @@ async fn test_full_plugin_pipeline() {
         .await
         .expect("Failed to read test-api.js - make sure plugins/test-api.js exists");
 
-    // Store the plugin in the FileStore
-    store
-        .set("plugin:test-api", plugin_code.as_bytes())
-        .await
-        .unwrap();
+    // Store the plugin in the database
+    let plugin_entry = PluginEntry {
+        name: "test-api".to_string(),
+        hosts: vec!["api.example.com".to_string()],
+        credential_schema: vec!["api_key".to_string()],
+        commit_sha: None,
+    };
+    db.add_plugin(&plugin_entry, &plugin_code).await.unwrap();
 
     // Create PluginRuntime
     let mut runtime = PluginRuntime::new().unwrap();
 
     // Load the plugin
-    let plugin = runtime.load_plugin("test-api", &store).await.unwrap();
+    let plugin = runtime.load_plugin("test-api", &db).await.unwrap();
 
     // Verify plugin metadata
     assert_eq!(plugin.name, "test-api");
@@ -83,23 +77,12 @@ async fn test_full_plugin_pipeline() {
         transformed.get_header("Authorization"),
         Some(&"Bearer test_secret_key_12345".to_string())
     );
-
-    // Cleanup
-    tokio::fs::remove_dir_all(temp_dir).await.ok();
 }
 
 /// Smoke test: Verify multiple plugins can coexist
 #[tokio::test]
 async fn test_multiple_plugins() {
-    let temp_dir = std::env::temp_dir().join(format!(
-        "gap_multi_plugin_test_{}",
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
-    ));
-
-    let store = FileStore::new(temp_dir.clone()).await.unwrap();
+    let db = GapDatabase::in_memory().await.unwrap();
 
     // Create two different plugins
     let plugin1_code = r#"
@@ -127,20 +110,27 @@ async fn test_multiple_plugins() {
     };
     "#;
 
-    store
-        .set("plugin:service-a", plugin1_code.as_bytes())
-        .await
-        .unwrap();
-    store
-        .set("plugin:service-b", plugin2_code.as_bytes())
-        .await
-        .unwrap();
+    let entry_a = PluginEntry {
+        name: "service-a".to_string(),
+        hosts: vec!["service-a.example.com".to_string()],
+        credential_schema: vec!["token".to_string()],
+        commit_sha: None,
+    };
+    db.add_plugin(&entry_a, plugin1_code).await.unwrap();
+
+    let entry_b = PluginEntry {
+        name: "service-b".to_string(),
+        hosts: vec!["service-b.example.com".to_string()],
+        credential_schema: vec!["api_key".to_string(), "secret".to_string()],
+        commit_sha: None,
+    };
+    db.add_plugin(&entry_b, plugin2_code).await.unwrap();
 
     let mut runtime = PluginRuntime::new().unwrap();
 
     // Load both plugins
-    let plugin_a = runtime.load_plugin("service-a", &store).await.unwrap();
-    let plugin_b = runtime.load_plugin("service-b", &store).await.unwrap();
+    let plugin_a = runtime.load_plugin("service-a", &db).await.unwrap();
+    let plugin_b = runtime.load_plugin("service-b", &db).await.unwrap();
 
     assert_eq!(plugin_a.name, "service-a");
     assert_eq!(plugin_b.name, "service-b");
@@ -168,23 +158,12 @@ async fn test_multiple_plugins() {
     );
 
     // Both plugins' metadata is preserved even though only the last one can execute transforms
-
-    // Cleanup
-    tokio::fs::remove_dir_all(temp_dir).await.ok();
 }
 
 /// Smoke test: Verify plugin with complex credential schema
 #[tokio::test]
 async fn test_plugin_with_multiple_credentials() {
-    let temp_dir = std::env::temp_dir().join(format!(
-        "gap_multi_cred_test_{}",
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
-    ));
-
-    let store = FileStore::new(temp_dir.clone()).await.unwrap();
+    let db = GapDatabase::in_memory().await.unwrap();
 
     // Plugin that uses multiple credentials
     let plugin_code = r#"
@@ -203,13 +182,20 @@ async fn test_plugin_with_multiple_credentials() {
     };
     "#;
 
-    store
-        .set("plugin:aws-like", plugin_code.as_bytes())
-        .await
-        .unwrap();
+    let plugin_entry = PluginEntry {
+        name: "aws-like".to_string(),
+        hosts: vec!["*.s3.amazonaws.com".to_string()],
+        credential_schema: vec![
+            "access_key_id".to_string(),
+            "secret_access_key".to_string(),
+            "region".to_string(),
+        ],
+        commit_sha: None,
+    };
+    db.add_plugin(&plugin_entry, plugin_code).await.unwrap();
 
     let mut runtime = PluginRuntime::new().unwrap();
-    let plugin = runtime.load_plugin("aws-like", &store).await.unwrap();
+    let plugin = runtime.load_plugin("aws-like", &db).await.unwrap();
 
     assert_eq!(plugin.credential_schema.len(), 3);
     assert!(plugin.credential_schema.contains(&"access_key_id".to_string()));
@@ -241,7 +227,4 @@ async fn test_plugin_with_multiple_credentials() {
         transformed.get_header("X-Amz-Region"),
         Some(&"us-west-2".to_string())
     );
-
-    // Cleanup
-    tokio::fs::remove_dir_all(temp_dir).await.ok();
 }

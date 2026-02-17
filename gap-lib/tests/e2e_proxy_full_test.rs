@@ -26,9 +26,9 @@
 //!   Client --TLS(proxy CA)--> Proxy (CONNECT) --TLS(server CA)--> Echo HTTPS Server
 //!   Plugin sees outgoing request and injects X-Test-Credential-One and X-Test-Credential-Two.
 
+use gap_lib::database::GapDatabase;
 use gap_lib::proxy::ProxyServer;
-use gap_lib::registry::{PluginEntry, Registry, TokenEntry};
-use gap_lib::storage::{FileStore, SecretStore};
+use gap_lib::registry::PluginEntry;
 use gap_lib::tls::CertificateAuthority;
 use gap_lib::types::AgentToken;
 use rustls::pki_types::ServerName;
@@ -202,6 +202,42 @@ const PLUGIN_CODE: &str = r#"var plugin = {
     }
 };"#;
 
+/// Helper to set up a GapDatabase with the test plugin, credentials, and a token.
+/// Returns (Arc<GapDatabase>, token_value).
+async fn setup_test_db(
+    include_cred_two: bool,
+) -> (Arc<GapDatabase>, String) {
+    let db = Arc::new(GapDatabase::in_memory().await.expect("create in-memory db"));
+
+    // Store plugin
+    let plugin_entry = PluginEntry {
+        name: "test-server-gap".to_string(),
+        hosts: vec!["localhost".to_string()],
+        credential_schema: vec!["test_credential_one".to_string(), "test_credential_two".to_string()],
+        commit_sha: None,
+    };
+    db.add_plugin(&plugin_entry, PLUGIN_CODE).await.expect("store plugin");
+
+    // Store credentials
+    db.set_credential("test-server-gap", "test_credential_one", "super-secret-42")
+        .await
+        .expect("set credential one");
+    if include_cred_two {
+        db.set_credential("test-server-gap", "test_credential_two", "another-secret-99")
+            .await
+            .expect("set credential two");
+    }
+
+    // Store agent token
+    let token = AgentToken::new("e2e-test-agent");
+    let token_value = token.token.clone();
+    db.add_token(&token.token, &token.name, token.created_at)
+        .await
+        .expect("store token");
+
+    (db, token_value)
+}
+
 // ── Tests ────────────────────────────────────────────────────────────────────
 
 #[tokio::test]
@@ -221,63 +257,10 @@ async fn test_full_e2e_proxy_pipeline() {
     // --- Spawn echo HTTPS server (cert signed by test server CA) ---
     let echo_port = spawn_echo_server(&server_ca).await;
 
-    // --- Set up FileStore and Registry ---
-    let temp_dir = tempfile::tempdir().expect("create temp dir");
-    let store = Arc::new(
-        FileStore::new(temp_dir.path().to_path_buf())
-            .await
-            .expect("create FileStore"),
-    ) as Arc<dyn SecretStore>;
-    let registry = Arc::new(Registry::new(Arc::clone(&store)));
-
-    // --- Store plugin code ---
-    store
-        .set("plugin:test-server-gap", PLUGIN_CODE.as_bytes())
-        .await
-        .expect("store plugin code");
-
-    let plugin_entry = PluginEntry {
-        name: "test-server-gap".to_string(),
-        hosts: vec!["localhost".to_string()],
-        credential_schema: vec!["test_credential_one".to_string(), "test_credential_two".to_string()],
-        commit_sha: None,
-    };
-    registry
-        .add_plugin(&plugin_entry)
-        .await
-        .expect("register plugin");
-
-    // --- Store credentials ---
-    registry
-        .set_credential("test-server-gap", "test_credential_one", "super-secret-42")
-        .await
-        .expect("set credential one");
-    registry
-        .set_credential("test-server-gap", "test_credential_two", "another-secret-99")
-        .await
-        .expect("set credential two");
-
-    // --- Store agent token ---
-    let token = AgentToken::new("e2e-test-agent");
-    let token_value = token.token.clone();
-    let token_json = serde_json::to_vec(&token).expect("serialize token");
-    store
-        .set(&format!("token:{}", token.token), &token_json)
-        .await
-        .expect("store token");
-    let token_entry = TokenEntry {
-        token_value: token.token.clone(),
-        name: token.name.clone(),
-        created_at: token.created_at,
-    };
-    registry
-        .add_token(&token_entry)
-        .await
-        .expect("register token");
+    // --- Set up GapDatabase ---
+    let (db, token_value) = setup_test_db(true).await;
 
     // --- Build upstream root certs that trust ONLY the test server CA ---
-    // The proxy needs to verify the echo server's cert (signed by server CA),
-    // not the proxy CA.
     let upstream_root_certs = create_root_cert_store(&server_ca_cert_pem);
 
     // --- Create proxy using the proxy CA (not the server CA) ---
@@ -285,13 +268,10 @@ async fn test_full_e2e_proxy_pipeline() {
     let proxy = ProxyServer::new_with_upstream_tls(
         proxy_port,
         proxy_ca,
-        Arc::clone(&store),
-        Arc::clone(&registry),
+        db,
         upstream_root_certs,
     )
     .expect("create proxy");
-
-    std::mem::forget(temp_dir);
 
     tokio::spawn(async move {
         let _ = proxy.start().await;
@@ -430,54 +410,8 @@ async fn test_e2e_missing_credential() {
     // --- Spawn echo HTTPS server (cert signed by test server CA) ---
     let echo_port = spawn_echo_server(&server_ca).await;
 
-    // --- Set up FileStore and Registry ---
-    let temp_dir = tempfile::tempdir().expect("create temp dir");
-    let store = Arc::new(
-        FileStore::new(temp_dir.path().to_path_buf())
-            .await
-            .expect("create FileStore"),
-    ) as Arc<dyn SecretStore>;
-    let registry = Arc::new(Registry::new(Arc::clone(&store)));
-
-    store
-        .set("plugin:test-server-gap", PLUGIN_CODE.as_bytes())
-        .await
-        .expect("store plugin code");
-
-    let plugin_entry = PluginEntry {
-        name: "test-server-gap".to_string(),
-        hosts: vec!["localhost".to_string()],
-        credential_schema: vec!["test_credential_one".to_string(), "test_credential_two".to_string()],
-        commit_sha: None,
-    };
-    registry
-        .add_plugin(&plugin_entry)
-        .await
-        .expect("register plugin");
-
-    // --- Store ONLY test_credential_one — test_credential_two is intentionally missing ---
-    registry
-        .set_credential("test-server-gap", "test_credential_one", "super-secret-42")
-        .await
-        .expect("set credential one");
-
-    // --- Store agent token ---
-    let token = AgentToken::new("e2e-missing-cred-agent");
-    let token_value = token.token.clone();
-    let token_json = serde_json::to_vec(&token).expect("serialize token");
-    store
-        .set(&format!("token:{}", token.token), &token_json)
-        .await
-        .expect("store token");
-    let token_entry = TokenEntry {
-        token_value: token.token.clone(),
-        name: token.name.clone(),
-        created_at: token.created_at,
-    };
-    registry
-        .add_token(&token_entry)
-        .await
-        .expect("register token");
+    // --- Set up GapDatabase (missing second credential) ---
+    let (db, token_value) = setup_test_db(false).await;
 
     // --- Upstream root certs trust only the test server CA ---
     let upstream_root_certs = create_root_cert_store(&server_ca_cert_pem);
@@ -487,13 +421,10 @@ async fn test_e2e_missing_credential() {
     let proxy = ProxyServer::new_with_upstream_tls(
         proxy_port,
         proxy_ca,
-        Arc::clone(&store),
-        Arc::clone(&registry),
+        db,
         upstream_root_certs,
     )
     .expect("create proxy");
-
-    std::mem::forget(temp_dir);
 
     tokio::spawn(async move {
         let _ = proxy.start().await;
@@ -603,7 +534,6 @@ async fn test_e2e_wrong_proxy_ca_rejected() {
 
     // --- Real proxy CA: used to sign the proxy's TLS certificate ---
     let real_proxy_ca = CertificateAuthority::generate().expect("generate real proxy CA");
-    let real_proxy_ca_cert_pem = real_proxy_ca.ca_cert_pem();
 
     // --- Wrong CA: a completely unrelated CA that the client mistakenly trusts ---
     let wrong_ca = CertificateAuthority::generate().expect("generate wrong CA");
@@ -611,22 +541,14 @@ async fn test_e2e_wrong_proxy_ca_rejected() {
 
     // Sanity: the two CAs must produce different certs
     assert_ne!(
-        real_proxy_ca_cert_pem, wrong_ca_cert_pem,
+        real_proxy_ca.ca_cert_pem(), wrong_ca_cert_pem,
         "The two generated CAs must be distinct"
     );
 
-    // --- Set up minimal store and registry (no plugin needed for this test) ---
-    let temp_dir = tempfile::tempdir().expect("create temp dir");
-    let store = Arc::new(
-        FileStore::new(temp_dir.path().to_path_buf())
-            .await
-            .expect("create FileStore"),
-    ) as Arc<dyn SecretStore>;
-    let registry = Arc::new(Registry::new(Arc::clone(&store)));
+    // --- Set up minimal GapDatabase (no plugin needed for this test) ---
+    let db = Arc::new(GapDatabase::in_memory().await.expect("create in-memory db"));
 
     // --- Upstream root certs (not exercised, but required by API) ---
-    // We use the wrong CA's cert PEM here — doesn't matter since the handshake
-    // fails before we ever reach the upstream.
     let upstream_root_certs = create_root_cert_store(&wrong_ca_cert_pem);
 
     // --- Build proxy with the REAL proxy CA ---
@@ -634,13 +556,10 @@ async fn test_e2e_wrong_proxy_ca_rejected() {
     let proxy = ProxyServer::new_with_upstream_tls(
         proxy_port,
         real_proxy_ca,
-        Arc::clone(&store),
-        Arc::clone(&registry),
+        db,
         upstream_root_certs,
     )
     .expect("create proxy");
-
-    std::mem::forget(temp_dir);
 
     tokio::spawn(async move {
         let _ = proxy.start().await;
@@ -793,62 +712,8 @@ async fn test_e2e_h2_proxy_pipeline() {
     // --- Spawn H2-capable echo HTTPS server (cert signed by test server CA) ---
     let echo_port = spawn_echo_server_h2(&server_ca).await;
 
-    // --- Set up FileStore and Registry ---
-    let temp_dir = tempfile::tempdir().expect("create temp dir");
-    let store = Arc::new(
-        FileStore::new(temp_dir.path().to_path_buf())
-            .await
-            .expect("create FileStore"),
-    ) as Arc<dyn SecretStore>;
-    let registry = Arc::new(Registry::new(Arc::clone(&store)));
-
-    // --- Store plugin code ---
-    store
-        .set("plugin:test-server-gap", PLUGIN_CODE.as_bytes())
-        .await
-        .expect("store plugin code");
-
-    let plugin_entry = PluginEntry {
-        name: "test-server-gap".to_string(),
-        hosts: vec!["localhost".to_string()],
-        credential_schema: vec![
-            "test_credential_one".to_string(),
-            "test_credential_two".to_string(),
-        ],
-        commit_sha: None,
-    };
-    registry
-        .add_plugin(&plugin_entry)
-        .await
-        .expect("register plugin");
-
-    // --- Store credentials ---
-    registry
-        .set_credential("test-server-gap", "test_credential_one", "super-secret-42")
-        .await
-        .expect("set credential one");
-    registry
-        .set_credential("test-server-gap", "test_credential_two", "another-secret-99")
-        .await
-        .expect("set credential two");
-
-    // --- Store agent token ---
-    let token = AgentToken::new("e2e-h2-test-agent");
-    let token_value = token.token.clone();
-    let token_json = serde_json::to_vec(&token).expect("serialize token");
-    store
-        .set(&format!("token:{}", token.token), &token_json)
-        .await
-        .expect("store token");
-    let token_entry = TokenEntry {
-        token_value: token.token.clone(),
-        name: token.name.clone(),
-        created_at: token.created_at,
-    };
-    registry
-        .add_token(&token_entry)
-        .await
-        .expect("register token");
+    // --- Set up GapDatabase ---
+    let (db, token_value) = setup_test_db(true).await;
 
     // --- Build upstream root certs that trust ONLY the test server CA ---
     let upstream_root_certs = create_root_cert_store(&server_ca_cert_pem);
@@ -858,13 +723,10 @@ async fn test_e2e_h2_proxy_pipeline() {
     let proxy = ProxyServer::new_with_upstream_tls(
         proxy_port,
         proxy_ca,
-        Arc::clone(&store),
-        Arc::clone(&registry),
+        db,
         upstream_root_certs,
     )
     .expect("create proxy");
-
-    std::mem::forget(temp_dir);
 
     tokio::spawn(async move {
         let _ = proxy.start().await;

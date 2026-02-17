@@ -7,11 +7,11 @@
 //! 4. Execute plugin transform
 //! 5. Serialize back to HTTP
 
+use gap_lib::database::GapDatabase;
 use gap_lib::plugin_runtime::PluginRuntime;
-use gap_lib::registry::{PluginEntry, Registry};
-use gap_lib::storage::{FileStore, SecretStore};
+use gap_lib::registry::PluginEntry;
 use gap_lib::types::{GAPCredentials, GAPRequest};
-use std::sync::Arc;
+
 
 /// Test HTTP request parsing
 ///
@@ -77,16 +77,7 @@ fn test_serialize_http_request_with_body() {
 /// Test matching host against plugins
 #[tokio::test]
 async fn test_find_matching_plugin() {
-    let temp_dir = std::env::temp_dir().join(format!(
-        "gap_proxy_test_{}",
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
-    ));
-
-    let store = Arc::new(FileStore::new(temp_dir.clone()).await.unwrap()) as Arc<dyn SecretStore>;
-    let registry = Registry::new(Arc::clone(&store));
+    let db = GapDatabase::in_memory().await.unwrap();
 
     // Create two plugins with different match patterns
     let plugin1_code = r#"
@@ -113,56 +104,41 @@ async fn test_find_matching_plugin() {
     };
     "#;
 
-    store.set("plugin:exa-plugin", plugin1_code.as_bytes()).await.unwrap();
-    store.set("plugin:s3-plugin", plugin2_code.as_bytes()).await.unwrap();
-
-    // Add plugins to registry
-    registry.add_plugin(&PluginEntry {
+    let entry1 = PluginEntry {
         name: "exa-plugin".to_string(),
         hosts: vec!["api.exa.ai".to_string()],
         credential_schema: vec!["api_key".to_string()],
         commit_sha: None,
-    }).await.unwrap();
+    };
+    db.add_plugin(&entry1, plugin1_code).await.unwrap();
 
-    registry.add_plugin(&PluginEntry {
+    let entry2 = PluginEntry {
         name: "s3-plugin".to_string(),
         hosts: vec!["*.s3.amazonaws.com".to_string()],
         credential_schema: vec!["access_key".to_string(), "secret_key".to_string()],
         commit_sha: None,
-    }).await.unwrap();
+    };
+    db.add_plugin(&entry2, plugin2_code).await.unwrap();
 
     // Find matching plugin for api.exa.ai
-    let matching_plugin = find_matching_plugin("api.exa.ai", &*store, &registry).await.unwrap();
+    let matching_plugin = find_matching_plugin("api.exa.ai", &db).await.unwrap();
     assert!(matching_plugin.is_some());
     assert_eq!(matching_plugin.unwrap().name, "exa-plugin");
 
     // Find matching plugin for bucket.s3.amazonaws.com
-    let matching_plugin = find_matching_plugin("bucket.s3.amazonaws.com", &*store, &registry).await.unwrap();
+    let matching_plugin = find_matching_plugin("bucket.s3.amazonaws.com", &db).await.unwrap();
     assert!(matching_plugin.is_some());
     assert_eq!(matching_plugin.unwrap().name, "s3-plugin");
 
     // No match for unknown host
-    let matching_plugin = find_matching_plugin("api.unknown.com", &*store, &registry).await.unwrap();
+    let matching_plugin = find_matching_plugin("api.unknown.com", &db).await.unwrap();
     assert!(matching_plugin.is_none());
-
-    // Cleanup
-    tokio::fs::remove_dir_all(temp_dir).await.ok();
 }
 
 /// Test end-to-end: Parse HTTP -> Find plugin -> Execute transform -> Serialize
 #[tokio::test]
 async fn test_proxy_plugin_execution_flow() {
-    let temp_dir = std::env::temp_dir().join(format!(
-        "gap_proxy_e2e_test_{}",
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
-    ));
-
-    let store_arc = Arc::new(FileStore::new(temp_dir.clone()).await.unwrap()) as Arc<dyn SecretStore>;
-    let registry = Registry::new(Arc::clone(&store_arc));
-    let store = FileStore::new(temp_dir.clone()).await.unwrap();
+    let db = GapDatabase::in_memory().await.unwrap();
 
     // Install a plugin
     let plugin_code = r#"
@@ -177,38 +153,36 @@ async fn test_proxy_plugin_execution_flow() {
     };
     "#;
 
-    store.set("plugin:test-api", plugin_code.as_bytes()).await.unwrap();
-
-    // Add plugin to registry
-    registry.add_plugin(&PluginEntry {
+    let plugin_entry = PluginEntry {
         name: "test-api".to_string(),
         hosts: vec!["api.example.com".to_string()],
         credential_schema: vec!["api_key".to_string()],
         commit_sha: None,
-    }).await.unwrap();
+    };
+    db.add_plugin(&plugin_entry, plugin_code).await.unwrap();
 
     // Store credentials
-    let mut creds = GAPCredentials::new();
-    creds.set("api_key", "secret123");
-    store.set("credential:test-api:default", serde_json::to_string(&creds).unwrap().as_bytes()).await.unwrap();
+    db.set_credential("test-api", "api_key", "secret123").await.unwrap();
 
     // Parse incoming HTTP request
     let raw_request = b"GET /v1/users HTTP/1.1\r\nHost: api.example.com\r\nContent-Type: application/json\r\n\r\n";
     let request = parse_http_request(raw_request).unwrap();
 
     // Find matching plugin
-    let plugin = find_matching_plugin("api.example.com", &*store_arc, &registry).await.unwrap();
+    let plugin = find_matching_plugin("api.example.com", &db).await.unwrap();
     assert!(plugin.is_some());
     let plugin = plugin.unwrap();
 
     // Load credentials for the plugin
-    let creds_key = format!("credential:{}:default", plugin.name);
-    let creds_bytes = store.get(&creds_key).await.unwrap().unwrap();
-    let creds: GAPCredentials = serde_json::from_slice(&creds_bytes).unwrap();
+    let creds_map = db.get_plugin_credentials(&plugin.name).await.unwrap().unwrap();
+    let mut creds = GAPCredentials::new();
+    for (field, value) in &creds_map {
+        creds.set(field, value);
+    }
 
     // Execute transform
     let mut runtime = PluginRuntime::new().unwrap();
-    runtime.load_plugin(&plugin.name, &store).await.unwrap();
+    runtime.load_plugin(&plugin.name, &db).await.unwrap();
     let transformed = runtime.execute_transform(&plugin.name, request, &creds).unwrap();
 
     // Verify transformation
@@ -218,9 +192,6 @@ async fn test_proxy_plugin_execution_flow() {
     let http_bytes = serialize_http_request(&transformed).unwrap();
     let http_str = String::from_utf8_lossy(&http_bytes);
     assert!(http_str.contains("Authorization: Bearer secret123\r\n"));
-
-    // Cleanup
-    tokio::fs::remove_dir_all(temp_dir).await.ok();
 }
 
 // Use the actual implementations from gap_lib
@@ -231,16 +202,7 @@ use gap_lib::proxy_transforms::parse_and_transform;
 /// Test the complete proxy transform pipeline
 #[tokio::test]
 async fn test_complete_proxy_transform_pipeline() {
-    let temp_dir = std::env::temp_dir().join(format!(
-        "gap_proxy_complete_test_{}",
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
-    ));
-
-    let store = Arc::new(FileStore::new(temp_dir.clone()).await.unwrap()) as Arc<dyn SecretStore>;
-    let registry = Registry::new(Arc::clone(&store));
+    let db = GapDatabase::in_memory().await.unwrap();
 
     // Install a simple plugin
     let plugin_code = r#"
@@ -256,18 +218,16 @@ async fn test_complete_proxy_transform_pipeline() {
     };
     "#;
 
-    store.set("plugin:test-transform", plugin_code.as_bytes()).await.unwrap();
-
-    // Add plugin to registry
-    registry.add_plugin(&PluginEntry {
+    let plugin_entry = PluginEntry {
         name: "test-transform".to_string(),
         hosts: vec!["api.test.com".to_string()],
         credential_schema: vec!["secret".to_string()],
         commit_sha: None,
-    }).await.unwrap();
+    };
+    db.add_plugin(&plugin_entry, plugin_code).await.unwrap();
 
-    // Set credentials directly in registry (no separate storage entry needed)
-    registry.set_credential("test-transform", "secret", "my-secret-value")
+    // Set credentials directly in database
+    db.set_credential("test-transform", "secret", "my-secret-value")
         .await
         .unwrap();
 
@@ -275,7 +235,7 @@ async fn test_complete_proxy_transform_pipeline() {
     let raw_http = b"GET /api/data HTTP/1.1\r\nHost: api.test.com\r\nUser-Agent: TestAgent/1.0\r\n\r\n";
 
     // Transform the request using the proxy pipeline
-    let transformed_bytes = parse_and_transform(raw_http, "api.test.com", &*store, &registry)
+    let transformed_bytes = parse_and_transform(raw_http, "api.test.com", &db)
         .await
         .unwrap();
 
@@ -289,7 +249,4 @@ async fn test_complete_proxy_transform_pipeline() {
     assert_eq!(transformed_request.get_header("User-Agent"), Some(&"TestAgent/1.0".to_string()));
     assert_eq!(transformed_request.get_header("X-Transformed"), Some(&"true".to_string()));
     assert_eq!(transformed_request.get_header("X-Secret"), Some(&"my-secret-value".to_string()));
-
-    // Cleanup
-    tokio::fs::remove_dir_all(temp_dir).await.ok();
 }
