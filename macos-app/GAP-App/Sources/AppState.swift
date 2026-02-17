@@ -22,6 +22,14 @@ class AppState: ObservableObject {
     @Published var tokens: [Token] = []
     @Published var activity: [ActivityEntry] = []
 
+    // Activity stream state
+    @Published var activityFilter = ActivityFilter()
+    @Published var streamEntries: [ActivityEntry] = []
+    @Published var isStreaming = false
+    @Published var streamError: String? = nil
+
+    private var streamTask: Task<Void, Never>? = nil
+
     let client = GAPClient()
 
     /// Whether the server is installed (delegates to ServerManager)
@@ -145,24 +153,59 @@ class AppState: ObservableObject {
         self.tokens = response.tokens
     }
 
-    /// Refresh the activity log from the server.
+    /// Refresh the activity log from the server using current filter.
     ///
     /// - Throws: GAPError if the request fails
     func refreshActivity() async throws {
         guard serverRunning else { return }
         guard let hash = passwordHash else { return }
-        let response = try await client.getActivity(passwordHash: hash)
+        let response = try await client.getActivityFiltered(passwordHash: hash, filter: activityFilter)
         self.activity = response.entries
+    }
+
+    /// Start the SSE activity stream. Entries are inserted at the front of streamEntries.
+    func startStream() {
+        guard let hash = passwordHash else { return }
+        stopStream()
+        isStreaming = true
+        streamError = nil
+        streamTask = Task {
+            do {
+                for try await entry in client.activityStream(passwordHash: hash) {
+                    self.streamEntries.insert(entry, at: 0)
+                    // Cap at 500 entries to prevent memory growth
+                    if self.streamEntries.count > 500 {
+                        self.streamEntries.removeLast()
+                    }
+                }
+                self.isStreaming = false
+            } catch {
+                if !Task.isCancelled {
+                    self.streamError = error.localizedDescription
+                    self.isStreaming = false
+                }
+            }
+        }
+    }
+
+    /// Stop the SSE activity stream.
+    func stopStream() {
+        streamTask?.cancel()
+        streamTask = nil
+        isStreaming = false
     }
 
     // MARK: - Session Management
 
     /// Log out and clear all state.
     func logout() {
+        stopStream()
         passwordHash = nil
         isConnected = false
         plugins = []
         tokens = []
         activity = []
+        streamEntries = []
+        activityFilter = ActivityFilter()
     }
 }

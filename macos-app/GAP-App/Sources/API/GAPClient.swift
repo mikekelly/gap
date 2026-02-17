@@ -235,7 +235,7 @@ class GAPClient {
         let _: EmptyResponse = try await delete("/credentials/\(encodedPlugin)/\(encodedKey)", body: ["password_hash": passwordHash])
     }
 
-    // MARK: - Activity Endpoint (Authenticated)
+    // MARK: - Activity Endpoints (Authenticated)
 
     /// Get recent activity log entries.
     ///
@@ -244,6 +244,71 @@ class GAPClient {
     /// - Throws: GAPError if the request fails or authentication fails
     func getActivity(passwordHash: String) async throws -> ActivityResponse {
         return try await post("/activity", body: ["password_hash": passwordHash])
+    }
+
+    /// Get filtered activity log entries.
+    ///
+    /// - Parameters:
+    ///   - passwordHash: SHA512 hash of the password
+    ///   - filter: ActivityFilter with search parameters
+    /// - Returns: ActivityResponse containing matching activity entries
+    /// - Throws: GAPError if the request fails or authentication fails
+    func getActivityFiltered(passwordHash: String, filter: ActivityFilter) async throws -> ActivityResponse {
+        var components = URLComponents(url: baseURL.appendingPathComponent("activity"), resolvingAgainstBaseURL: false)!
+        components.queryItems = filter.queryItems
+
+        var request = URLRequest(url: components.url!)
+        request.httpMethod = "GET"
+        request.httpBody = try JSONSerialization.data(withJSONObject: ["password_hash": passwordHash])
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+
+        return try await performRequest(request)
+    }
+
+    /// Connect to the activity SSE stream.
+    ///
+    /// Returns an AsyncThrowingStream that yields ActivityEntry values as they
+    /// arrive from the server-sent events endpoint.
+    ///
+    /// - Parameters:
+    ///   - passwordHash: SHA512 hash of the password
+    ///   - filter: Optional stream filter parameters
+    /// - Returns: AsyncThrowingStream of ActivityEntry values
+    func activityStream(passwordHash: String, filter: ActivityStreamFilter? = nil) -> AsyncThrowingStream<ActivityEntry, Error> {
+        AsyncThrowingStream { continuation in
+            let task = Task {
+                do {
+                    var components = URLComponents(url: baseURL.appendingPathComponent("activity/stream"), resolvingAgainstBaseURL: false)!
+                    if let filter = filter {
+                        components.queryItems = filter.queryItems
+                    }
+
+                    var request = URLRequest(url: components.url!)
+                    request.httpMethod = "GET"
+                    request.httpBody = try JSONSerialization.data(withJSONObject: ["password_hash": passwordHash])
+                    request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+
+                    let (bytes, _) = try await session.bytes(for: request)
+                    for try await line in bytes.lines {
+                        if Task.isCancelled { break }
+                        if line.hasPrefix("data: ") {
+                            let jsonStr = String(line.dropFirst(6))
+                            if let data = jsonStr.data(using: .utf8),
+                               let entry = try? JSONDecoder().decode(ActivityEntry.self, from: data) {
+                                continuation.yield(entry)
+                            }
+                        }
+                    }
+                    continuation.finish()
+                } catch {
+                    continuation.finish(throwing: error)
+                }
+            }
+
+            continuation.onTermination = { _ in
+                task.cancel()
+            }
+        }
     }
 
     // MARK: - Private Helper Methods

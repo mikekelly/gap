@@ -131,15 +131,68 @@ struct ActivityResponse: Codable {
 /// A single activity log entry
 struct ActivityEntry: Codable, Identifiable {
     let timestamp: String
+    let requestId: String?
     let method: String
     let url: String
     let agentId: String?
     let status: Int
+    let pluginName: String?
+    let pluginSha: String?
+    let sourceHash: String?
+    let requestHeaders: String?
 
-    var id: String { "\(timestamp)-\(url)" }
+    var id: String { "\(timestamp)-\(url)-\(requestId ?? "")" }
 
     enum CodingKeys: String, CodingKey {
         case timestamp, method, url, status
+        case requestId = "request_id"
         case agentId = "agent_id"
+        case pluginName = "plugin_name"
+        case pluginSha = "plugin_sha"
+        case sourceHash = "source_hash"
+        case requestHeaders = "request_headers"
+    }
+}
+
+/// Filter parameters for activity search queries
+struct ActivityFilter {
+    var domain: String = ""
+    var method: String = ""
+    var plugin: String = ""
+    var path: String = ""
+    var agent: String = ""
+    var requestId: String = ""
+    var limit: Int = 100
+    var since: Date? = nil
+
+    var queryItems: [URLQueryItem] {
+        var items: [URLQueryItem] = []
+        if !domain.isEmpty { items.append(.init(name: "domain", value: domain)) }
+        if !method.isEmpty { items.append(.init(name: "method", value: method)) }
+        if !plugin.isEmpty { items.append(.init(name: "plugin", value: plugin)) }
+        if !path.isEmpty { items.append(.init(name: "path", value: path)) }
+        if !agent.isEmpty { items.append(.init(name: "agent", value: agent)) }
+        if !requestId.isEmpty { items.append(.init(name: "request_id", value: requestId)) }
+        items.append(.init(name: "limit", value: "\(limit)"))
+        if let since = since {
+            let formatter = ISO8601DateFormatter()
+            items.append(.init(name: "since", value: formatter.string(from: since)))
+        }
+        return items
+    }
+}
+
+/// Filter parameters for activity SSE stream
+struct ActivityStreamFilter {
+    var domain: String = ""
+    var method: String = ""
+    var plugin: String = ""
+
+    var queryItems: [URLQueryItem] {
+        var items: [URLQueryItem] = []
+        if !domain.isEmpty { items.append(.init(name: "domain", value: domain)) }
+        if !method.isEmpty { items.append(.init(name: "method", value: method)) }
+        if !plugin.isEmpty { items.append(.init(name: "plugin", value: plugin)) }
+        return items
     }
 }
