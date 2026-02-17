@@ -540,6 +540,74 @@ where
     Ok(())
 }
 
+/// Convert a hyper Request + collected body bytes to a GAPRequest
+///
+/// Used by the hyper-based proxy pipeline to convert incoming requests
+/// into the format expected by `transform_request()`.
+#[allow(dead_code)] // Will be used by proxy_via_hyper in Phase 1B
+fn hyper_to_gap_request<B>(
+    req: &hyper::Request<B>,
+    body_bytes: bytes::Bytes,
+    hostname: &str,
+) -> crate::types::GAPRequest {
+    use std::collections::HashMap;
+
+    let method = req.method().as_str().to_string();
+
+    // Construct full URL: the request URI in HTTP/1.1 is typically just the path
+    let path_and_query = req
+        .uri()
+        .path_and_query()
+        .map(|pq| pq.as_str())
+        .unwrap_or("/");
+    let url = format!("https://{}{}", hostname, path_and_query);
+
+    // Collect headers
+    let mut headers = HashMap::new();
+    for (key, value) in req.headers() {
+        if let Ok(v) = value.to_str() {
+            headers.insert(key.as_str().to_string(), v.to_string());
+        }
+    }
+
+    crate::types::GAPRequest {
+        method,
+        url,
+        headers,
+        body: body_bytes.to_vec(),
+    }
+}
+
+/// Convert a GAPRequest back to a hyper Request
+///
+/// Used by the hyper-based proxy pipeline to convert transformed requests
+/// back into hyper format for forwarding upstream.
+#[allow(dead_code)] // Will be used by proxy_via_hyper in Phase 1B
+fn gap_request_to_hyper(
+    req: &crate::types::GAPRequest,
+) -> Result<hyper::Request<http_body_util::Full<bytes::Bytes>>> {
+    use crate::http_utils::extract_path_from_url;
+
+    let path = extract_path_from_url(&req.url)?;
+
+    let method: hyper::Method = req.method.parse().map_err(|_| {
+        GapError::protocol(format!("Invalid HTTP method: {}", req.method))
+    })?;
+
+    let mut builder = hyper::Request::builder()
+        .method(method)
+        .uri(&path);
+
+    for (key, value) in &req.headers {
+        builder = builder.header(key.as_str(), value.as_str());
+    }
+
+    let body = http_body_util::Full::new(bytes::Bytes::from(req.body.clone()));
+    let hyper_req = builder.body(body)?;
+
+    Ok(hyper_req)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -690,5 +758,110 @@ mod tests {
         // Verify the proxy was created successfully
         // The fact that this doesn't panic means the TLS acceptor was created successfully
         assert_eq!(proxy.port, 19443);
+    }
+
+    #[test]
+    fn test_hyper_to_gap_request_get() {
+        let hyper_req = hyper::Request::builder()
+            .method("GET")
+            .uri("/api/data?q=test")
+            .header("Host", "api.example.com")
+            .header("Accept", "application/json")
+            .body(())
+            .unwrap();
+
+        let body_bytes = bytes::Bytes::new();
+        let gap_req = hyper_to_gap_request(&hyper_req, body_bytes, "api.example.com");
+
+        assert_eq!(gap_req.method, "GET");
+        assert_eq!(gap_req.url, "https://api.example.com/api/data?q=test");
+        assert_eq!(gap_req.get_header("host"), Some(&"api.example.com".to_string()));
+        assert_eq!(gap_req.get_header("accept"), Some(&"application/json".to_string()));
+        assert!(gap_req.body.is_empty());
+    }
+
+    #[test]
+    fn test_hyper_to_gap_request_post_with_body() {
+        let hyper_req = hyper::Request::builder()
+            .method("POST")
+            .uri("/api/submit")
+            .header("Host", "api.example.com")
+            .header("Content-Type", "application/json")
+            .body(())
+            .unwrap();
+
+        let body_bytes = bytes::Bytes::from(r#"{"key":"value"}"#);
+        let gap_req = hyper_to_gap_request(&hyper_req, body_bytes, "api.example.com");
+
+        assert_eq!(gap_req.method, "POST");
+        assert_eq!(gap_req.url, "https://api.example.com/api/submit");
+        assert_eq!(gap_req.body, br#"{"key":"value"}"#);
+    }
+
+    #[test]
+    fn test_hyper_to_gap_request_root_path() {
+        let hyper_req = hyper::Request::builder()
+            .method("GET")
+            .uri("/")
+            .header("Host", "example.com")
+            .body(())
+            .unwrap();
+
+        let gap_req = hyper_to_gap_request(&hyper_req, bytes::Bytes::new(), "example.com");
+        assert_eq!(gap_req.url, "https://example.com/");
+    }
+
+    #[test]
+    fn test_gap_request_to_hyper_get() {
+        use crate::types::GAPRequest;
+
+        let gap_req = GAPRequest::new("GET", "https://api.example.com/data?q=test")
+            .with_header("Host", "api.example.com")
+            .with_header("Accept", "application/json");
+
+        let hyper_req = gap_request_to_hyper(&gap_req).expect("conversion should succeed");
+
+        assert_eq!(hyper_req.method(), hyper::Method::GET);
+        assert_eq!(hyper_req.uri().path_and_query().unwrap().as_str(), "/data?q=test");
+        assert_eq!(hyper_req.headers().get("Host").unwrap(), "api.example.com");
+        assert_eq!(hyper_req.headers().get("Accept").unwrap(), "application/json");
+    }
+
+    #[test]
+    fn test_gap_request_to_hyper_post_with_body() {
+        use crate::types::GAPRequest;
+
+        let gap_req = GAPRequest::new("POST", "https://api.example.com/submit")
+            .with_header("Content-Type", "application/json")
+            .with_body(br#"{"key":"value"}"#.to_vec());
+
+        let hyper_req = gap_request_to_hyper(&gap_req).expect("conversion should succeed");
+
+        assert_eq!(hyper_req.method(), hyper::Method::POST);
+        assert_eq!(hyper_req.uri().path_and_query().unwrap().as_str(), "/submit");
+    }
+
+    #[test]
+    fn test_gap_request_to_hyper_roundtrip() {
+        // Create a GAPRequest, convert to hyper, convert back, verify equivalence
+        use crate::types::GAPRequest;
+
+        let original = GAPRequest::new("PUT", "https://api.example.com/items/42")
+            .with_header("Host", "api.example.com")
+            .with_header("Content-Type", "text/plain")
+            .with_body(b"updated content".to_vec());
+
+        // Convert to hyper
+        let hyper_req = gap_request_to_hyper(&original).expect("to hyper");
+
+        // Convert back
+        let body_bytes = bytes::Bytes::from(original.body.clone());
+        let roundtripped = hyper_to_gap_request(&hyper_req, body_bytes, "api.example.com");
+
+        assert_eq!(roundtripped.method, original.method);
+        assert_eq!(roundtripped.url, original.url);
+        assert_eq!(roundtripped.body, original.body);
+        // Headers should be present (hyper lowercases header names)
+        assert_eq!(roundtripped.get_header("content-type"), Some(&"text/plain".to_string()));
     }
 }

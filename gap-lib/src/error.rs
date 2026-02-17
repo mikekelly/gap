@@ -116,6 +116,18 @@ impl GapError {
     }
 }
 
+impl From<hyper::Error> for GapError {
+    fn from(e: hyper::Error) -> Self {
+        GapError::Network(e.to_string())
+    }
+}
+
+impl From<http::Error> for GapError {
+    fn from(e: http::Error) -> Self {
+        GapError::Protocol(e.to_string())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -146,5 +158,27 @@ mod tests {
         }
 
         assert!(returns_result().is_ok());
+    }
+
+    #[test]
+    fn test_error_conversion_from_hyper_compiles() {
+        // hyper::Error is not easily constructed directly (no public constructors).
+        // Verify the From impl exists by checking a function that uses the ? operator
+        // with hyper::Error -> GapError would compile.
+        fn _accepts_hyper_err(e: hyper::Error) -> GapError {
+            GapError::from(e)
+        }
+    }
+
+    #[test]
+    fn test_error_conversion_from_http() {
+        // http::Error can be produced by building a request with invalid URI
+        let err = http::Request::builder()
+            .uri("not a valid \x00 uri")
+            .body(())
+            .unwrap_err();
+        let gap_err: GapError = err.into();
+        assert!(matches!(gap_err, GapError::Protocol(_)));
+        assert!(gap_err.to_string().contains("Protocol error:"));
     }
 }

@@ -128,7 +128,7 @@ pub fn serialize_http_request(request: &GAPRequest) -> Result<Vec<u8>> {
 /// Extract path and query from full URL
 ///
 /// Converts "https://example.com/path?query" to "/path?query"
-fn extract_path_from_url(url: &str) -> Result<String> {
+pub(crate) fn extract_path_from_url(url: &str) -> Result<String> {
     // Simple URL parsing - find the third slash
     if url.starts_with("http://") || url.starts_with("https://") {
         let without_scheme = if url.starts_with("https://") {
