@@ -5,6 +5,7 @@
 pub mod error;
 pub mod http_utils;
 #[cfg(target_os = "macos")]
+#[allow(dead_code)] // Retained for future KeychainKeyProvider (Phase 4)
 mod keychain_impl;
 pub mod paths;
 pub mod plugin_matcher;
@@ -12,8 +13,6 @@ pub mod plugin_runtime;
 pub mod database;
 pub mod proxy;
 pub mod proxy_transforms;
-pub mod registry;
-pub mod storage;
 pub mod tls;
 pub mod types;
 
@@ -25,9 +24,9 @@ pub use paths::ca_cert_path;
 pub use plugin_matcher::find_matching_plugin;
 pub use plugin_runtime::PluginRuntime;
 pub use proxy::ProxyServer;
-pub use registry::{CredentialEntry, PluginEntry, Registry, RegistryData, TokenEntry};
-pub use storage::{create_store, FileStore, SecretStore};
-#[cfg(target_os = "macos")]
-pub use storage::KeychainStore;
+pub use database::GapDatabase;
 pub use tls::CertificateAuthority;
-pub use types::{GAPCredentials, GAPPlugin, GAPRequest, AgentToken, Config, ActivityEntry};
+pub use types::{
+    GAPCredentials, GAPPlugin, GAPRequest, AgentToken, Config, ActivityEntry,
+    CredentialEntry, PluginEntry, TokenEntry, TokenMetadata,
+};

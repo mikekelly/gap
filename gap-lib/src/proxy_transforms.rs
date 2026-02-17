@@ -118,7 +118,7 @@ pub async fn parse_and_transform(
 mod tests {
     use super::*;
     use crate::database::GapDatabase;
-    use crate::registry::PluginEntry;
+    use crate::types::PluginEntry;
     use crate::types::GAPRequest;
 
     #[tokio::test]

@@ -9,7 +9,7 @@
 
 use gap_lib::{AgentToken, ActivityEntry};
 use gap_lib::database::GapDatabase;
-use gap_lib::registry::PluginEntry;
+use gap_lib::types::PluginEntry;
 use argon2::{Argon2, PasswordHash, PasswordVerifier};
 use axum::{
     async_trait,
@@ -1558,7 +1558,7 @@ mod tests {
     #[tokio::test]
     #[serial]
     async fn test_set_credential_updates_database() {
-        use gap_lib::registry::CredentialEntry;
+        use gap_lib::types::CredentialEntry;
         use argon2::password_hash::{rand_core::OsRng, SaltString};
         use argon2::{Argon2, PasswordHasher};
 
@@ -1657,7 +1657,7 @@ mod tests {
     #[tokio::test]
     #[serial]
     async fn test_set_credential_twice_no_duplicates() {
-        use gap_lib::registry::CredentialEntry;
+        use gap_lib::types::CredentialEntry;
         use argon2::password_hash::{rand_core::OsRng, SaltString};
         use argon2::{Argon2, PasswordHasher};
 

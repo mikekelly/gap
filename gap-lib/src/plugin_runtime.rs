@@ -1112,7 +1112,7 @@ mod tests {
     #[tokio::test]
     async fn test_load_plugin() {
         use crate::database::GapDatabase;
-        use crate::registry::PluginEntry;
+        use crate::types::PluginEntry;
 
         let db = GapDatabase::in_memory().await.unwrap();
 

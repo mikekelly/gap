@@ -8,7 +8,7 @@
 //! 5. Forwards transformed requests
 
 use gap_lib::database::GapDatabase;
-use gap_lib::registry::PluginEntry;
+use gap_lib::types::PluginEntry;
 use gap_lib::proxy_transforms::parse_and_transform;
 
 /// Test that parse_and_transform correctly loads multi-field credentials

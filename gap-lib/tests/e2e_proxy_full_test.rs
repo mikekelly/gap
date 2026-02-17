@@ -28,7 +28,7 @@
 
 use gap_lib::database::GapDatabase;
 use gap_lib::proxy::ProxyServer;
-use gap_lib::registry::PluginEntry;
+use gap_lib::types::PluginEntry;
 use gap_lib::tls::CertificateAuthority;
 use gap_lib::types::AgentToken;
 use rustls::pki_types::ServerName;

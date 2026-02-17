@@ -861,7 +861,7 @@ mod tests {
     #[tokio::test]
     async fn test_proxy_via_hyper_transforms_and_forwards() {
         use crate::database::GapDatabase;
-        use crate::registry::PluginEntry;
+        use crate::types::PluginEntry;
         use http_body_util::{BodyExt, Full};
         use hyper_util::rt::TokioIo;
 

@@ -81,7 +81,7 @@ pub async fn find_matching_plugin(
 mod tests {
     use super::*;
     use crate::database::GapDatabase;
-    use crate::registry::PluginEntry;
+    use crate::types::PluginEntry;
 
     // Test the host pattern matching logic
     #[test]

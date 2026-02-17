@@ -4,7 +4,7 @@
 //! storing tokens, plugins, credentials, config, and activity logs.
 
 use crate::error::{GapError, Result};
-use crate::registry::{CredentialEntry, PluginEntry, TokenEntry, TokenMetadata};
+use crate::types::{CredentialEntry, PluginEntry, TokenEntry, TokenMetadata};
 use crate::types::ActivityEntry;
 use chrono::{DateTime, Utc};
 use std::collections::HashMap;

@@ -274,6 +274,43 @@ pub struct ActivityEntry {
     pub status: u16,
 }
 
+// --- Registry-origin types (migrated from registry.rs) ---
+// These types are used by GapDatabase and the API layer for listing/querying
+// tokens, plugins, and credentials.
+
+/// Token metadata (without the token value, which is used as the hash key)
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct TokenMetadata {
+    pub name: String,
+    pub created_at: DateTime<Utc>,
+}
+
+/// Token entry returned by list operations (includes the token value)
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct TokenEntry {
+    pub token_value: String,
+    pub name: String,
+    pub created_at: DateTime<Utc>,
+}
+
+/// Plugin metadata entry (name, hosts, credential schema, optional commit SHA)
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct PluginEntry {
+    pub name: String,
+    pub hosts: Vec<String>,
+    pub credential_schema: Vec<String>,
+    /// Git commit SHA (short) of the installed version
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub commit_sha: Option<String>,
+}
+
+/// Credential metadata entry (plugin + field name, no value)
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct CredentialEntry {
+    pub plugin: String,
+    pub field: String,
+}
+
 // Serde helper for binary data
 mod serde_bytes {
     use serde::{Deserialize, Deserializer, Serializer};

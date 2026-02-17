@@ -9,7 +9,7 @@
 
 use gap_lib::database::GapDatabase;
 use gap_lib::plugin_runtime::PluginRuntime;
-use gap_lib::registry::PluginEntry;
+use gap_lib::types::PluginEntry;
 use gap_lib::types::{GAPCredentials, GAPRequest};
 
 

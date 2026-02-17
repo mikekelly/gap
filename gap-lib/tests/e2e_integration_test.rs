@@ -221,7 +221,7 @@ async fn test_server_initialization_flow() {
 #[tokio::test]
 async fn test_plugin_installation_flow() {
     use gap_lib::plugin_runtime::PluginRuntime;
-    use gap_lib::registry::PluginEntry;
+    use gap_lib::types::PluginEntry;
 
     let db = GapDatabase::in_memory().await.expect("Failed to create in-memory db");
 
