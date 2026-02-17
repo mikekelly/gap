@@ -105,6 +105,18 @@ cd macos-app
 - Error 163 on launch: Incorrect entitlements on main app (keep minimal: just `app-sandbox=false`)
 - Exit code 137 (SIGKILL): On modern macOS, Developer ID signed binaries require notarization to run. For local testing, use ad-hoc signing (`codesign --sign -`) instead of Developer ID signing.
 
+## Proxy Architecture (HTTP/1.1 + HTTP/2)
+
+The proxy supports both HTTP/1.1 and HTTP/2 via ALPN negotiation:
+- `accept_agent_tls()` advertises both `h2` and `http/1.1` via ALPN
+- After agent TLS handshake, the negotiated protocol is detected
+- Upstream TLS connector is built per-connection with matching ALPN
+- `proxy_via_hyper()` branches: H2 uses `http2::handshake` (Clone sender, no Mutex), H1 uses `http1::handshake` (Mutex-wrapped sender)
+- Agent side uses `hyper_util::server::conn::auto::Builder` (handles both protocols)
+- `ProxyServer` stores `upstream_root_certs: Arc<RootCertStore>` (not a pre-built connector) to enable per-connection ALPN
+- `new_with_upstream_tls()` takes `Arc<RootCertStore>`, not `TlsConnector`
+- E2E tests use `create_root_cert_store()` helper for upstream certs
+
 ## Quick Type Reference
 
 Key types you'll use frequently:
@@ -114,6 +126,6 @@ Key types you'll use frequently:
 - `PluginRuntime` - Sandboxed Boa JS runtime for plugins
 - `Registry` - Centralized metadata at key `"_registry"`
 - `CertificateAuthority` - TLS CA for dynamic cert generation
-- `ProxyServer` - MITM HTTPS proxy with agent auth
+- `ProxyServer` - MITM HTTPS proxy with H1/H2 support via ALPN
 
 See [docs/reference/types.md](docs/reference/types.md) for full details.
