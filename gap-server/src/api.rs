@@ -2522,4 +2522,270 @@ mod tests {
         assert!(text.contains("api.example.com"), "Should contain matching entry");
         assert!(!text.contains("other-api.com"), "Should not contain non-matching entry");
     }
+
+    // ── GET /activity filter tests ─────────────────────────────────────────
+
+    /// Build a test ApiState with password already configured, return (state, db, password).
+    async fn setup_activity_state() -> (ApiState, Arc<GapDatabase>, &'static str) {
+        use argon2::password_hash::{rand_core::OsRng, SaltString};
+        use argon2::{Argon2, PasswordHasher};
+
+        let db = create_test_db().await;
+        let state = ApiState::new(9443, 9080, Arc::clone(&db));
+
+        let password = "testpass123";
+        let salt = SaltString::generate(&mut OsRng);
+        let argon2 = Argon2::default();
+        let hash = argon2.hash_password(password.as_bytes(), &salt).unwrap().to_string();
+        state.set_password_hash(hash).await;
+
+        (state, db, password)
+    }
+
+    /// Seed a fixed set of activity entries to exercise all filter dimensions.
+    async fn seed_diverse_activity(db: &GapDatabase) {
+        let entries = vec![
+            // GET on api.openai.com, plugin=openai, req_id=req-001
+            ActivityEntry {
+                timestamp: Utc::now() - chrono::Duration::seconds(10),
+                request_id: Some("req-001".to_string()),
+                method: "GET".to_string(),
+                url: "https://api.openai.com/v1/models".to_string(),
+                agent_id: Some("agent-1".to_string()),
+                status: 200,
+                plugin_name: Some("openai".to_string()),
+                plugin_sha: None,
+                source_hash: None,
+                request_headers: None,
+            },
+            // POST on api.openai.com, plugin=openai, req_id=req-002
+            ActivityEntry {
+                timestamp: Utc::now() - chrono::Duration::seconds(8),
+                request_id: Some("req-002".to_string()),
+                method: "POST".to_string(),
+                url: "https://api.openai.com/v1/chat/completions".to_string(),
+                agent_id: Some("agent-1".to_string()),
+                status: 200,
+                plugin_name: Some("openai".to_string()),
+                plugin_sha: None,
+                source_hash: None,
+                request_headers: None,
+            },
+            // POST on api.anthropic.com, plugin=anthropic, req_id=req-003
+            ActivityEntry {
+                timestamp: Utc::now() - chrono::Duration::seconds(6),
+                request_id: Some("req-003".to_string()),
+                method: "POST".to_string(),
+                url: "https://api.anthropic.com/v1/messages".to_string(),
+                agent_id: Some("agent-2".to_string()),
+                status: 200,
+                plugin_name: Some("anthropic".to_string()),
+                plugin_sha: None,
+                source_hash: None,
+                request_headers: None,
+            },
+            // PUT on api.openai.com, no plugin, req_id=req-004
+            ActivityEntry {
+                timestamp: Utc::now() - chrono::Duration::seconds(4),
+                request_id: Some("req-004".to_string()),
+                method: "PUT".to_string(),
+                url: "https://api.openai.com/v1/fine-tunes/ft-001".to_string(),
+                agent_id: Some("agent-2".to_string()),
+                status: 200,
+                plugin_name: None,
+                plugin_sha: None,
+                source_hash: None,
+                request_headers: None,
+            },
+        ];
+        for entry in &entries {
+            db.log_activity(entry).await.unwrap();
+        }
+    }
+
+    /// GET /activity with a filter parameter and return the activity entries.
+    async fn get_activity_filtered(state: ApiState, password: &str, query: &str) -> Vec<ActivityEntry> {
+        let app = create_router(state);
+        let auth_body = serde_json::to_vec(&serde_json::json!({ "password_hash": password })).unwrap();
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri(format!("/activity{}", query))
+                    .header("content-type", "application/json")
+                    .body(Body::from(auth_body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK, "GET /activity{} returned non-OK", query);
+
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let value: serde_json::Value = serde_json::from_slice(&bytes)
+            .expect("response should be valid JSON");
+        serde_json::from_value(value["entries"].clone())
+            .expect("response should have entries array")
+    }
+
+    #[tokio::test]
+    async fn test_get_activity_filter_by_domain() {
+        let (state, db, password) = setup_activity_state().await;
+        seed_diverse_activity(&db).await;
+
+        let result = get_activity_filtered(state, password, "?domain=api.openai.com").await;
+
+        // 3 entries have api.openai.com in their URL
+        assert_eq!(result.len(), 3, "expected 3 entries for domain=api.openai.com");
+        for entry in &result {
+            assert!(entry.url.contains("api.openai.com"), "unexpected URL: {}", entry.url);
+        }
+    }
+
+    #[tokio::test]
+    async fn test_get_activity_filter_by_method() {
+        let (state, db, password) = setup_activity_state().await;
+        seed_diverse_activity(&db).await;
+
+        let result = get_activity_filtered(state, password, "?method=POST").await;
+
+        // 2 POST entries
+        assert_eq!(result.len(), 2, "expected 2 POST entries");
+        for entry in &result {
+            assert_eq!(entry.method, "POST", "unexpected method: {}", entry.method);
+        }
+    }
+
+    #[tokio::test]
+    async fn test_get_activity_filter_by_plugin() {
+        let (state, db, password) = setup_activity_state().await;
+        seed_diverse_activity(&db).await;
+
+        let result = get_activity_filtered(state, password, "?plugin=openai").await;
+
+        // 2 entries with plugin_name=openai
+        assert_eq!(result.len(), 2, "expected 2 entries for plugin=openai");
+        for entry in &result {
+            assert_eq!(
+                entry.plugin_name.as_deref(),
+                Some("openai"),
+                "unexpected plugin: {:?}",
+                entry.plugin_name
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn test_get_activity_filter_by_request_id() {
+        let (state, db, password) = setup_activity_state().await;
+        seed_diverse_activity(&db).await;
+
+        let result = get_activity_filtered(state, password, "?request_id=req-003").await;
+
+        assert_eq!(result.len(), 1, "expected exactly 1 entry for request_id=req-003");
+        assert_eq!(result[0].request_id.as_deref(), Some("req-003"));
+        assert!(result[0].url.contains("anthropic.com"));
+    }
+
+    #[tokio::test]
+    async fn test_get_activity_filter_by_path() {
+        let (state, db, password) = setup_activity_state().await;
+        seed_diverse_activity(&db).await;
+
+        let result = get_activity_filtered(state, password, "?path=/v1/chat").await;
+
+        // Only the POST to /v1/chat/completions matches
+        assert_eq!(result.len(), 1, "expected 1 entry for path=/v1/chat");
+        assert!(result[0].url.contains("/v1/chat/completions"));
+    }
+
+    #[tokio::test]
+    async fn test_get_activity_combined_filters() {
+        let (state, db, password) = setup_activity_state().await;
+        seed_diverse_activity(&db).await;
+
+        // domain=api.openai.com AND method=POST — only the POST to openai matches
+        let result = get_activity_filtered(state, password, "?domain=api.openai.com&method=POST").await;
+
+        assert_eq!(result.len(), 1, "expected 1 entry for domain+method combined filter");
+        assert!(result[0].url.contains("api.openai.com"));
+        assert_eq!(result[0].method, "POST");
+    }
+
+    #[tokio::test]
+    async fn test_get_activity_limit() {
+        let (state, db, password) = setup_activity_state().await;
+        seed_diverse_activity(&db).await; // 4 entries
+
+        let result = get_activity_filtered(state, password, "?limit=2").await;
+
+        assert_eq!(result.len(), 2, "expected limit=2 to return 2 entries");
+    }
+
+    #[tokio::test]
+    async fn test_get_activity_since() {
+        let (state, db, password) = setup_activity_state().await;
+
+        // Add one old and one recent entry
+        let old_ts = Utc::now() - chrono::Duration::hours(2);
+        let recent_ts = Utc::now() - chrono::Duration::seconds(5);
+        let cutoff = Utc::now() - chrono::Duration::minutes(30);
+
+        db.log_activity(&ActivityEntry {
+            timestamp: old_ts,
+            request_id: None,
+            method: "GET".to_string(),
+            url: "https://old.example.com/data".to_string(),
+            agent_id: None,
+            status: 200,
+            plugin_name: None,
+            plugin_sha: None,
+            source_hash: None,
+            request_headers: None,
+        }).await.unwrap();
+
+        db.log_activity(&ActivityEntry {
+            timestamp: recent_ts,
+            request_id: None,
+            method: "POST".to_string(),
+            url: "https://new.example.com/data".to_string(),
+            agent_id: None,
+            status: 201,
+            plugin_name: None,
+            plugin_sha: None,
+            source_hash: None,
+            request_headers: None,
+        }).await.unwrap();
+
+        let since_param = urlencoding::encode(&cutoff.to_rfc3339()).into_owned();
+        let result = get_activity_filtered(state, password, &format!("?since={}", since_param)).await;
+
+        assert_eq!(result.len(), 1, "expected only the recent entry after since filter");
+        assert_eq!(result[0].method, "POST");
+        assert!(result[0].url.contains("new.example.com"));
+    }
+
+    #[tokio::test]
+    async fn test_get_activity_requires_auth() {
+        let db = create_test_db().await;
+        let state = ApiState::new(9443, 9080, db);
+        // No password hash set — any request should fail auth
+
+        let app = create_router(state);
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/activity")
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&serde_json::json!({ "password_hash": "wrongpass" })).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        // No password hash configured — should reject
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
 }
