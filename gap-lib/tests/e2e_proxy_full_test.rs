@@ -47,8 +47,12 @@ const TEST_SERVER_CA_KEY: &str = include_str!("fixtures/test_server_ca_key.pem")
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
-/// Build a TLS connector that trusts only the provided CA cert (PEM).
-fn create_tls_connector(ca_cert_pem: &str) -> TlsConnector {
+/// Build a root certificate store that trusts only the provided CA cert (PEM).
+///
+/// Used by `ProxyServer::new_with_upstream_tls()` which now takes root certs
+/// instead of a pre-built TLS connector. This allows the proxy to build
+/// per-connection connectors with ALPN matching the agent's negotiated protocol.
+fn create_root_cert_store(ca_cert_pem: &str) -> Arc<rustls::RootCertStore> {
     let mut root_store = rustls::RootCertStore::empty();
     let ca_certs = rustls_pemfile::certs(&mut ca_cert_pem.as_bytes())
         .filter_map(|r| r.ok())
@@ -56,8 +60,16 @@ fn create_tls_connector(ca_cert_pem: &str) -> TlsConnector {
     for cert in ca_certs {
         root_store.add(cert).expect("add CA cert to root store");
     }
+    Arc::new(root_store)
+}
+
+/// Build a TLS connector that trusts only the provided CA cert (PEM).
+///
+/// Used for client-side connections (agent connecting to proxy).
+fn create_tls_connector(ca_cert_pem: &str) -> TlsConnector {
+    let root_store = create_root_cert_store(ca_cert_pem);
     let config = rustls::ClientConfig::builder()
-        .with_root_certificates(root_store)
+        .with_root_certificates((*root_store).clone())
         .with_no_client_auth();
     TlsConnector::from(Arc::new(config))
 }
@@ -263,10 +275,10 @@ async fn test_full_e2e_proxy_pipeline() {
         .await
         .expect("register token");
 
-    // --- Build upstream TLS connector that trusts ONLY the test server CA ---
+    // --- Build upstream root certs that trust ONLY the test server CA ---
     // The proxy needs to verify the echo server's cert (signed by server CA),
     // not the proxy CA.
-    let upstream_connector = create_tls_connector(&server_ca_cert_pem);
+    let upstream_root_certs = create_root_cert_store(&server_ca_cert_pem);
 
     // --- Create proxy using the proxy CA (not the server CA) ---
     let proxy_port = portpicker::pick_unused_port().expect("pick proxy port");
@@ -275,7 +287,7 @@ async fn test_full_e2e_proxy_pipeline() {
         proxy_ca,
         Arc::clone(&store),
         Arc::clone(&registry),
-        upstream_connector,
+        upstream_root_certs,
     )
     .expect("create proxy");
 
@@ -467,8 +479,8 @@ async fn test_e2e_missing_credential() {
         .await
         .expect("register token");
 
-    // --- Upstream connector trusts only the test server CA ---
-    let upstream_connector = create_tls_connector(&server_ca_cert_pem);
+    // --- Upstream root certs trust only the test server CA ---
+    let upstream_root_certs = create_root_cert_store(&server_ca_cert_pem);
 
     // --- Create proxy with proxy CA ---
     let proxy_port = portpicker::pick_unused_port().expect("pick proxy port");
@@ -477,7 +489,7 @@ async fn test_e2e_missing_credential() {
         proxy_ca,
         Arc::clone(&store),
         Arc::clone(&registry),
-        upstream_connector,
+        upstream_root_certs,
     )
     .expect("create proxy");
 
@@ -612,10 +624,10 @@ async fn test_e2e_wrong_proxy_ca_rejected() {
     ) as Arc<dyn SecretStore>;
     let registry = Arc::new(Registry::new(Arc::clone(&store)));
 
-    // --- Upstream connector (not exercised, but required by API) ---
+    // --- Upstream root certs (not exercised, but required by API) ---
     // We use the wrong CA's cert PEM here — doesn't matter since the handshake
     // fails before we ever reach the upstream.
-    let upstream_connector = create_tls_connector(&wrong_ca_cert_pem);
+    let upstream_root_certs = create_root_cert_store(&wrong_ca_cert_pem);
 
     // --- Build proxy with the REAL proxy CA ---
     let proxy_port = portpicker::pick_unused_port().expect("pick proxy port");
@@ -624,7 +636,7 @@ async fn test_e2e_wrong_proxy_ca_rejected() {
         real_proxy_ca,
         Arc::clone(&store),
         Arc::clone(&registry),
-        upstream_connector,
+        upstream_root_certs,
     )
     .expect("create proxy");
 

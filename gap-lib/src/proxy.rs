@@ -2,9 +2,9 @@
 //!
 //! This module implements:
 //! - HTTP CONNECT tunnel establishment
-//! - Agent-side TLS with dynamic certificates
+//! - Agent-side TLS with dynamic certificates (H1 and H2 via ALPN)
 //! - Upstream TLS with system CA verification
-//! - Bidirectional proxying
+//! - Bidirectional proxying (HTTP/1.1 and HTTP/2)
 //! - Bearer token authentication
 
 use crate::error::{GapError, Result};
@@ -30,8 +30,10 @@ pub struct ProxyServer {
     store: Arc<dyn SecretStore>,
     /// Registry for centralized metadata storage
     registry: Arc<Registry>,
-    /// TLS connector for upstream connections
-    upstream_connector: TlsConnector,
+    /// Root certificates for upstream TLS connections.
+    /// Stored as root certs (not a pre-built connector) so we can build
+    /// per-connection connectors with ALPN matching the agent's negotiated protocol.
+    upstream_root_certs: Arc<rustls::RootCertStore>,
     /// TLS acceptor for proxy connections (HTTPS on port 9443)
     proxy_acceptor: TlsAcceptor,
 }
@@ -44,16 +46,10 @@ impl ProxyServer {
         store: Arc<dyn SecretStore>,
         registry: Arc<Registry>,
     ) -> Result<Self> {
-        // Configure upstream TLS connector with system CA trust
-        let root_store = rustls::RootCertStore {
+        // Store root certs for building per-connection upstream TLS connectors
+        let upstream_root_certs = Arc::new(rustls::RootCertStore {
             roots: webpki_roots::TLS_SERVER_ROOTS.iter().cloned().collect(),
-        };
-
-        let tls_config = rustls::ClientConfig::builder()
-            .with_root_certificates(root_store)
-            .with_no_client_auth();
-
-        let upstream_connector = TlsConnector::from(Arc::new(tls_config));
+        });
 
         // Generate localhost certificate for the proxy's TLS
         // Use "localhost" as the hostname since the proxy listens on 127.0.0.1
@@ -85,23 +81,23 @@ impl ProxyServer {
             ca: Arc::new(ca),
             store,
             registry,
-            upstream_connector,
+            upstream_root_certs,
             proxy_acceptor,
         })
     }
 
-    /// Create a new ProxyServer instance with a custom upstream TLS connector
+    /// Create a new ProxyServer instance with custom upstream root certificates
     ///
-    /// Same as `new()` but accepts a caller-provided `TlsConnector` for upstream
-    /// connections instead of building one from `webpki_roots`. This is useful
-    /// when the upstream server uses a private/internal CA (e.g., in tests or
-    /// enterprise environments with custom root CAs).
+    /// Same as `new()` but accepts caller-provided root certificates for upstream
+    /// TLS verification instead of using `webpki_roots`. This is useful when the
+    /// upstream server uses a private/internal CA (e.g., in tests or enterprise
+    /// environments with custom root CAs).
     pub fn new_with_upstream_tls(
         port: u16,
         ca: CertificateAuthority,
         store: Arc<dyn SecretStore>,
         registry: Arc<Registry>,
-        upstream_connector: TlsConnector,
+        upstream_root_certs: Arc<rustls::RootCertStore>,
     ) -> Result<Self> {
         // Generate localhost certificate for the proxy's TLS
         // Use "localhost" as the hostname since the proxy listens on 127.0.0.1
@@ -133,7 +129,7 @@ impl ProxyServer {
             ca: Arc::new(ca),
             store,
             registry,
-            upstream_connector,
+            upstream_root_certs,
             proxy_acceptor,
         })
     }
@@ -191,11 +187,11 @@ impl ProxyServer {
             let ca = Arc::clone(&self.ca);
             let store = Arc::clone(&self.store);
             let registry = Arc::clone(&self.registry);
-            let upstream_connector = self.upstream_connector.clone();
+            let upstream_root_certs = Arc::clone(&self.upstream_root_certs);
             let proxy_acceptor = self.proxy_acceptor.clone();
 
             tokio::spawn(async move {
-                if let Err(e) = handle_connection(stream, ca, store, registry, upstream_connector, proxy_acceptor).await {
+                if let Err(e) = handle_connection(stream, ca, store, registry, upstream_root_certs, proxy_acceptor).await {
                     error!("Connection error: {}", e);
                 }
             });
@@ -209,7 +205,7 @@ async fn handle_connection(
     ca: Arc<CertificateAuthority>,
     store: Arc<dyn SecretStore>,
     registry: Arc<Registry>,
-    upstream_connector: TlsConnector,
+    upstream_root_certs: Arc<rustls::RootCertStore>,
     proxy_acceptor: TlsAcceptor,
 ) -> Result<()> {
     // First, accept the TLS connection from the proxy client
@@ -268,17 +264,32 @@ async fn handle_connection(
     // Now upgrade to TLS on both sides
     let (hostname, port) = parse_host_port(&target)?;
 
-    // Agent-side TLS: accept with dynamic cert
-    let agent_stream = accept_agent_tls(stream, &hostname, &ca).await?;
-    debug!("Agent-side TLS established");
+    // Agent-side TLS: accept with dynamic cert, detect negotiated protocol
+    let (agent_stream, is_h2) = accept_agent_tls(stream, &hostname, &ca).await?;
+    debug!("Agent-side TLS established (h2={})", is_h2);
+
+    // Build upstream TLS connector with matching ALPN protocol.
+    // We build a fresh connector per-connection so the ALPN matches what
+    // the agent negotiated. This ensures H2 agents get H2 upstream and
+    // H1 agents get H1 upstream.
+    let alpn = if is_h2 {
+        vec![b"h2".to_vec()]
+    } else {
+        vec![b"http/1.1".to_vec()]
+    };
+    let mut client_config = rustls::ClientConfig::builder()
+        .with_root_certificates((*upstream_root_certs).clone())
+        .with_no_client_auth();
+    client_config.alpn_protocols = alpn;
+    let connector = TlsConnector::from(Arc::new(client_config));
 
     // Upstream TLS: connect to target
-    let upstream_stream = connect_upstream(&hostname, port, upstream_connector).await?;
+    let upstream_stream = connect_upstream(&hostname, port, connector).await?;
     debug!("Upstream TLS established");
 
     // Bidirectional proxy with HTTP transformation via hyper
     // hyper handles ALL requests per connection (not just the first one)
-    proxy_via_hyper(agent_stream, upstream_stream, hostname, store, registry).await?;
+    proxy_via_hyper(agent_stream, upstream_stream, hostname, store, registry, is_h2).await?;
 
     Ok(())
 }
@@ -357,12 +368,15 @@ fn parse_host_port(target: &str) -> Result<(String, u16)> {
     Ok((hostname, port))
 }
 
-/// Accept agent-side TLS connection with dynamic cert
+/// Accept agent-side TLS connection with dynamic cert.
+///
+/// Advertises both h2 and http/1.1 via ALPN. Returns the TLS stream and
+/// whether the agent negotiated HTTP/2.
 async fn accept_agent_tls<S>(
     stream: S,
     hostname: &str,
     ca: &CertificateAuthority,
-) -> Result<tokio_rustls::server::TlsStream<S>>
+) -> Result<(tokio_rustls::server::TlsStream<S>, bool)>
 where
     S: AsyncReadExt + AsyncWriteExt + Unpin,
 {
@@ -383,11 +397,13 @@ where
     let key_der = rustls::pki_types::PrivateKeyDer::try_from(key_der)
         .map_err(|e| GapError::tls(format!("Failed to parse key DER: {:?}", e)))?;
 
-    // Build server config
-    let server_config = ServerConfig::builder()
+    // Build server config with ALPN advertising both h2 and http/1.1
+    let mut server_config = ServerConfig::builder()
         .with_no_client_auth()
         .with_single_cert(certs, key_der)
         .map_err(|e| GapError::tls(format!("Failed to create server config: {}", e)))?;
+
+    server_config.alpn_protocols = vec![b"h2".to_vec(), b"http/1.1".to_vec()];
 
     let acceptor = TlsAcceptor::from(Arc::new(server_config));
 
@@ -397,7 +413,13 @@ where
         .await
         .map_err(|e| GapError::tls(format!("Failed to accept TLS: {}", e)))?;
 
-    Ok(tls_stream)
+    // Detect negotiated protocol from the server connection state
+    let is_h2 = tls_stream
+        .get_ref()
+        .1
+        .alpn_protocol() == Some(b"h2".as_slice());
+
+    Ok((tls_stream, is_h2))
 }
 
 /// Connect to upstream server with TLS
@@ -425,14 +447,13 @@ async fn connect_upstream(
 
 /// Proxy HTTP requests between agent and upstream using hyper.
 ///
-/// Replaces the old `proxy_streams_with_transform()`: instead of only transforming
-/// the first request then falling back to raw byte copying, this function uses hyper
-/// to parse and transform ALL HTTP requests on the connection.
+/// Supports both HTTP/1.1 and HTTP/2 based on the `is_h2` flag (determined
+/// by ALPN negotiation during agent-side TLS handshake).
 ///
 /// Architecture:
-/// - Agent side: hyper server reads HTTP/1.1 requests from the agent
+/// - Agent side: `hyper_util::server::conn::auto::Builder` handles both H1/H2
 /// - For each request: convert to GAPRequest, apply plugin transforms, convert back
-/// - Upstream side: hyper client forwards the transformed request
+/// - Upstream side: matching hyper client (H1 or H2)
 /// - Response flows back to agent unchanged
 async fn proxy_via_hyper<A, U>(
     agent_stream: A,
@@ -440,67 +461,103 @@ async fn proxy_via_hyper<A, U>(
     hostname: String,
     store: Arc<dyn SecretStore>,
     registry: Arc<Registry>,
+    is_h2: bool,
 ) -> Result<()>
 where
     A: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
     U: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
 {
-    use hyper::client::conn::http1 as client_http1;
-    use hyper::server::conn::http1 as server_http1;
     use hyper::service::service_fn;
-    use hyper_util::rt::TokioIo;
+    use hyper_util::rt::{TokioExecutor, TokioIo};
     use http_body_util::BodyExt;
 
-    // Client-side: handshake with upstream
     let upstream_io = TokioIo::new(upstream_stream);
-    let (sender, conn) = client_http1::handshake(upstream_io).await?;
-    tokio::spawn(async move { let _ = conn.await; });
-
-    // Wrap sender in Arc<Mutex> because http1::SendRequest is not Clone
-    // and send_request takes &mut self. HTTP/1.1 is sequential anyway.
-    let sender = Arc::new(tokio::sync::Mutex::new(sender));
-
-    // Server-side: serve agent connection, transforming each request
     let agent_io = TokioIo::new(agent_stream);
 
-    let service = service_fn(move |req: hyper::Request<hyper::body::Incoming>| {
-        let hostname = hostname.clone();
-        let store = Arc::clone(&store);
-        let registry = Arc::clone(&registry);
-        let sender = Arc::clone(&sender);
+    if is_h2 {
+        // HTTP/2 upstream handshake
+        let (sender, conn) = hyper::client::conn::http2::handshake(
+            TokioExecutor::new(),
+            upstream_io,
+        ).await.map_err(|e| GapError::network(e.to_string()))?;
+        tokio::spawn(async move { let _ = conn.await; });
 
-        async move {
-            // Collect the incoming body
-            let (parts, body) = req.into_parts();
-            let body_bytes = body.collect().await
-                .map_err(|e| GapError::network(e.to_string()))?
-                .to_bytes();
-            let req = hyper::Request::from_parts(parts, ());
+        // H2 SendRequest is Clone, no Mutex needed (concurrent requests supported)
+        let service = service_fn(move |req: hyper::Request<hyper::body::Incoming>| {
+            let hostname = hostname.clone();
+            let store = Arc::clone(&store);
+            let registry = Arc::clone(&registry);
+            let mut sender = sender.clone();
 
-            // Convert to GAPRequest
-            let gap_req = hyper_to_gap_request(&req, body_bytes, &hostname);
+            async move {
+                let (parts, body) = req.into_parts();
+                let body_bytes = body.collect().await
+                    .map_err(|e| GapError::network(e.to_string()))?
+                    .to_bytes();
+                let req = hyper::Request::from_parts(parts, ());
 
-            // Apply plugin transforms (credential injection, etc.)
-            let gap_req = crate::proxy_transforms::transform_request(
-                gap_req, &hostname, store.as_ref(), &registry
-            ).await?;
+                let gap_req = hyper_to_gap_request(&req, body_bytes, &hostname);
 
-            // Convert back to hyper request
-            let hyper_req = gap_request_to_hyper(&gap_req)?;
+                let gap_req = crate::proxy_transforms::transform_request(
+                    gap_req, &hostname, store.as_ref(), &registry
+                ).await?;
 
-            // Forward to upstream
-            let mut sender = sender.lock().await;
-            let resp = sender.send_request(hyper_req).await
-                .map_err(|e| GapError::network(e.to_string()))?;
+                let hyper_req = gap_request_to_hyper(&gap_req)?;
 
-            Ok::<_, GapError>(resp)
-        }
-    });
+                let resp = sender.send_request(hyper_req).await
+                    .map_err(|e| GapError::network(e.to_string()))?;
 
-    server_http1::Builder::new()
-        .serve_connection(agent_io, service)
-        .await
-        .map_err(|e| GapError::network(e.to_string()))?;
+                Ok::<_, GapError>(resp)
+            }
+        });
+
+        hyper_util::server::conn::auto::Builder::new(TokioExecutor::new())
+            .serve_connection(agent_io, service)
+            .await
+            .map_err(|e| GapError::network(e.to_string()))?;
+    } else {
+        // HTTP/1.1 upstream handshake
+        let (sender, conn) = hyper::client::conn::http1::handshake(upstream_io).await?;
+        tokio::spawn(async move { let _ = conn.await; });
+
+        // Wrap sender in Arc<Mutex> because http1::SendRequest is not Clone
+        // and send_request takes &mut self. HTTP/1.1 is sequential anyway.
+        let sender = Arc::new(tokio::sync::Mutex::new(sender));
+
+        let service = service_fn(move |req: hyper::Request<hyper::body::Incoming>| {
+            let hostname = hostname.clone();
+            let store = Arc::clone(&store);
+            let registry = Arc::clone(&registry);
+            let sender = Arc::clone(&sender);
+
+            async move {
+                let (parts, body) = req.into_parts();
+                let body_bytes = body.collect().await
+                    .map_err(|e| GapError::network(e.to_string()))?
+                    .to_bytes();
+                let req = hyper::Request::from_parts(parts, ());
+
+                let gap_req = hyper_to_gap_request(&req, body_bytes, &hostname);
+
+                let gap_req = crate::proxy_transforms::transform_request(
+                    gap_req, &hostname, store.as_ref(), &registry
+                ).await?;
+
+                let hyper_req = gap_request_to_hyper(&gap_req)?;
+
+                let mut sender = sender.lock().await;
+                let resp = sender.send_request(hyper_req).await
+                    .map_err(|e| GapError::network(e.to_string()))?;
+
+                Ok::<_, GapError>(resp)
+            }
+        });
+
+        hyper_util::server::conn::auto::Builder::new(TokioExecutor::new())
+            .serve_connection(agent_io, service)
+            .await
+            .map_err(|e| GapError::network(e.to_string()))?;
+    }
 
     Ok(())
 }
@@ -903,7 +960,7 @@ mod tests {
                 .expect("upstream server error");
         });
 
-        // -- Spawn proxy_via_hyper --
+        // -- Spawn proxy_via_hyper (H1 mode) --
         let proxy_store = Arc::clone(&store);
         let proxy_registry = Arc::clone(&registry);
         let proxy_handle = tokio::spawn(async move {
@@ -913,6 +970,7 @@ mod tests {
                 "api.test.com".to_string(),
                 proxy_store,
                 proxy_registry,
+                false, // is_h2 = false for H1
             )
             .await
         });
