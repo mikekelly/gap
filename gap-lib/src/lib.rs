@@ -4,8 +4,8 @@
 /// used by both the `gap` CLI and `gap-server` daemon.
 pub mod error;
 pub mod http_utils;
+pub mod key_provider;
 #[cfg(target_os = "macos")]
-#[allow(dead_code)] // Retained for future KeychainKeyProvider (Phase 4)
 mod keychain_impl;
 pub mod paths;
 pub mod plugin_matcher;
@@ -20,6 +20,9 @@ pub use error::{GapError, Result};
 // parse_http_request and serialize_http_request are now test-only utilities.
 // They remain pub in http_utils for integration test access but are no longer
 // re-exported from the crate root since no production code depends on them.
+pub use key_provider::{KeyProvider, EnvKeyProvider};
+#[cfg(target_os = "macos")]
+pub use key_provider::KeychainKeyProvider;
 pub use paths::ca_cert_path;
 pub use plugin_matcher::find_matching_plugin;
 pub use plugin_runtime::PluginRuntime;

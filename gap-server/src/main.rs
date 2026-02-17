@@ -12,7 +12,7 @@ pub mod api;
 #[cfg(target_os = "macos")]
 pub mod launchd;
 
-use gap_lib::{database::GapDatabase, tls::CertificateAuthority, Config, ProxyServer};
+use gap_lib::{database::GapDatabase, key_provider::KeyProvider, tls::CertificateAuthority, Config, ProxyServer};
 use clap::{Parser, Subcommand};
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -197,11 +197,17 @@ async fn main() -> anyhow::Result<()> {
     }
 
     // Build configuration
+    // Track whether data dir was explicitly set (CLI arg or env var) to determine
+    // encryption mode: explicit data dir = dev/testing = unencrypted.
+    let explicit_data_dir = args.data_dir.clone()
+        .or_else(|| std::env::var("GAP_DATA_DIR").ok());
+    let data_dir_explicitly_set = explicit_data_dir.is_some();
+
     let config = Config::new()
         .with_proxy_port(args.proxy_port)
         .with_api_port(args.api_port);
 
-    let config = if let Some(data_dir) = args.data_dir {
+    let config = if let Some(data_dir) = explicit_data_dir {
         config.with_data_dir(data_dir)
     } else {
         config
@@ -226,9 +232,35 @@ async fn main() -> anyhow::Result<()> {
             gap_dir.join("gap.db")
         }
     };
-    let db = Arc::new(
-        GapDatabase::open_unencrypted(db_path.to_str().unwrap()).await?,
-    );
+    let db_path_str = db_path.to_str().unwrap();
+
+    // Key provider selection precedence:
+    // 1. GAP_ENCRYPTION_KEY env var -> EnvKeyProvider -> encrypted DB
+    // 2. GAP_DATA_DIR env var or --data-dir CLI arg -> unencrypted DB (dev/testing)
+    // 3. macOS (default) -> KeychainKeyProvider -> encrypted DB
+    // 4. Other platforms -> unencrypted DB
+    let db = if std::env::var("GAP_ENCRYPTION_KEY").is_ok() {
+        let provider = gap_lib::EnvKeyProvider;
+        let key = provider.get_key().await?;
+        tracing::info!("Using encryption key from GAP_ENCRYPTION_KEY");
+        Arc::new(GapDatabase::open(db_path_str, &key).await?)
+    } else if data_dir_explicitly_set {
+        tracing::info!("Data dir explicitly set; using unencrypted database");
+        Arc::new(GapDatabase::open_unencrypted(db_path_str).await?)
+    } else {
+        #[cfg(target_os = "macos")]
+        {
+            let provider = gap_lib::key_provider::KeychainKeyProvider;
+            let key = provider.get_key().await?;
+            tracing::info!("Using encryption key from macOS keychain");
+            Arc::new(GapDatabase::open(db_path_str, &key).await?)
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            tracing::info!("Non-macOS platform; using unencrypted database");
+            Arc::new(GapDatabase::open_unencrypted(db_path_str).await?)
+        }
+    };
     tracing::info!("Database opened at {}", db_path.display());
 
     // Load or generate CA certificate

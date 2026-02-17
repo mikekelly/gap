@@ -79,16 +79,13 @@ impl GapDatabase {
             .map_err(|e| GapError::database(format!("Failed to connect: {}", e)))?;
         let instance = Self { db, conn };
         instance.run_migrations().await?;
+        // Use execute_batch for PRAGMAs because encrypted libSQL returns rows from
+        // journal_mode, which causes execute() to fail with "Execute returned rows".
         instance
             .conn
-            .execute("PRAGMA journal_mode = WAL;", ())
+            .execute_batch("PRAGMA journal_mode = WAL; PRAGMA foreign_keys = ON;")
             .await
-            .map_err(|e| GapError::database(format!("Failed to set WAL: {}", e)))?;
-        instance
-            .conn
-            .execute("PRAGMA foreign_keys = ON;", ())
-            .await
-            .map_err(|e| GapError::database(format!("Failed to enable foreign keys: {}", e)))?;
+            .map_err(|e| GapError::database(format!("Failed to set PRAGMAs: {}", e)))?;
         Ok(instance)
     }
 

@@ -33,7 +33,7 @@ cargo run --bin gap-server  # Run server
 
 2. **PluginRuntime is not Send**: Contains Boa engine with `Rc` types. In async Axum handlers, scope PluginRuntime operations in a block to ensure the runtime is dropped before any `.await` points. Enable `#[axum::debug_handler]` to see detailed Send/Sync errors.
 
-3. **`keychain_impl.rs` is retained but unused**: The low-level keychain functions are kept for a future `KeychainKeyProvider` phase. They are marked `#[allow(dead_code)]`. Do not delete them.
+3. **`keychain_impl.rs` is used by `KeychainKeyProvider`**: The low-level keychain functions in `keychain_impl.rs` are used by `key_provider::KeychainKeyProvider` to store/retrieve the database encryption master key on macOS.
 
 4. **git2 callbacks are not Send**: `RepoBuilder` with `RemoteCallbacks` closures is not `Send`. In async handlers, scope the entire git clone operation in a block to ensure all non-Send types are dropped before any `.await` points.
 
@@ -44,7 +44,9 @@ cargo run --bin gap-server  # Run server
 All persistent data (tokens, plugins, credentials, config, activity) is stored in an embedded libSQL database via `GapDatabase`. The old file-based storage system (`SecretStore`, `FileStore`, `EncryptedFileStore`, `Registry`) has been removed.
 
 - `GapDatabase::in_memory()` for tests
-- `GapDatabase::open(path)` for production
+- `GapDatabase::open(path, key)` for encrypted production (macOS default, or via GAP_ENCRYPTION_KEY)
+- `GapDatabase::open_unencrypted(path)` for dev/testing (--data-dir or GAP_DATA_DIR)
+- Key provider selection: GAP_ENCRYPTION_KEY env > explicit data dir (unencrypted) > macOS keychain > unencrypted
 - Data types (`TokenEntry`, `PluginEntry`, `CredentialEntry`, `TokenMetadata`) live in `types.rs`
 
 ## Detailed Reference Documentation
