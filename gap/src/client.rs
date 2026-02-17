@@ -216,6 +216,7 @@ pub struct ActivityEntry {
     pub status: u16,
     pub plugin_name: Option<String>,
     pub plugin_sha: Option<String>,
+    pub source_hash: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]

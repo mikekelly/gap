@@ -4,9 +4,10 @@
 //! storing tokens, plugins, credentials, config, and activity logs.
 
 use crate::error::{GapError, Result};
-use crate::types::{CredentialEntry, PluginEntry, TokenEntry, TokenMetadata};
+use crate::types::{CredentialEntry, PluginEntry, PluginVersion, TokenEntry, TokenMetadata};
 use crate::types::ActivityEntry;
 use chrono::{DateTime, Utc};
+use sha2::{Sha256, Digest};
 use std::collections::HashMap;
 
 /// Schema DDL applied on every database open (idempotent via IF NOT EXISTS).
@@ -45,11 +46,24 @@ CREATE TABLE IF NOT EXISTS access_logs (
     agent_id TEXT,
     status INTEGER NOT NULL,
     plugin_name TEXT,
-    plugin_sha TEXT
+    plugin_sha TEXT,
+    source_hash TEXT
 );
 
 CREATE INDEX IF NOT EXISTS idx_access_logs_timestamp ON access_logs(timestamp);
 CREATE INDEX IF NOT EXISTS idx_access_logs_url ON access_logs(url);
+
+CREATE TABLE IF NOT EXISTS plugin_versions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    plugin_name TEXT NOT NULL,
+    commit_sha TEXT,
+    source_hash TEXT NOT NULL,
+    source_code TEXT NOT NULL,
+    installed_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_plugin_versions_plugin ON plugin_versions(plugin_name);
+CREATE INDEX IF NOT EXISTS idx_plugin_versions_hash ON plugin_versions(source_hash);
 ";
 
 /// Embedded libSQL database for GAP persistent storage.
@@ -141,6 +155,7 @@ impl GapDatabase {
         // Migration for existing DBs — ignore error if columns already exist
         let _ = self.conn.execute("ALTER TABLE access_logs ADD COLUMN plugin_name TEXT", ()).await;
         let _ = self.conn.execute("ALTER TABLE access_logs ADD COLUMN plugin_sha TEXT", ()).await;
+        let _ = self.conn.execute("ALTER TABLE access_logs ADD COLUMN source_hash TEXT", ()).await;
 
         Ok(())
     }
@@ -229,11 +244,15 @@ impl GapDatabase {
     // ── Plugin CRUD ─────────────────────────────────────────────────
 
     /// Add (or replace) a plugin and its source code.
+    /// Also records an entry in the append-only plugin_versions table.
     pub async fn add_plugin(&self, plugin: &PluginEntry, source_code: &str) -> Result<()> {
         let hosts_json =
             serde_json::to_string(&plugin.hosts).map_err(|e| GapError::database(e.to_string()))?;
         let schema_json = serde_json::to_string(&plugin.credential_schema)
             .map_err(|e| GapError::database(e.to_string()))?;
+
+        // Compute source hash
+        let source_hash = format!("{:x}", Sha256::digest(source_code.as_bytes()));
 
         self.conn
             .execute(
@@ -248,6 +267,15 @@ impl GapDatabase {
             )
             .await
             .map_err(|e| GapError::database(e.to_string()))?;
+
+        // Record in append-only version history
+        self.add_plugin_version(
+            &plugin.name,
+            plugin.commit_sha.as_deref(),
+            &source_hash,
+            source_code,
+        ).await?;
+
         Ok(())
     }
 
@@ -358,6 +386,68 @@ impl GapDatabase {
             credential_schema,
             commit_sha,
         })
+    }
+
+    // ── Plugin Version History ────────────────────────────────────────
+
+    /// Insert a plugin version into the append-only version history.
+    pub async fn add_plugin_version(
+        &self,
+        plugin_name: &str,
+        commit_sha: Option<&str>,
+        source_hash: &str,
+        source_code: &str,
+    ) -> Result<()> {
+        let now = Utc::now().to_rfc3339();
+        self.conn
+            .execute(
+                "INSERT INTO plugin_versions (plugin_name, commit_sha, source_hash, source_code, installed_at) VALUES (?1, ?2, ?3, ?4, ?5)",
+                libsql::params![
+                    plugin_name,
+                    commit_sha.unwrap_or(""),
+                    source_hash,
+                    source_code,
+                    now
+                ],
+            )
+            .await
+            .map_err(|e| GapError::database(format!("Failed to add plugin version: {}", e)))?;
+        Ok(())
+    }
+
+    /// Look up a plugin version by its source hash.
+    pub async fn get_plugin_version_by_hash(&self, source_hash: &str) -> Result<Option<PluginVersion>> {
+        let mut rows = self
+            .conn
+            .query(
+                "SELECT plugin_name, commit_sha, source_hash, source_code, installed_at FROM plugin_versions WHERE source_hash = ?1 LIMIT 1",
+                libsql::params![source_hash],
+            )
+            .await
+            .map_err(|e| GapError::database(e.to_string()))?;
+
+        if let Some(row) = rows.next().await.map_err(|e| GapError::database(e.to_string()))? {
+            let plugin_name: String = row.get(0).map_err(|e| GapError::database(e.to_string()))?;
+            let commit_sha_raw: String = row.get(1).map_err(|e| GapError::database(e.to_string()))?;
+            let source_hash: String = row.get(2).map_err(|e| GapError::database(e.to_string()))?;
+            let source_code: String = row.get(3).map_err(|e| GapError::database(e.to_string()))?;
+            let installed_at_str: String = row.get(4).map_err(|e| GapError::database(e.to_string()))?;
+
+            let commit_sha = if commit_sha_raw.is_empty() { None } else { Some(commit_sha_raw) };
+            let installed_at = DateTime::parse_from_rfc3339(&installed_at_str)
+                .map_err(|e| GapError::database(format!("Invalid timestamp: {}", e)))?
+                .with_timezone(&Utc);
+
+            Ok(Some(PluginVersion {
+                plugin_name,
+                commit_sha,
+                source_hash,
+                source_code,
+                installed_at,
+            }))
+        } else {
+            Ok(None)
+        }
     }
 
     // ── Credential CRUD ─────────────────────────────────────────────
@@ -529,7 +619,7 @@ impl GapDatabase {
     pub async fn log_activity(&self, entry: &ActivityEntry) -> Result<()> {
         self.conn
             .execute(
-                "INSERT INTO access_logs (timestamp, method, url, agent_id, status, plugin_name, plugin_sha) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                "INSERT INTO access_logs (timestamp, method, url, agent_id, status, plugin_name, plugin_sha, source_hash) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
                 libsql::params![
                     entry.timestamp.to_rfc3339(),
                     entry.method.as_str(),
@@ -537,7 +627,8 @@ impl GapDatabase {
                     entry.agent_id.as_deref().unwrap_or(""),
                     entry.status as i64,
                     entry.plugin_name.as_deref().unwrap_or(""),
-                    entry.plugin_sha.as_deref().unwrap_or("")
+                    entry.plugin_sha.as_deref().unwrap_or(""),
+                    entry.source_hash.as_deref().unwrap_or("")
                 ],
             )
             .await
@@ -549,10 +640,10 @@ impl GapDatabase {
     pub async fn get_activity(&self, limit: Option<u32>) -> Result<Vec<ActivityEntry>> {
         let query = match limit {
             Some(n) => format!(
-                "SELECT timestamp, method, url, agent_id, status, plugin_name, plugin_sha FROM access_logs ORDER BY timestamp DESC LIMIT {}",
+                "SELECT timestamp, method, url, agent_id, status, plugin_name, plugin_sha, source_hash FROM access_logs ORDER BY timestamp DESC LIMIT {}",
                 n
             ),
-            None => "SELECT timestamp, method, url, agent_id, status, plugin_name, plugin_sha FROM access_logs ORDER BY timestamp DESC".to_string(),
+            None => "SELECT timestamp, method, url, agent_id, status, plugin_name, plugin_sha, source_hash FROM access_logs ORDER BY timestamp DESC".to_string(),
         };
         let mut rows = self
             .conn
@@ -567,7 +658,7 @@ impl GapDatabase {
         let mut rows = self
             .conn
             .query(
-                "SELECT timestamp, method, url, agent_id, status, plugin_name, plugin_sha FROM access_logs WHERE timestamp >= ?1 ORDER BY timestamp DESC",
+                "SELECT timestamp, method, url, agent_id, status, plugin_name, plugin_sha, source_hash FROM access_logs WHERE timestamp >= ?1 ORDER BY timestamp DESC",
                 libsql::params![since.to_rfc3339()],
             )
             .await
@@ -589,6 +680,8 @@ impl GapDatabase {
                 row.get(5).map_err(|e| GapError::database(e.to_string()))?;
             let plugin_sha_raw: String =
                 row.get(6).map_err(|e| GapError::database(e.to_string()))?;
+            let source_hash_raw: String =
+                row.get(7).map_err(|e| GapError::database(e.to_string()))?;
 
             let timestamp = DateTime::parse_from_rfc3339(&ts_str)
                 .map_err(|e| GapError::database(format!("Invalid timestamp: {}", e)))?
@@ -608,6 +701,11 @@ impl GapDatabase {
             } else {
                 Some(plugin_sha_raw)
             };
+            let source_hash = if source_hash_raw.is_empty() {
+                None
+            } else {
+                Some(source_hash_raw)
+            };
 
             result.push(ActivityEntry {
                 timestamp,
@@ -617,6 +715,7 @@ impl GapDatabase {
                 status: status_i64 as u16,
                 plugin_name,
                 plugin_sha,
+                source_hash,
             });
         }
         Ok(result)
@@ -919,6 +1018,7 @@ mod tests {
             status: 200,
             plugin_name: None,
             plugin_sha: None,
+            source_hash: None,
         };
         db.log_activity(&entry).await.unwrap();
 
@@ -943,6 +1043,7 @@ mod tests {
                 status: 200,
                 plugin_name: None,
                 plugin_sha: None,
+                source_hash: None,
             };
             db.log_activity(&entry).await.unwrap();
         }
@@ -970,6 +1071,7 @@ mod tests {
             status: 200,
             plugin_name: None,
             plugin_sha: None,
+            source_hash: None,
         })
         .await
         .unwrap();
@@ -983,6 +1085,7 @@ mod tests {
             status: 201,
             plugin_name: None,
             plugin_sha: None,
+            source_hash: None,
         })
         .await
         .unwrap();
@@ -1004,6 +1107,7 @@ mod tests {
             status: 204,
             plugin_name: None,
             plugin_sha: None,
+            source_hash: None,
         };
         db.log_activity(&entry).await.unwrap();
 
@@ -1024,6 +1128,7 @@ mod tests {
             status: 200,
             plugin_name: Some("exa".to_string()),
             plugin_sha: Some("abc1234".to_string()),
+            source_hash: None,
         };
         db.log_activity(&entry).await.unwrap();
 
@@ -1045,6 +1150,7 @@ mod tests {
             status: 200,
             plugin_name: None,
             plugin_sha: None,
+            source_hash: None,
         };
         db.log_activity(&entry).await.unwrap();
 
@@ -1052,5 +1158,100 @@ mod tests {
         assert_eq!(logs.len(), 1);
         assert_eq!(logs[0].plugin_name, None);
         assert_eq!(logs[0].plugin_sha, None);
+    }
+
+    #[tokio::test]
+    async fn test_activity_with_source_hash() {
+        let db = GapDatabase::in_memory().await.unwrap();
+
+        let entry = ActivityEntry {
+            timestamp: Utc::now(),
+            method: "GET".to_string(),
+            url: "https://api.example.com/data".to_string(),
+            agent_id: Some("agent-1".to_string()),
+            status: 200,
+            plugin_name: Some("exa".to_string()),
+            plugin_sha: Some("abc1234".to_string()),
+            source_hash: Some("deadbeef1234".to_string()),
+        };
+        db.log_activity(&entry).await.unwrap();
+
+        let logs = db.get_activity(None).await.unwrap();
+        assert_eq!(logs.len(), 1);
+        assert_eq!(logs[0].source_hash, Some("deadbeef1234".to_string()));
+    }
+
+    // ── Plugin Version History ──────────────────────────────────────
+
+    #[tokio::test]
+    async fn test_add_plugin_version_and_get_by_hash() {
+        let db = GapDatabase::in_memory().await.unwrap();
+
+        let source_code = "function transform() {}";
+        let source_hash = format!("{:x}", sha2::Sha256::digest(source_code.as_bytes()));
+
+        db.add_plugin_version("my-plugin", Some("abc1234"), &source_hash, source_code)
+            .await
+            .unwrap();
+
+        let version = db.get_plugin_version_by_hash(&source_hash).await.unwrap();
+        assert!(version.is_some());
+        let version = version.unwrap();
+        assert_eq!(version.plugin_name, "my-plugin");
+        assert_eq!(version.commit_sha, Some("abc1234".to_string()));
+        assert_eq!(version.source_hash, source_hash);
+        assert_eq!(version.source_code, source_code);
+    }
+
+    #[tokio::test]
+    async fn test_get_plugin_version_by_hash_not_found() {
+        let db = GapDatabase::in_memory().await.unwrap();
+        let result = db.get_plugin_version_by_hash("nonexistent").await.unwrap();
+        assert!(result.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_add_plugin_creates_version_entry() {
+        let db = GapDatabase::in_memory().await.unwrap();
+
+        let plugin = sample_plugin("test-versioned");
+        let source_code = "function transform() { return request; }";
+        db.add_plugin(&plugin, source_code).await.unwrap();
+
+        // Compute expected hash
+        let expected_hash = format!("{:x}", sha2::Sha256::digest(source_code.as_bytes()));
+
+        // Should be able to find the version by hash
+        let version = db.get_plugin_version_by_hash(&expected_hash).await.unwrap();
+        assert!(version.is_some());
+        let version = version.unwrap();
+        assert_eq!(version.plugin_name, "test-versioned");
+        assert_eq!(version.source_code, source_code);
+    }
+
+    #[tokio::test]
+    async fn test_plugin_versions_are_append_only() {
+        let db = GapDatabase::in_memory().await.unwrap();
+
+        let plugin = sample_plugin("versioned-plugin");
+
+        // Install v1
+        let code_v1 = "// version 1";
+        db.add_plugin(&plugin, code_v1).await.unwrap();
+
+        // Install v2 (same plugin name, different code)
+        let code_v2 = "// version 2";
+        db.add_plugin(&plugin, code_v2).await.unwrap();
+
+        // Both versions should exist
+        let hash_v1 = format!("{:x}", sha2::Sha256::digest(code_v1.as_bytes()));
+        let hash_v2 = format!("{:x}", sha2::Sha256::digest(code_v2.as_bytes()));
+
+        let v1 = db.get_plugin_version_by_hash(&hash_v1).await.unwrap();
+        let v2 = db.get_plugin_version_by_hash(&hash_v2).await.unwrap();
+        assert!(v1.is_some());
+        assert!(v2.is_some());
+        assert_eq!(v1.unwrap().source_code, code_v1);
+        assert_eq!(v2.unwrap().source_code, code_v2);
     }
 }

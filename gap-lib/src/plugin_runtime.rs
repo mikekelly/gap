@@ -560,7 +560,11 @@ impl PluginRuntime {
         self.execute(code)?;
 
         // Extract metadata
-        let plugin = self.extract_plugin_metadata(name)?;
+        let mut plugin = self.extract_plugin_metadata(name)?;
+
+        // Compute SHA-256 hash of the actual JS source (ground truth of what ran)
+        let source_hash = format!("{:x}", Sha256::digest(code.as_bytes()));
+        plugin.source_hash = Some(source_hash);
 
         // Cache the plugin
         self.plugins.insert(name.to_string(), plugin.clone());
@@ -710,6 +714,7 @@ impl PluginRuntime {
             credential_schema,
             transform,
             commit_sha: None,
+            source_hash: None,
         })
     }
 
@@ -1590,5 +1595,56 @@ mod tests {
         assert!(result.is_err());
         let err = result.unwrap_err();
         assert!(err.to_string().contains("timeout") || err.to_string().contains("Timeout"));
+    }
+
+    #[test]
+    fn test_load_plugin_from_code_sets_source_hash() {
+        let mut runtime = PluginRuntime::new().unwrap();
+
+        let plugin_code = r#"
+        var plugin = {
+            name: "hash-test",
+            matchPatterns: ["api.example.com"],
+            credentialSchema: ["api_key"],
+            transform: function(request, credentials) { return request; }
+        };
+        "#;
+
+        let plugin = runtime.load_plugin_from_code("hash-test", plugin_code).unwrap();
+
+        // source_hash should be set
+        assert!(plugin.source_hash.is_some());
+
+        // Verify it matches the expected SHA-256
+        let expected = format!("{:x}", Sha256::digest(plugin_code.as_bytes()));
+        assert_eq!(plugin.source_hash.unwrap(), expected);
+    }
+
+    #[test]
+    fn test_source_hash_differs_for_different_code() {
+        let mut runtime1 = PluginRuntime::new().unwrap();
+        let mut runtime2 = PluginRuntime::new().unwrap();
+
+        let code1 = r#"
+        var plugin = {
+            name: "p1",
+            matchPatterns: ["a.com"],
+            credentialSchema: [],
+            transform: function(request, credentials) { return request; }
+        };
+        "#;
+        let code2 = r#"
+        var plugin = {
+            name: "p2",
+            matchPatterns: ["b.com"],
+            credentialSchema: [],
+            transform: function(request, credentials) { request.headers["X"] = "1"; return request; }
+        };
+        "#;
+
+        let p1 = runtime1.load_plugin_from_code("p1", code1).unwrap();
+        let p2 = runtime2.load_plugin_from_code("p2", code2).unwrap();
+
+        assert_ne!(p1.source_hash, p2.source_hash);
     }
 }

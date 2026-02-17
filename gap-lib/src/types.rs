@@ -108,6 +108,8 @@ pub struct GAPPlugin {
     pub transform: String,
     /// Git commit SHA (short) of the installed plugin version
     pub commit_sha: Option<String>,
+    /// SHA-256 hash of the actual JS source code loaded at runtime
+    pub source_hash: Option<String>,
 }
 
 impl GAPPlugin {
@@ -124,6 +126,7 @@ impl GAPPlugin {
             credential_schema,
             transform: transform.into(),
             commit_sha: None,
+            source_hash: None,
         }
     }
 
@@ -279,6 +282,8 @@ pub struct ActivityEntry {
     pub plugin_name: Option<String>,
     /// Git commit SHA of the plugin that handled this request
     pub plugin_sha: Option<String>,
+    /// SHA-256 hash of the plugin source code that handled this request
+    pub source_hash: Option<String>,
 }
 
 // --- Registry-origin types (migrated from registry.rs) ---
@@ -316,6 +321,16 @@ pub struct PluginEntry {
 pub struct CredentialEntry {
     pub plugin: String,
     pub field: String,
+}
+
+/// Append-only record of every plugin version ever installed
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PluginVersion {
+    pub plugin_name: String,
+    pub commit_sha: Option<String>,
+    pub source_hash: String,
+    pub source_code: String,
+    pub installed_at: DateTime<Utc>,
 }
 
 // Serde helper for binary data

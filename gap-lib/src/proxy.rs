@@ -504,6 +504,7 @@ where
                         status,
                         plugin_name: Some(plugin_info.name),
                         plugin_sha: plugin_info.commit_sha,
+                        source_hash: plugin_info.source_hash,
                     };
                     if let Err(e) = db_log.log_activity(&entry).await {
                         tracing::warn!("Failed to log activity: {}", e);
@@ -578,6 +579,7 @@ where
                         status,
                         plugin_name: Some(plugin_info.name),
                         plugin_sha: plugin_info.commit_sha,
+                        source_hash: plugin_info.source_hash,
                     };
                     if let Err(e) = db_log.log_activity(&entry).await {
                         tracing::warn!("Failed to log activity: {}", e);

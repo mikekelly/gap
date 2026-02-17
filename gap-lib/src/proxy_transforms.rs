@@ -33,6 +33,7 @@ async fn load_plugin_credentials(
 pub struct PluginInfo {
     pub name: String,
     pub commit_sha: Option<String>,
+    pub source_hash: Option<String>,
 }
 
 /// Apply plugin transforms to a GAPRequest
@@ -73,6 +74,7 @@ pub async fn transform_request(
     let plugin_info = PluginInfo {
         name: plugin.name.clone(),
         commit_sha: plugin.commit_sha.clone(),
+        source_hash: plugin.source_hash.clone(),
     };
 
     // Load credentials for the plugin
