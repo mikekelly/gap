@@ -12,7 +12,7 @@ pub mod api;
 #[cfg(target_os = "macos")]
 pub mod launchd;
 
-use gap_lib::{storage, tls::CertificateAuthority, Registry, Config, ProxyServer};
+use gap_lib::{database::GapDatabase, tls::CertificateAuthority, Config, ProxyServer};
 use clap::{Parser, Subcommand};
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -211,33 +211,43 @@ async fn main() -> anyhow::Result<()> {
     tracing::info!("Proxy port: {}", config.proxy_port);
     tracing::info!("API port: {}", config.api_port);
 
-    // Create storage
-    let data_dir_path = config.data_dir.as_ref().map(PathBuf::from);
-    let store = storage::create_store(data_dir_path).await?;
-    let store = Arc::from(store); // Convert Box to Arc
+    // Open database
+    let db_path = match config.data_dir.as_ref() {
+        Some(dir) => {
+            let p = PathBuf::from(dir);
+            std::fs::create_dir_all(&p)?;
+            p.join("gap.db")
+        }
+        None => {
+            let home = dirs::home_dir()
+                .ok_or_else(|| anyhow::anyhow!("Cannot determine home directory"))?;
+            let gap_dir = home.join(".gap");
+            std::fs::create_dir_all(&gap_dir)?;
+            gap_dir.join("gap.db")
+        }
+    };
+    let db = Arc::new(
+        GapDatabase::open_unencrypted(db_path.to_str().unwrap()).await?,
+    );
+    tracing::info!("Database opened at {}", db_path.display());
 
     // Load or generate CA certificate
-    let ca = load_or_generate_ca(&*store).await?;
+    let ca = load_or_generate_ca(&db).await?;
     tracing::info!("CA certificate loaded/generated");
 
     // Load or generate management certificate
-    load_or_generate_mgmt_cert(&*store, &ca).await?;
+    load_or_generate_mgmt_cert(&db, &ca).await?;
     tracing::info!("Management certificate loaded/generated");
 
-    // Create registry for centralized metadata storage
-    let registry = Arc::new(Registry::new(Arc::clone(&store)));
-    tracing::info!("Registry initialized");
-
-    // Log initial token count from registry
-    let initial_tokens = registry.list_tokens().await?;
+    // Log initial token count from database
+    let initial_tokens = db.list_tokens().await?;
     tracing::info!("Loaded {} agent tokens from storage", initial_tokens.len());
 
-    // Create ProxyServer with store and registry
+    // Create ProxyServer with database
     let proxy = ProxyServer::new(
         config.proxy_port,
         ca,
-        Arc::clone(&store),
-        Arc::clone(&registry),
+        Arc::clone(&db),
     )?;
 
     // Spawn proxy server in background
@@ -254,9 +264,9 @@ async fn main() -> anyhow::Result<()> {
     let _check_handle = spawn_periodic_binary_check();
 
     // Load management certificate for HTTPS
-    let mgmt_cert_pem = store.get("mgmt:cert").await?
+    let mgmt_cert_pem = db.get_config("mgmt:cert").await?
         .ok_or_else(|| anyhow::anyhow!("Management certificate not found"))?;
-    let mgmt_key_pem = store.get("mgmt:key").await?
+    let mgmt_key_pem = db.get_config("mgmt:key").await?
         .ok_or_else(|| anyhow::anyhow!("Management key not found"))?;
 
     // Create TLS configuration
@@ -265,19 +275,18 @@ async fn main() -> anyhow::Result<()> {
         mgmt_key_pem
     ).await?;
 
-    // Create API state with storage backend, registry, and TLS config
+    // Create API state with database and TLS config
     let api_state = api::ApiState::new_with_tls(
         config.proxy_port,
         config.api_port,
-        Arc::clone(&store),
-        Arc::clone(&registry),
+        Arc::clone(&db),
         tls_config.clone(),
     );
 
-    // Load persisted password hash from registry (if server was previously initialized)
-    if let Ok(Some(hash)) = registry.get_password_hash().await {
+    // Load persisted password hash from database (if server was previously initialized)
+    if let Ok(Some(hash)) = db.get_password_hash().await {
         api_state.set_password_hash(hash).await;
-        tracing::info!("Loaded password hash from registry");
+        tracing::info!("Loaded password hash from database");
     }
 
     // Build the API router
@@ -296,17 +305,17 @@ async fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Load CA from storage or generate a new one
-async fn load_or_generate_ca(store: &dyn storage::SecretStore) -> anyhow::Result<CertificateAuthority> {
+/// Load CA from database or generate a new one
+async fn load_or_generate_ca(db: &GapDatabase) -> anyhow::Result<CertificateAuthority> {
     const CA_CERT_KEY: &str = "ca:cert";
     const CA_KEY_KEY: &str = "ca:key";
 
-    // Try to load from storage
-    let ca = match (store.get(CA_CERT_KEY).await?, store.get(CA_KEY_KEY).await?) {
+    // Try to load from database
+    let ca = match (db.get_config(CA_CERT_KEY).await?, db.get_config(CA_KEY_KEY).await?) {
         (Some(cert_pem), Some(key_pem)) => {
             let cert_pem_str = String::from_utf8(cert_pem)?;
             let key_pem_str = String::from_utf8(key_pem)?;
-            tracing::info!("Loaded CA from storage");
+            tracing::info!("Loaded CA from database");
             CertificateAuthority::from_pem(&cert_pem_str, &key_pem_str)?
         }
         _ => {
@@ -314,10 +323,10 @@ async fn load_or_generate_ca(store: &dyn storage::SecretStore) -> anyhow::Result
             tracing::info!("Generating new CA certificate");
             let ca = CertificateAuthority::generate()?;
 
-            // Save to storage for next time
-            store.set(CA_CERT_KEY, ca.ca_cert_pem().as_bytes()).await?;
-            store.set(CA_KEY_KEY, ca.ca_key_pem().as_bytes()).await?;
-            tracing::info!("CA certificate saved to storage");
+            // Save to database for next time
+            db.set_config(CA_CERT_KEY, ca.ca_cert_pem().as_bytes()).await?;
+            db.set_config(CA_KEY_KEY, ca.ca_key_pem().as_bytes()).await?;
+            tracing::info!("CA certificate saved to database");
 
             ca
         }
@@ -334,9 +343,9 @@ async fn load_or_generate_ca(store: &dyn storage::SecretStore) -> anyhow::Result
     Ok(ca)
 }
 
-/// Load management certificate from storage or generate a new one
+/// Load management certificate from database or generate a new one
 async fn load_or_generate_mgmt_cert(
-    store: &dyn storage::SecretStore,
+    db: &GapDatabase,
     ca: &CertificateAuthority,
 ) -> anyhow::Result<()> {
     use gap_lib::tls::der_to_pem;
@@ -344,10 +353,10 @@ async fn load_or_generate_mgmt_cert(
     const MGMT_CERT_KEY: &str = "mgmt:cert";
     const MGMT_KEY_KEY: &str = "mgmt:key";
 
-    // Try to load from storage
-    match (store.get(MGMT_CERT_KEY).await?, store.get(MGMT_KEY_KEY).await?) {
+    // Try to load from database
+    match (db.get_config(MGMT_CERT_KEY).await?, db.get_config(MGMT_KEY_KEY).await?) {
         (Some(_cert_pem), Some(_key_pem)) => {
-            tracing::info!("Loaded management certificate from storage");
+            tracing::info!("Loaded management certificate from database");
             Ok(())
         }
         _ => {
@@ -365,10 +374,10 @@ async fn load_or_generate_mgmt_cert(
             let cert_pem = der_to_pem(&cert_der, "CERTIFICATE");
             let key_pem = der_to_pem(&key_der, "PRIVATE KEY");
 
-            // Save to storage
-            store.set(MGMT_CERT_KEY, cert_pem.as_bytes()).await?;
-            store.set(MGMT_KEY_KEY, key_pem.as_bytes()).await?;
-            tracing::info!("Management certificate saved to storage");
+            // Save to database
+            db.set_config(MGMT_CERT_KEY, cert_pem.as_bytes()).await?;
+            db.set_config(MGMT_KEY_KEY, key_pem.as_bytes()).await?;
+            tracing::info!("Management certificate saved to database");
 
             Ok(())
         }
@@ -378,7 +387,6 @@ async fn load_or_generate_mgmt_cert(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use gap_lib::storage::{FileStore, SecretStore};
 
     #[test]
     fn test_args_parsing() {
@@ -389,21 +397,20 @@ mod tests {
 
     #[tokio::test]
     async fn test_load_or_generate_mgmt_cert_creates_new() {
-        // Create a temporary store
-        let temp_dir = tempfile::tempdir().unwrap();
-        let store = FileStore::new(temp_dir.path().to_path_buf()).await.unwrap();
+        // Create an in-memory database
+        let db = GapDatabase::in_memory().await.unwrap();
         let ca = CertificateAuthority::generate().unwrap();
 
         // Store the CA
-        store.set("ca:cert", ca.ca_cert_pem().as_bytes()).await.unwrap();
-        store.set("ca:key", ca.ca_key_pem().as_bytes()).await.unwrap();
+        db.set_config("ca:cert", ca.ca_cert_pem().as_bytes()).await.unwrap();
+        db.set_config("ca:key", ca.ca_key_pem().as_bytes()).await.unwrap();
 
         // Call load_or_generate_mgmt_cert - should create new cert with default SANs
-        load_or_generate_mgmt_cert(&store, &ca).await.unwrap();
+        load_or_generate_mgmt_cert(&db, &ca).await.unwrap();
 
         // Verify cert and key were stored
-        let stored_cert = store.get("mgmt:cert").await.unwrap();
-        let stored_key = store.get("mgmt:key").await.unwrap();
+        let stored_cert = db.get_config("mgmt:cert").await.unwrap();
+        let stored_key = db.get_config("mgmt:key").await.unwrap();
 
         assert!(stored_cert.is_some());
         assert!(stored_key.is_some());
@@ -417,28 +424,23 @@ mod tests {
 
     #[tokio::test]
     async fn test_load_or_generate_mgmt_cert_loads_existing() {
-        // Create a temporary store with existing mgmt cert
-        let temp_dir = tempfile::tempdir().unwrap();
-        let store = FileStore::new(temp_dir.path().to_path_buf()).await.unwrap();
+        // Create an in-memory database with existing mgmt cert
+        let db = GapDatabase::in_memory().await.unwrap();
         let ca = CertificateAuthority::generate().unwrap();
 
-        // Pre-generate and store a management cert
-        let sans = vec!["DNS:test.local".to_string()];
-        let (_cert_der, _key_der) = ca.sign_server_cert(&sans).unwrap();
-
         // Simple PEM formatting (good enough for test)
-        let cert_pem = format!("-----BEGIN CERTIFICATE-----\ntestcert\n-----END CERTIFICATE-----\n");
-        let key_pem = format!("-----BEGIN PRIVATE KEY-----\ntestkey\n-----END PRIVATE KEY-----\n");
+        let cert_pem = "-----BEGIN CERTIFICATE-----\ntestcert\n-----END CERTIFICATE-----\n";
+        let key_pem = "-----BEGIN PRIVATE KEY-----\ntestkey\n-----END PRIVATE KEY-----\n";
 
-        store.set("mgmt:cert", cert_pem.as_bytes()).await.unwrap();
-        store.set("mgmt:key", key_pem.as_bytes()).await.unwrap();
+        db.set_config("mgmt:cert", cert_pem.as_bytes()).await.unwrap();
+        db.set_config("mgmt:key", key_pem.as_bytes()).await.unwrap();
 
         // Call load_or_generate_mgmt_cert - should load existing, not regenerate
-        load_or_generate_mgmt_cert(&store, &ca).await.unwrap();
+        load_or_generate_mgmt_cert(&db, &ca).await.unwrap();
 
         // Verify cert wasn't regenerated (still has our test values)
-        let loaded_cert = store.get("mgmt:cert").await.unwrap().unwrap();
-        let loaded_key = store.get("mgmt:key").await.unwrap().unwrap();
+        let loaded_cert = db.get_config("mgmt:cert").await.unwrap().unwrap();
+        let loaded_key = db.get_config("mgmt:key").await.unwrap().unwrap();
         assert_eq!(String::from_utf8(loaded_cert).unwrap(), cert_pem);
         assert_eq!(String::from_utf8(loaded_key).unwrap(), key_pem);
     }
@@ -488,16 +490,15 @@ mod tests {
     async fn test_load_or_generate_ca_exports_to_filesystem() {
         use std::fs;
 
-        // Create a temporary store
-        let temp_dir = tempfile::tempdir().unwrap();
-        let store = FileStore::new(temp_dir.path().to_path_buf()).await.unwrap();
+        // Create an in-memory database
+        let db = GapDatabase::in_memory().await.unwrap();
 
         // Set up a temporary HOME directory for the test
         let temp_home = tempfile::tempdir().unwrap();
         std::env::set_var("HOME", temp_home.path());
 
         // Load or generate CA - this should export the cert to the filesystem
-        let ca = load_or_generate_ca(&store).await.unwrap();
+        let ca = load_or_generate_ca(&db).await.unwrap();
 
         // Verify the CA cert was exported to the well-known path
         let ca_path = gap_lib::ca_cert_path();
@@ -506,6 +507,28 @@ mod tests {
         // Verify the content matches what the CA has
         let exported_content = fs::read_to_string(&ca_path).unwrap();
         assert_eq!(exported_content, ca.ca_cert_pem());
+    }
+
+    #[tokio::test]
+    async fn test_load_or_generate_ca_persists_to_database() {
+        let db = GapDatabase::in_memory().await.unwrap();
+
+        // Set up a temporary HOME directory for filesystem export
+        let temp_home = tempfile::tempdir().unwrap();
+        std::env::set_var("HOME", temp_home.path());
+
+        // First call generates and persists
+        let ca1 = load_or_generate_ca(&db).await.unwrap();
+
+        // Verify CA cert and key were persisted to config table
+        let stored_cert = db.get_config("ca:cert").await.unwrap();
+        let stored_key = db.get_config("ca:key").await.unwrap();
+        assert!(stored_cert.is_some(), "CA cert should be persisted in database config");
+        assert!(stored_key.is_some(), "CA key should be persisted in database config");
+
+        // Second call should load (not regenerate) - same CA
+        let ca2 = load_or_generate_ca(&db).await.unwrap();
+        assert_eq!(ca1.ca_cert_pem(), ca2.ca_cert_pem(), "CA should be loaded from database on second call");
     }
 
     #[cfg(target_os = "macos")]
