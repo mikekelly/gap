@@ -23,14 +23,6 @@ CREATE TABLE IF NOT EXISTS tokens (
     created_at TEXT NOT NULL
 );
 
-CREATE TABLE IF NOT EXISTS plugins (
-    name TEXT PRIMARY KEY,
-    hosts TEXT NOT NULL,
-    credential_schema TEXT NOT NULL,
-    commit_sha TEXT,
-    source_code TEXT NOT NULL
-);
-
 CREATE TABLE IF NOT EXISTS credentials (
     plugin TEXT NOT NULL,
     field TEXT NOT NULL,
@@ -56,10 +48,13 @@ CREATE INDEX IF NOT EXISTS idx_access_logs_url ON access_logs(url);
 CREATE TABLE IF NOT EXISTS plugin_versions (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     plugin_name TEXT NOT NULL,
+    hosts TEXT NOT NULL DEFAULT '[]',
+    credential_schema TEXT NOT NULL DEFAULT '[]',
     commit_sha TEXT,
     source_hash TEXT NOT NULL,
     source_code TEXT NOT NULL,
-    installed_at TEXT NOT NULL
+    installed_at TEXT NOT NULL,
+    deleted INTEGER NOT NULL DEFAULT 0
 );
 
 CREATE INDEX IF NOT EXISTS idx_plugin_versions_plugin ON plugin_versions(plugin_name);
@@ -157,6 +152,11 @@ impl GapDatabase {
         let _ = self.conn.execute("ALTER TABLE access_logs ADD COLUMN plugin_sha TEXT", ()).await;
         let _ = self.conn.execute("ALTER TABLE access_logs ADD COLUMN source_hash TEXT", ()).await;
 
+        // Migrate plugin_versions for append-only plugin storage
+        let _ = self.conn.execute("ALTER TABLE plugin_versions ADD COLUMN hosts TEXT NOT NULL DEFAULT '[]'", ()).await;
+        let _ = self.conn.execute("ALTER TABLE plugin_versions ADD COLUMN credential_schema TEXT NOT NULL DEFAULT '[]'", ()).await;
+        let _ = self.conn.execute("ALTER TABLE plugin_versions ADD COLUMN deleted INTEGER NOT NULL DEFAULT 0", ()).await;
+
         Ok(())
     }
 
@@ -242,9 +242,12 @@ impl GapDatabase {
     }
 
     // ── Plugin CRUD ─────────────────────────────────────────────────
+    //
+    // All plugin state lives in the append-only `plugin_versions` table.
+    // The "current" plugin is the latest non-deleted entry for a given name.
+    // "Deleting" a plugin appends a tombstone row (deleted=1).
 
-    /// Add (or replace) a plugin and its source code.
-    /// Also records an entry in the append-only plugin_versions table.
+    /// Add a plugin by appending a new entry to plugin_versions.
     pub async fn add_plugin(&self, plugin: &PluginEntry, source_code: &str) -> Result<()> {
         let hosts_json =
             serde_json::to_string(&plugin.hosts).map_err(|e| GapError::database(e.to_string()))?;
@@ -253,62 +256,67 @@ impl GapDatabase {
 
         // Compute source hash
         let source_hash = format!("{:x}", Sha256::digest(source_code.as_bytes()));
+        let now = Utc::now().to_rfc3339();
 
         self.conn
             .execute(
-                "INSERT OR REPLACE INTO plugins (name, hosts, credential_schema, commit_sha, source_code) VALUES (?1, ?2, ?3, ?4, ?5)",
+                "INSERT INTO plugin_versions (plugin_name, hosts, credential_schema, commit_sha, source_hash, source_code, installed_at, deleted) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 0)",
                 libsql::params![
                     plugin.name.as_str(),
                     hosts_json,
                     schema_json,
                     plugin.commit_sha.as_deref().unwrap_or(""),
-                    source_code
+                    source_hash,
+                    source_code,
+                    now
                 ],
             )
             .await
             .map_err(|e| GapError::database(e.to_string()))?;
 
-        // Record in append-only version history
-        self.add_plugin_version(
-            &plugin.name,
-            plugin.commit_sha.as_deref(),
-            &source_hash,
-            source_code,
-        ).await?;
-
         Ok(())
     }
 
-    /// Get a plugin entry by name (without source code).
+    /// Get a plugin entry by name (latest version, None if deleted or absent).
     pub async fn get_plugin(&self, name: &str) -> Result<Option<PluginEntry>> {
+        // Get the absolute latest entry; if it's a tombstone, the plugin is "deleted".
         let mut rows = self
             .conn
             .query(
-                "SELECT name, hosts, credential_schema, commit_sha FROM plugins WHERE name = ?1",
+                "SELECT plugin_name, hosts, credential_schema, commit_sha, deleted FROM plugin_versions WHERE plugin_name = ?1 ORDER BY id DESC LIMIT 1",
                 libsql::params![name],
             )
             .await
             .map_err(|e| GapError::database(e.to_string()))?;
 
         if let Some(row) = rows.next().await.map_err(|e| GapError::database(e.to_string()))? {
+            let deleted: i64 = row.get(4).map_err(|e| GapError::database(e.to_string()))?;
+            if deleted != 0 {
+                return Ok(None);
+            }
             Ok(Some(self.row_to_plugin_entry(&row)?))
         } else {
             Ok(None)
         }
     }
 
-    /// Get only the source code for a plugin.
+    /// Get only the source code for a plugin (latest version, None if deleted or absent).
     pub async fn get_plugin_source(&self, name: &str) -> Result<Option<String>> {
+        // Get the absolute latest entry; if it's a tombstone, the plugin is "deleted".
         let mut rows = self
             .conn
             .query(
-                "SELECT source_code FROM plugins WHERE name = ?1",
+                "SELECT source_code, deleted FROM plugin_versions WHERE plugin_name = ?1 ORDER BY id DESC LIMIT 1",
                 libsql::params![name],
             )
             .await
             .map_err(|e| GapError::database(e.to_string()))?;
 
         if let Some(row) = rows.next().await.map_err(|e| GapError::database(e.to_string()))? {
+            let deleted: i64 = row.get(1).map_err(|e| GapError::database(e.to_string()))?;
+            if deleted != 0 {
+                return Ok(None);
+            }
             let source: String = row.get(0).map_err(|e| GapError::database(e.to_string()))?;
             Ok(Some(source))
         } else {
@@ -316,12 +324,19 @@ impl GapDatabase {
         }
     }
 
-    /// List all plugins (without source code).
+    /// List all plugins (latest non-deleted version of each).
     pub async fn list_plugins(&self) -> Result<Vec<PluginEntry>> {
         let mut rows = self
             .conn
             .query(
-                "SELECT name, hosts, credential_schema, commit_sha FROM plugins",
+                "SELECT pv.plugin_name, pv.hosts, pv.credential_schema, pv.commit_sha \
+                 FROM plugin_versions pv \
+                 INNER JOIN ( \
+                     SELECT plugin_name, MAX(id) as max_id \
+                     FROM plugin_versions \
+                     GROUP BY plugin_name \
+                 ) latest ON pv.id = latest.max_id \
+                 WHERE pv.deleted = 0",
                 (),
             )
             .await
@@ -333,37 +348,25 @@ impl GapDatabase {
         Ok(result)
     }
 
-    /// Remove a plugin by name. Does NOT delete credentials (preserves across reinstalls).
+    /// Remove a plugin by appending a tombstone. Does NOT delete credentials (preserves across reinstalls).
     pub async fn remove_plugin(&self, name: &str) -> Result<()> {
+        let now = Utc::now().to_rfc3339();
         self.conn
             .execute(
-                "DELETE FROM plugins WHERE name = ?1",
-                libsql::params![name],
+                "INSERT INTO plugin_versions (plugin_name, hosts, credential_schema, commit_sha, source_hash, source_code, installed_at, deleted) VALUES (?1, '[]', '[]', '', '', '', ?2, 1)",
+                libsql::params![name, now],
             )
             .await
             .map_err(|e| GapError::database(e.to_string()))?;
         Ok(())
     }
 
-    /// Check whether a plugin exists.
+    /// Check whether a plugin exists (latest entry is non-deleted).
     pub async fn has_plugin(&self, name: &str) -> Result<bool> {
-        let mut rows = self
-            .conn
-            .query(
-                "SELECT 1 FROM plugins WHERE name = ?1",
-                libsql::params![name],
-            )
-            .await
-            .map_err(|e| GapError::database(e.to_string()))?;
-        let exists = rows
-            .next()
-            .await
-            .map_err(|e| GapError::database(e.to_string()))?
-            .is_some();
-        Ok(exists)
+        Ok(self.get_plugin(name).await?.is_some())
     }
 
-    /// Parse a `Row` (name, hosts, credential_schema, commit_sha) into a `PluginEntry`.
+    /// Parse a `Row` (plugin_name, hosts, credential_schema, commit_sha) into a `PluginEntry`.
     fn row_to_plugin_entry(&self, row: &libsql::Row) -> Result<PluginEntry> {
         let name: String = row.get(0).map_err(|e| GapError::database(e.to_string()))?;
         let hosts_json: String = row.get(1).map_err(|e| GapError::database(e.to_string()))?;
@@ -386,33 +389,6 @@ impl GapDatabase {
             credential_schema,
             commit_sha,
         })
-    }
-
-    // ── Plugin Version History ────────────────────────────────────────
-
-    /// Insert a plugin version into the append-only version history.
-    pub async fn add_plugin_version(
-        &self,
-        plugin_name: &str,
-        commit_sha: Option<&str>,
-        source_hash: &str,
-        source_code: &str,
-    ) -> Result<()> {
-        let now = Utc::now().to_rfc3339();
-        self.conn
-            .execute(
-                "INSERT INTO plugin_versions (plugin_name, commit_sha, source_hash, source_code, installed_at) VALUES (?1, ?2, ?3, ?4, ?5)",
-                libsql::params![
-                    plugin_name,
-                    commit_sha.unwrap_or(""),
-                    source_hash,
-                    source_code,
-                    now
-                ],
-            )
-            .await
-            .map_err(|e| GapError::database(format!("Failed to add plugin version: {}", e)))?;
-        Ok(())
     }
 
     /// Look up a plugin version by its source hash.
@@ -1184,15 +1160,19 @@ mod tests {
     // ── Plugin Version History ──────────────────────────────────────
 
     #[tokio::test]
-    async fn test_add_plugin_version_and_get_by_hash() {
+    async fn test_add_plugin_and_get_by_hash() {
         let db = GapDatabase::in_memory().await.unwrap();
 
         let source_code = "function transform() {}";
         let source_hash = format!("{:x}", sha2::Sha256::digest(source_code.as_bytes()));
 
-        db.add_plugin_version("my-plugin", Some("abc1234"), &source_hash, source_code)
-            .await
-            .unwrap();
+        let plugin = PluginEntry {
+            name: "my-plugin".to_string(),
+            hosts: vec!["api.example.com".to_string()],
+            credential_schema: vec!["api_key".to_string()],
+            commit_sha: Some("abc1234".to_string()),
+        };
+        db.add_plugin(&plugin, source_code).await.unwrap();
 
         let version = db.get_plugin_version_by_hash(&source_hash).await.unwrap();
         assert!(version.is_some());
@@ -1253,5 +1233,89 @@ mod tests {
         assert!(v2.is_some());
         assert_eq!(v1.unwrap().source_code, code_v1);
         assert_eq!(v2.unwrap().source_code, code_v2);
+    }
+
+    // ── Append-only tombstone behavior ─────────────────────────────
+
+    #[tokio::test]
+    async fn test_remove_plugin_creates_tombstone() {
+        let db = GapDatabase::in_memory().await.unwrap();
+
+        db.add_plugin(&sample_plugin("exa"), "src").await.unwrap();
+        db.remove_plugin("exa").await.unwrap();
+
+        // Plugin should be invisible via get/has/list
+        assert!(db.get_plugin("exa").await.unwrap().is_none());
+        assert!(!db.has_plugin("exa").await.unwrap());
+        assert_eq!(db.list_plugins().await.unwrap().len(), 0);
+        assert!(db.get_plugin_source("exa").await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn test_reinstall_after_delete() {
+        let db = GapDatabase::in_memory().await.unwrap();
+
+        // Install, delete, reinstall
+        db.add_plugin(&sample_plugin("exa"), "v1 src").await.unwrap();
+        db.remove_plugin("exa").await.unwrap();
+        assert!(db.get_plugin("exa").await.unwrap().is_none());
+
+        db.add_plugin(&sample_plugin("exa"), "v2 src").await.unwrap();
+        let got = db.get_plugin("exa").await.unwrap().unwrap();
+        assert_eq!(got.name, "exa");
+
+        let src = db.get_plugin_source("exa").await.unwrap().unwrap();
+        assert_eq!(src, "v2 src");
+    }
+
+    #[tokio::test]
+    async fn test_list_plugins_only_latest_non_deleted() {
+        let db = GapDatabase::in_memory().await.unwrap();
+
+        // Install two plugins
+        db.add_plugin(&sample_plugin("exa"), "src1").await.unwrap();
+        db.add_plugin(&sample_plugin("github"), "src2").await.unwrap();
+
+        // Delete one
+        db.remove_plugin("exa").await.unwrap();
+
+        let plugins = db.list_plugins().await.unwrap();
+        assert_eq!(plugins.len(), 1);
+        assert_eq!(plugins[0].name, "github");
+    }
+
+    #[tokio::test]
+    async fn test_update_plugin_shows_latest_version() {
+        let db = GapDatabase::in_memory().await.unwrap();
+
+        let plugin_v1 = PluginEntry {
+            name: "exa".to_string(),
+            hosts: vec!["api.exa.ai".to_string()],
+            credential_schema: vec!["api_key".to_string()],
+            commit_sha: Some("aaa1111".to_string()),
+        };
+        db.add_plugin(&plugin_v1, "v1 code").await.unwrap();
+
+        let plugin_v2 = PluginEntry {
+            name: "exa".to_string(),
+            hosts: vec!["api.exa.ai".to_string(), "new.exa.ai".to_string()],
+            credential_schema: vec!["api_key".to_string(), "secret".to_string()],
+            commit_sha: Some("bbb2222".to_string()),
+        };
+        db.add_plugin(&plugin_v2, "v2 code").await.unwrap();
+
+        // get_plugin should return v2 metadata
+        let got = db.get_plugin("exa").await.unwrap().unwrap();
+        assert_eq!(got.hosts, vec!["api.exa.ai", "new.exa.ai"]);
+        assert_eq!(got.credential_schema, vec!["api_key", "secret"]);
+        assert_eq!(got.commit_sha, Some("bbb2222".to_string()));
+
+        // get_plugin_source should return v2 code
+        let src = db.get_plugin_source("exa").await.unwrap().unwrap();
+        assert_eq!(src, "v2 code");
+
+        // list should still show only one entry for "exa"
+        let plugins = db.list_plugins().await.unwrap();
+        assert_eq!(plugins.len(), 1);
     }
 }
