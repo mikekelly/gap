@@ -4,7 +4,8 @@
 GAP (Gated Agent Proxy) lets AI agents access APIs without seeing your credentials. Agents route requests through the proxy with a token; GAP injects stored credentials and forwards to the API. The agent never sees the actual API keys.
 
 **Security model:**
-- Credentials encrypted at rest in files (macOS: `~/.gap/secrets`), with master encryption key in traditional macOS keychain
+- All data stored in embedded libSQL database (`GapDatabase`)
+- On macOS, database encryption key stored in traditional macOS keychain
 - No API to retrieve credentials - write-only storage
 - Agent tokens are for audit/tracking only, not authentication
 - Proxy listens on localhost - stolen tokens useless off-machine
@@ -32,27 +33,19 @@ cargo run --bin gap-server  # Run server
 
 2. **PluginRuntime is not Send**: Contains Boa engine with `Rc` types. In async Axum handlers, scope PluginRuntime operations in a block to ensure the runtime is dropped before any `.await` points. Enable `#[axum::debug_handler]` to see detailed Send/Sync errors.
 
-3. **KeychainStore.list() limitation**: Returns empty vec due to security-framework API limitations. This is why we use the Registry pattern for metadata tracking. FileStore provides full list() functionality.
+3. **`keychain_impl.rs` is retained but unused**: The low-level keychain functions are kept for a future `KeychainKeyProvider` phase. They are marked `#[allow(dead_code)]`. Do not delete them.
 
 4. **git2 callbacks are not Send**: `RepoBuilder` with `RemoteCallbacks` closures is not `Send`. In async handlers, scope the entire git clone operation in a block to ensure all non-Send types are dropped before any `.await` points.
 
 5. **PluginRuntime single-context limitation**: Loading a plugin overwrites the global `plugin` object in the JS context. Only the most recently loaded plugin's transform function can be executed. Plugin metadata is preserved for all loaded plugins.
 
-## Hybrid Credential Storage (macOS)
+## Storage
 
-**Architecture:** Master encryption key stored in traditional macOS keychain, credentials encrypted at rest in files (`~/.gap/secrets`).
+All persistent data (tokens, plugins, credentials, config, activity) is stored in an embedded libSQL database via `GapDatabase`. The old file-based storage system (`SecretStore`, `FileStore`, `EncryptedFileStore`, `Registry`) has been removed.
 
-**Why this approach:**
-- Traditional keychain supports "Always Allow" (one-time prompt)
-- Avoids Data Protection Keychain complexity (signing, entitlements, `-34018` errors)
-- Credentials encrypted with ChaCha20-Poly1305
-
-**Storage classes:**
-- `EncryptedFileStore` - Production default on macOS (master key in keychain, encrypted files)
-- `FileStore` - Plain file storage (use with `--data-dir` or `GAP_DATA_DIR`)
-- `KeychainStore` - Direct keychain storage (legacy, not used by default)
-
-**Breaking change:** Users migrating from previous versions that stored directly in keychain must re-initialize credentials.
+- `GapDatabase::in_memory()` for tests
+- `GapDatabase::open(path)` for production
+- Data types (`TokenEntry`, `PluginEntry`, `CredentialEntry`, `TokenMetadata`) live in `types.rs`
 
 ## Detailed Reference Documentation
 
@@ -122,9 +115,9 @@ The proxy supports both HTTP/1.1 and HTTP/2 via ALPN negotiation:
 Key types you'll use frequently:
 - `GAPRequest`, `GAPCredentials`, `GAPPlugin` - HTTP and plugin types
 - `AgentToken` - Bearer token (`.token` is a field, not a method)
-- `SecretStore` trait - Storage abstraction (`EncryptedFileStore`, `FileStore`, `KeychainStore`)
+- `GapDatabase` - Embedded libSQL storage for all persistent data
 - `PluginRuntime` - Sandboxed Boa JS runtime for plugins
-- `Registry` - Centralized metadata at key `"_registry"`
+- `PluginEntry`, `TokenEntry`, `CredentialEntry`, `TokenMetadata` - Data types in `types.rs`
 - `CertificateAuthority` - TLS CA for dynamic cert generation
 - `ProxyServer` - MITM HTTPS proxy with H1/H2 support via ALPN
 
