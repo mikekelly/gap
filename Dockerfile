@@ -12,6 +12,7 @@ RUN apt-get update && \
     libssl-dev \
     perl \
     make \
+    cmake \
     && rm -rf /var/lib/apt/lists/*
 
 # Set working directory

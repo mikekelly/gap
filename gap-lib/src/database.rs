@@ -102,12 +102,7 @@ impl GapDatabase {
         instance.run_migrations().await?;
         instance
             .conn
-            .execute("PRAGMA journal_mode = WAL;", ())
-            .await
-            .map_err(|e| GapError::database(format!("Failed to set WAL: {}", e)))?;
-        instance
-            .conn
-            .execute("PRAGMA foreign_keys = ON;", ())
+            .execute_batch("PRAGMA journal_mode = WAL; PRAGMA foreign_keys = ON;")
             .await
             .map_err(|e| GapError::database(format!("Failed to enable foreign keys: {}", e)))?;
         Ok(instance)
