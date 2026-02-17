@@ -155,11 +155,17 @@ The Docker image is ideal for:
 
 #### Quick start
 
+`GAP_ENCRYPTION_KEY` is required for database encryption at rest. Generate it once and store it securely — losing it means losing access to your stored secrets.
+
 ```bash
+# Generate an encryption key (do this once, save it securely)
+export GAP_ENCRYPTION_KEY=$(openssl rand -hex 32)
+
 # Run with persistent storage (required)
 docker run -d \
   --name gap-server \
   -v gap-data:/var/lib/gap \
+  -e GAP_ENCRYPTION_KEY \
   -p 9443:9443 \
   -p 9080:9080 \
   mikekelly321/gap:latest
@@ -171,6 +177,8 @@ docker run -d \
 services:
   gap-server:
     image: mikekelly321/gap:latest
+    environment:
+      - GAP_ENCRYPTION_KEY=${GAP_ENCRYPTION_KEY}
     volumes:
       - gap-data:/var/lib/gap
       # Export CA cert so agents can trust it
