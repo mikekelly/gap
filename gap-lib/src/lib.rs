@@ -9,6 +9,7 @@ mod keychain_impl;
 pub mod paths;
 pub mod plugin_matcher;
 pub mod plugin_runtime;
+pub mod database;
 pub mod proxy;
 pub mod proxy_transforms;
 pub mod registry;
