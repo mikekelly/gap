@@ -28,7 +28,7 @@ pub use plugin_matcher::find_matching_plugin;
 pub use plugin_runtime::PluginRuntime;
 pub use proxy::ProxyServer;
 pub use database::GapDatabase;
-pub use tls::CertificateAuthority;
+pub use tls::{CertificateAuthority, DynamicCertResolver};
 pub use types::{
     GAPCredentials, GAPPlugin, GAPRequest, AgentToken, Config, ActivityEntry,
     ActivityFilter, CredentialEntry, PluginEntry, TokenEntry, TokenMetadata,

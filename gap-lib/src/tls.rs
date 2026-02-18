@@ -12,6 +12,7 @@ use std::sync::{Arc, RwLock};
 use std::time::{Duration, SystemTime};
 
 /// A Certificate Authority that can generate and sign certificates
+#[derive(Debug)]
 pub struct CertificateAuthority {
     /// The CA certificate PEM (for export)
     ca_cert_pem: String,
@@ -22,6 +23,7 @@ pub struct CertificateAuthority {
 }
 
 /// Cached certificate entry with expiration
+#[derive(Debug)]
 struct CachedCertificate {
     /// Certificate in DER format
     cert: Vec<u8>,
@@ -32,6 +34,7 @@ struct CachedCertificate {
 }
 
 /// Certificate cache with expiry
+#[derive(Debug)]
 struct CertificateCache {
     entries: HashMap<String, CachedCertificate>,
 }
@@ -309,8 +312,12 @@ impl CertificateAuthority {
     }
 
     /// Generate a certificate for the hostname without caching
+    ///
+    /// Handles both DNS hostnames and IP addresses. IP addresses are detected
+    /// via `IpAddr::from_str` and added as IP SANs (not DNS SANs), which is
+    /// required for TLS clients to validate certs for IP-based connections.
     fn generate_cert_for_hostname(&self, hostname: &str, validity: Duration) -> Result<(Vec<u8>, Vec<u8>)> {
-        use rcgen::{CertificateParams, DistinguishedName, DnType, KeyPair};
+        use rcgen::{CertificateParams, DistinguishedName, DnType, KeyPair, SanType};
         use time::{Duration as TimeDuration, OffsetDateTime};
 
         // Reconstruct CA for signing
@@ -320,9 +327,17 @@ impl CertificateAuthority {
         let key_pair = KeyPair::generate()
             .map_err(|e| GapError::tls(format!("Failed to generate key pair: {}", e)))?;
 
-        // Set up certificate parameters
-        let mut params = CertificateParams::new(vec![hostname.to_string()])
-            .map_err(|e| GapError::tls(format!("Failed to create certificate params: {}", e)))?;
+        // Set up certificate parameters, handling IP addresses vs DNS names
+        let mut params = if let Ok(ip) = hostname.parse::<std::net::IpAddr>() {
+            // IP address: use default params and add IP SAN manually
+            let mut p = CertificateParams::default();
+            p.subject_alt_names = vec![SanType::IpAddress(ip)];
+            p
+        } else {
+            // DNS hostname: use the existing behavior
+            CertificateParams::new(vec![hostname.to_string()])
+                .map_err(|e| GapError::tls(format!("Failed to create certificate params: {}", e)))?
+        };
 
         // Set distinguished name
         let mut dn = DistinguishedName::new();
@@ -364,6 +379,40 @@ impl CertificateAuthority {
             .map_err(|_| GapError::tls("Failed to acquire cache write lock"))?;
         cache.clear();
         Ok(())
+    }
+}
+
+/// Resolves TLS certificates dynamically using the CA to generate certs
+/// matching the SNI hostname from client hello.
+#[derive(Debug)]
+pub struct DynamicCertResolver {
+    ca: Arc<CertificateAuthority>,
+}
+
+impl DynamicCertResolver {
+    pub fn new(ca: Arc<CertificateAuthority>) -> Self {
+        Self { ca }
+    }
+}
+
+impl rustls::server::ResolvesServerCert for DynamicCertResolver {
+    fn resolve(&self, client_hello: rustls::server::ClientHello<'_>) -> Option<Arc<rustls::sign::CertifiedKey>> {
+        // No-SNI fallback to "localhost" — IP-based connections don't send SNI per RFC 6066
+        let sni = client_hello.server_name().unwrap_or("localhost");
+
+        let (cert_der, key_der) = self.ca.sign_for_hostname(sni, None).ok()?;
+
+        let key = rustls::pki_types::PrivateKeyDer::try_from(key_der).ok()?;
+        let signing_key = rustls::crypto::aws_lc_rs::sign::any_supported_type(&key).ok()?;
+
+        // Include CA cert in chain so clients can verify the full chain
+        let ca_cert_der = self.ca.ca_cert_der();
+        let cert_chain = vec![
+            rustls::pki_types::CertificateDer::from(cert_der),
+            rustls::pki_types::CertificateDer::from(ca_cert_der),
+        ];
+
+        Some(Arc::new(rustls::sign::CertifiedKey::new(cert_chain, signing_key)))
     }
 }
 
@@ -705,6 +754,157 @@ mod tests {
         // The certificate should be different from the CA certificate
         let ca_cert_der = ca.ca_cert_der();
         assert_ne!(cert_der, ca_cert_der);
+    }
+
+    #[test]
+    fn test_sign_for_hostname_ip_address_has_ip_san() {
+        // Verify that sign_for_hostname with an IP address produces an IP SAN,
+        // not a DNS SAN (which would fail TLS validation for IP connections)
+        let ca = CertificateAuthority::generate().unwrap();
+        let (cert_der, _key_der) = ca.sign_for_hostname("192.168.1.5", None).unwrap();
+
+        // Use openssl to inspect the cert SANs
+        use std::io::Write;
+        let cert_pem = der_to_pem(&cert_der, "CERTIFICATE");
+        let mut cert_file = tempfile::NamedTempFile::new().unwrap();
+        cert_file.write_all(cert_pem.as_bytes()).unwrap();
+        cert_file.flush().unwrap();
+
+        let output = std::process::Command::new("openssl")
+            .args(["x509", "-in", cert_file.path().to_str().unwrap(), "-text", "-noout"])
+            .output()
+            .expect("Failed to run openssl");
+
+        let text = String::from_utf8_lossy(&output.stdout);
+
+        // Should contain IP Address SAN, not DNS SAN
+        assert!(
+            text.contains("IP Address:192.168.1.5"),
+            "Expected IP Address SAN but got:\n{}",
+            text
+        );
+        assert!(
+            !text.contains("DNS:192.168.1.5"),
+            "Should NOT have DNS SAN for IP address:\n{}",
+            text
+        );
+    }
+
+    #[test]
+    fn test_sign_for_hostname_ipv6_has_ip_san() {
+        let ca = CertificateAuthority::generate().unwrap();
+        let (cert_der, _key_der) = ca.sign_for_hostname("::1", None).unwrap();
+
+        use std::io::Write;
+        let cert_pem = der_to_pem(&cert_der, "CERTIFICATE");
+        let mut cert_file = tempfile::NamedTempFile::new().unwrap();
+        cert_file.write_all(cert_pem.as_bytes()).unwrap();
+        cert_file.flush().unwrap();
+
+        let output = std::process::Command::new("openssl")
+            .args(["x509", "-in", cert_file.path().to_str().unwrap(), "-text", "-noout"])
+            .output()
+            .expect("Failed to run openssl");
+
+        let text = String::from_utf8_lossy(&output.stdout);
+
+        // Should contain IP Address SAN for IPv6
+        assert!(
+            text.contains("IP Address:0:0:0:0:0:0:0:1") || text.contains("IP Address:::1"),
+            "Expected IPv6 IP Address SAN but got:\n{}",
+            text
+        );
+    }
+
+    #[test]
+    fn test_sign_for_hostname_dns_still_works() {
+        // Ensure regular hostnames still get DNS SANs
+        let ca = CertificateAuthority::generate().unwrap();
+        let (cert_der, _key_der) = ca.sign_for_hostname("example.com", None).unwrap();
+
+        use std::io::Write;
+        let cert_pem = der_to_pem(&cert_der, "CERTIFICATE");
+        let mut cert_file = tempfile::NamedTempFile::new().unwrap();
+        cert_file.write_all(cert_pem.as_bytes()).unwrap();
+        cert_file.flush().unwrap();
+
+        let output = std::process::Command::new("openssl")
+            .args(["x509", "-in", cert_file.path().to_str().unwrap(), "-text", "-noout"])
+            .output()
+            .expect("Failed to run openssl");
+
+        let text = String::from_utf8_lossy(&output.stdout);
+
+        assert!(
+            text.contains("DNS:example.com"),
+            "Expected DNS SAN for hostname but got:\n{}",
+            text
+        );
+    }
+
+    #[test]
+    fn test_sign_for_hostname_localhost_produces_valid_cert() {
+        // This tests the no-SNI fallback path — "localhost" is what
+        // DynamicCertResolver uses when no SNI is provided
+        let ca = CertificateAuthority::generate().unwrap();
+        let (cert_der, key_der) = ca.sign_for_hostname("localhost", None).unwrap();
+
+        assert!(!cert_der.is_empty());
+        assert!(!key_der.is_empty());
+
+        // Verify the cert is valid against the CA
+        use std::io::Write;
+        let cert_pem = der_to_pem(&cert_der, "CERTIFICATE");
+        let ca_cert_pem = ca.ca_cert_pem();
+
+        let mut ca_file = tempfile::NamedTempFile::new().unwrap();
+        ca_file.write_all(ca_cert_pem.as_bytes()).unwrap();
+        ca_file.flush().unwrap();
+
+        let mut cert_file = tempfile::NamedTempFile::new().unwrap();
+        cert_file.write_all(cert_pem.as_bytes()).unwrap();
+        cert_file.flush().unwrap();
+
+        let output = std::process::Command::new("openssl")
+            .args([
+                "verify",
+                "-CAfile", ca_file.path().to_str().unwrap(),
+                cert_file.path().to_str().unwrap(),
+            ])
+            .output()
+            .expect("Failed to run openssl verify");
+
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            stdout.contains("OK"),
+            "localhost cert should verify against CA:\n{}",
+            stdout
+        );
+    }
+
+    #[test]
+    fn test_dynamic_cert_resolver_is_debug_send_sync() {
+        // Compile-time check: DynamicCertResolver must be Debug + Send + Sync
+        // because ResolvesServerCert requires it
+        fn assert_traits<T: std::fmt::Debug + Send + Sync>() {}
+        assert_traits::<DynamicCertResolver>();
+    }
+
+    #[test]
+    fn test_dynamic_cert_resolver_construction() {
+        let ca = CertificateAuthority::generate().unwrap();
+        let resolver = DynamicCertResolver::new(Arc::new(ca));
+
+        // Verify Debug works
+        let debug_str = format!("{:?}", resolver);
+        assert!(debug_str.contains("DynamicCertResolver"));
+    }
+
+    #[test]
+    fn test_certificate_authority_is_debug() {
+        let ca = CertificateAuthority::generate().unwrap();
+        let debug_str = format!("{:?}", ca);
+        assert!(debug_str.contains("CertificateAuthority"));
     }
 }
 
