@@ -294,9 +294,6 @@ async fn main() -> anyhow::Result<()> {
     let ca = load_or_generate_ca(&db).await?;
     tracing::info!("CA certificate loaded/generated");
 
-    // Load or generate management certificate
-    load_or_generate_mgmt_cert(&db, &ca).await?;
-    tracing::info!("Management certificate loaded/generated");
 
     // Log initial token count from database
     let initial_tokens = db.list_tokens().await?;
@@ -304,6 +301,11 @@ async fn main() -> anyhow::Result<()> {
 
     // Create broadcast channel for real-time activity streaming (SSE)
     let (activity_tx, _activity_rx) = tokio::sync::broadcast::channel(1000);
+
+    // Build DynamicCertResolver for the management API before proxy consumes the CA.
+    // Reconstruct a second CA from PEM because ProxyServer::new takes CA by value.
+    let mgmt_ca = CertificateAuthority::from_pem(&ca.ca_cert_pem(), &ca.ca_key_pem())?;
+    let resolver = gap_lib::DynamicCertResolver::new(Arc::new(mgmt_ca));
 
     // Create ProxyServer with database and activity broadcast
     let mut proxy = ProxyServer::new(
@@ -326,24 +328,18 @@ async fn main() -> anyhow::Result<()> {
     #[cfg(target_os = "macos")]
     let _check_handle = spawn_periodic_binary_check();
 
-    // Load management certificate for HTTPS
-    let mgmt_cert_pem = db.get_config("mgmt:cert").await?
-        .ok_or_else(|| anyhow::anyhow!("Management certificate not found"))?;
-    let mgmt_key_pem = db.get_config("mgmt:key").await?
-        .ok_or_else(|| anyhow::anyhow!("Management key not found"))?;
+    // Create TLS configuration using DynamicCertResolver (generates certs on-the-fly)
+    let mut server_config = rustls::ServerConfig::builder()
+        .with_no_client_auth()
+        .with_cert_resolver(Arc::new(resolver));
+    server_config.alpn_protocols = vec![b"h2".to_vec(), b"http/1.1".to_vec()];
+    let tls_config = axum_server::tls_rustls::RustlsConfig::from_config(Arc::new(server_config));
 
-    // Create TLS configuration
-    let tls_config = axum_server::tls_rustls::RustlsConfig::from_pem(
-        mgmt_cert_pem,
-        mgmt_key_pem
-    ).await?;
-
-    // Create API state with database, TLS config, and activity broadcast
-    let mut api_state = api::ApiState::new_with_tls(
+    // Create API state with database and activity broadcast
+    let mut api_state = api::ApiState::new(
         config.proxy_port,
         config.api_port,
         Arc::clone(&db),
-        tls_config.clone(),
     );
     api_state.activity_tx = Some(activity_tx);
 
@@ -453,46 +449,6 @@ async fn load_or_generate_ca(db: &GapDatabase) -> anyhow::Result<CertificateAuth
     Ok(ca)
 }
 
-/// Load management certificate from database or generate a new one
-async fn load_or_generate_mgmt_cert(
-    db: &GapDatabase,
-    ca: &CertificateAuthority,
-) -> anyhow::Result<()> {
-    use gap_lib::tls::der_to_pem;
-
-    const MGMT_CERT_KEY: &str = "mgmt:cert";
-    const MGMT_KEY_KEY: &str = "mgmt:key";
-
-    // Try to load from database
-    match (db.get_config(MGMT_CERT_KEY).await?, db.get_config(MGMT_KEY_KEY).await?) {
-        (Some(_cert_pem), Some(_key_pem)) => {
-            tracing::info!("Loaded management certificate from database");
-            Ok(())
-        }
-        _ => {
-            // Generate new management certificate with default SANs
-            tracing::info!("Generating new management certificate");
-            let sans = vec![
-                "DNS:localhost".to_string(),
-                "IP:127.0.0.1".to_string(),
-                "IP:::1".to_string(),
-            ];
-
-            let (cert_der, key_der) = ca.sign_server_cert(&sans)?;
-
-            // Convert DER to PEM format using library function
-            let cert_pem = der_to_pem(&cert_der, "CERTIFICATE");
-            let key_pem = der_to_pem(&key_der, "PRIVATE KEY");
-
-            // Save to database
-            db.set_config(MGMT_CERT_KEY, cert_pem.as_bytes()).await?;
-            db.set_config(MGMT_KEY_KEY, key_pem.as_bytes()).await?;
-            tracing::info!("Management certificate saved to database");
-
-            Ok(())
-        }
-    }
-}
 
 #[cfg(test)]
 mod tests {
@@ -584,56 +540,6 @@ mod tests {
         let args = Args::parse_from(["gap-server"]);
         assert_eq!(args.proxy_port, 9443);
         assert_eq!(args.api_port, 9080);
-    }
-
-    #[tokio::test]
-    async fn test_load_or_generate_mgmt_cert_creates_new() {
-        // Create an in-memory database
-        let db = GapDatabase::in_memory().await.unwrap();
-        let ca = CertificateAuthority::generate().unwrap();
-
-        // Store the CA
-        db.set_config("ca:cert", ca.ca_cert_pem().as_bytes()).await.unwrap();
-        db.set_config("ca:key", ca.ca_key_pem().as_bytes()).await.unwrap();
-
-        // Call load_or_generate_mgmt_cert - should create new cert with default SANs
-        load_or_generate_mgmt_cert(&db, &ca).await.unwrap();
-
-        // Verify cert and key were stored
-        let stored_cert = db.get_config("mgmt:cert").await.unwrap();
-        let stored_key = db.get_config("mgmt:key").await.unwrap();
-
-        assert!(stored_cert.is_some());
-        assert!(stored_key.is_some());
-
-        // Verify they look like PEM
-        let cert_str = String::from_utf8(stored_cert.unwrap()).unwrap();
-        let key_str = String::from_utf8(stored_key.unwrap()).unwrap();
-        assert!(cert_str.starts_with("-----BEGIN CERTIFICATE-----"));
-        assert!(key_str.starts_with("-----BEGIN PRIVATE KEY-----"));
-    }
-
-    #[tokio::test]
-    async fn test_load_or_generate_mgmt_cert_loads_existing() {
-        // Create an in-memory database with existing mgmt cert
-        let db = GapDatabase::in_memory().await.unwrap();
-        let ca = CertificateAuthority::generate().unwrap();
-
-        // Simple PEM formatting (good enough for test)
-        let cert_pem = "-----BEGIN CERTIFICATE-----\ntestcert\n-----END CERTIFICATE-----\n";
-        let key_pem = "-----BEGIN PRIVATE KEY-----\ntestkey\n-----END PRIVATE KEY-----\n";
-
-        db.set_config("mgmt:cert", cert_pem.as_bytes()).await.unwrap();
-        db.set_config("mgmt:key", key_pem.as_bytes()).await.unwrap();
-
-        // Call load_or_generate_mgmt_cert - should load existing, not regenerate
-        load_or_generate_mgmt_cert(&db, &ca).await.unwrap();
-
-        // Verify cert wasn't regenerated (still has our test values)
-        let loaded_cert = db.get_config("mgmt:cert").await.unwrap().unwrap();
-        let loaded_key = db.get_config("mgmt:key").await.unwrap().unwrap();
-        assert_eq!(String::from_utf8(loaded_cert).unwrap(), cert_pem);
-        assert_eq!(String::from_utf8(loaded_key).unwrap(), key_pem);
     }
 
     #[test]

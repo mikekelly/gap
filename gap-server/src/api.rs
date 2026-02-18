@@ -44,8 +44,6 @@ pub struct ApiState {
     pub password_hash: Arc<RwLock<Option<String>>>,
     /// Embedded database for all persistent storage
     pub db: Arc<GapDatabase>,
-    /// TLS configuration for hot-reloading certificates
-    pub tls_config: Option<axum_server::tls_rustls::RustlsConfig>,
     /// Broadcast channel for real-time activity streaming (SSE)
     pub activity_tx: Option<tokio::sync::broadcast::Sender<ActivityEntry>>,
 }
@@ -59,25 +57,6 @@ impl ApiState {
             api_port,
             password_hash: Arc::new(RwLock::new(None)),
             db,
-            tls_config: None,
-            activity_tx: None,
-        }
-    }
-
-    /// Create ApiState with TLS config for hot-reloading
-    pub fn new_with_tls(
-        proxy_port: u16,
-        api_port: u16,
-        db: Arc<GapDatabase>,
-        tls_config: axum_server::tls_rustls::RustlsConfig,
-    ) -> Self {
-        Self {
-            start_time: std::time::Instant::now(),
-            proxy_port,
-            api_port,
-            password_hash: Arc::new(RwLock::new(None)),
-            db,
-            tls_config: Some(tls_config),
             activity_tx: None,
         }
     }
@@ -95,7 +74,6 @@ impl ApiState {
             api_port,
             password_hash: Arc::new(RwLock::new(None)),
             db,
-            tls_config: None,
             activity_tx: Some(activity_tx),
         }
     }
@@ -265,9 +243,7 @@ pub struct ActivityQuery {
 
 /// Init request
 #[derive(Debug, Deserialize)]
-pub struct InitRequest {
-    pub management_sans: Option<Vec<String>>,
-}
+pub struct InitRequest {}
 
 /// Init response
 #[derive(Debug, Serialize, Deserialize)]
@@ -306,19 +282,6 @@ pub struct UpdateResponse {
     pub commit_sha: Option<String>,
 }
 
-/// Rotate management certificate request
-#[derive(Debug, Deserialize)]
-pub struct RotateManagementCertRequest {
-    pub sans: Vec<String>,
-}
-
-/// Rotate management certificate response
-#[derive(Debug, Serialize, Deserialize)]
-pub struct RotateManagementCertResponse {
-    pub sans: Vec<String>,
-    pub rotated: bool,
-}
-
 /// API error response
 #[derive(Debug, Serialize)]
 pub struct ApiError {
@@ -350,7 +313,6 @@ pub fn create_router(state: ApiState) -> Router {
         .route("/activity", get(get_activity).post(get_activity))
         .route("/activity/stream", get(activity_stream).post(activity_stream))
         .route("/activity/:request_id/details", get(get_activity_details).post(get_activity_details))
-        .route("/v1/management-cert", post(rotate_management_cert))
         .with_state(state)
 }
 
@@ -373,7 +335,6 @@ async fn init(
     State(state): State<ApiState>,
     body: Bytes,
 ) -> Result<Json<InitResponse>, (StatusCode, String)> {
-    use gap_lib::tls::CertificateAuthority;
     use argon2::password_hash::{rand_core::OsRng, SaltString};
     use argon2::{Argon2, PasswordHasher};
 
@@ -408,59 +369,8 @@ async fn init(
     state.db.set_password_hash(&password_hash).await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to save password hash: {}", e)))?;
 
-    // Load the existing CA from database (it was already generated at server startup)
-    let ca_cert_pem = state.db
-        .get_config("ca:cert")
-        .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to load CA cert: {}", e)))?
-        .ok_or_else(|| (StatusCode::INTERNAL_SERVER_ERROR, "CA not found in storage".to_string()))?;
-
-    let ca_key_pem = state.db
-        .get_config("ca:key")
-        .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to load CA key: {}", e)))?
-        .ok_or_else(|| (StatusCode::INTERNAL_SERVER_ERROR, "CA key not found in storage".to_string()))?;
-
-    let ca_cert_str = String::from_utf8(ca_cert_pem)
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Invalid CA cert encoding: {}", e)))?;
-
-    let ca_key_str = String::from_utf8(ca_key_pem)
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Invalid CA key encoding: {}", e)))?;
-
-    let ca = CertificateAuthority::from_pem(&ca_cert_str, &ca_key_str)
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to load CA: {}", e)))?;
-
     // Return the well-known CA path (CA was already exported at server boot)
     let ca_path = gap_lib::ca_cert_path().to_string_lossy().to_string();
-
-    // Generate management certificate with provided SANs or defaults
-    let management_sans = req.data.management_sans.unwrap_or_else(|| {
-        vec![
-            "DNS:localhost".to_string(),
-            "IP:127.0.0.1".to_string(),
-            "IP:::1".to_string(),
-        ]
-    });
-
-    let (mgmt_cert_der, mgmt_key_der) = ca.sign_server_cert(&management_sans)
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to generate management certificate: {}", e)))?;
-
-    // Convert DER to PEM for storage
-    let mgmt_cert_pem = gap_lib::tls::der_to_pem(&mgmt_cert_der, "CERTIFICATE");
-    let mgmt_key_pem = gap_lib::tls::der_to_pem(&mgmt_key_der, "PRIVATE KEY");
-
-    // Store management cert and key
-    state.db.set_config("mgmt:cert", mgmt_cert_pem.as_bytes()).await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to store management cert: {}", e)))?;
-
-    state.db.set_config("mgmt:key", mgmt_key_pem.as_bytes()).await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to store management key: {}", e)))?;
-
-    // Store the SANs used (for reference)
-    let sans_json = serde_json::to_vec(&management_sans)
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to serialize SANs: {}", e)))?;
-    state.db.set_config("mgmt:sans", &sans_json).await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to store management SANs: {}", e)))?;
 
     Ok(Json(InitResponse { ca_path }))
 }
@@ -911,77 +821,6 @@ async fn get_activity_details(
         Some(d) => Ok(Json(d)),
         None => Err((StatusCode::NOT_FOUND, format!("No details found for request {}", request_id))),
     }
-}
-
-/// POST /v1/management-cert - Rotate management certificate (requires auth)
-async fn rotate_management_cert(
-    State(state): State<ApiState>,
-    body: Bytes,
-) -> Result<Json<RotateManagementCertResponse>, (StatusCode, String)> {
-    use gap_lib::tls::CertificateAuthority;
-
-    // Verify authentication and extract request data
-    let req: RotateManagementCertRequest = verify_auth(&state, &body).await?;
-
-    // Load the CA from database
-    let ca_cert_pem = state.db
-        .get_config("ca:cert")
-        .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to load CA cert: {}", e)))?
-        .ok_or_else(|| (StatusCode::INTERNAL_SERVER_ERROR, "CA not found in storage".to_string()))?;
-
-    let ca_key_pem = state.db
-        .get_config("ca:key")
-        .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to load CA key: {}", e)))?
-        .ok_or_else(|| (StatusCode::INTERNAL_SERVER_ERROR, "CA key not found in storage".to_string()))?;
-
-    let ca_cert_str = String::from_utf8(ca_cert_pem)
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Invalid CA cert encoding: {}", e)))?;
-
-    let ca_key_str = String::from_utf8(ca_key_pem)
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Invalid CA key encoding: {}", e)))?;
-
-    let ca = CertificateAuthority::from_pem(&ca_cert_str, &ca_key_str)
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to load CA: {}", e)))?;
-
-    // Generate new management certificate with provided SANs
-    let (mgmt_cert_der, mgmt_key_der) = ca.sign_server_cert(&req.sans)
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to generate management certificate: {}", e)))?;
-
-    // Convert DER to PEM for storage
-    let mgmt_cert_pem = gap_lib::tls::der_to_pem(&mgmt_cert_der, "CERTIFICATE");
-    let mgmt_key_pem = gap_lib::tls::der_to_pem(&mgmt_key_der, "PRIVATE KEY");
-
-    // Store new management cert and key
-    state.db.set_config("mgmt:cert", mgmt_cert_pem.as_bytes()).await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to store management cert: {}", e)))?;
-
-    state.db.set_config("mgmt:key", mgmt_key_pem.as_bytes()).await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to store management key: {}", e)))?;
-
-    // Store the SANs used (for reference)
-    let sans_json = serde_json::to_vec(&req.sans)
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to serialize SANs: {}", e)))?;
-    state.db.set_config("mgmt:sans", &sans_json).await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to store management SANs: {}", e)))?;
-
-    // Hot-reload TLS config if available
-    if let Some(ref tls_config) = state.tls_config {
-        tls_config.reload_from_pem(
-            mgmt_cert_pem.as_bytes().to_vec(),
-            mgmt_key_pem.as_bytes().to_vec()
-        ).await
-            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to reload TLS config: {}", e)))?;
-        tracing::info!("TLS config reloaded with new certificate");
-    }
-
-    tracing::info!("Rotated management certificate with SANs: {:?}", req.sans);
-
-    Ok(Json(RotateManagementCertResponse {
-        sans: req.sans,
-        rotated: true,
-    }))
 }
 
 /// Query parameters for filtering the activity SSE stream
@@ -2040,81 +1879,19 @@ mod tests {
         assert_eq!(tokens.len(), 0, "Token should be removed from database");
     }
 
+    /// Verify /init returns 200 OK with a ca_path and no longer stores mgmt certs
     #[tokio::test]
     #[serial]
-    async fn test_init_endpoint_with_management_sans() {
-        use gap_lib::tls::CertificateAuthority;
-
+    async fn test_init_endpoint_no_mgmt_cert() {
         let temp_dir = tempfile::tempdir().expect("create temp dir");
         std::env::set_var("GAP_DATA_DIR", temp_dir.path());
 
         let db = create_test_db().await;
-
-        // Pre-create CA in database (as server does at startup)
-        let ca = CertificateAuthority::generate().expect("generate CA");
-        db.set_config("ca:cert", ca.ca_cert_pem().as_bytes()).await.expect("store CA cert");
-        db.set_config("ca:key", ca.ca_key_pem().as_bytes()).await.expect("store CA key");
-
         let state = ApiState::new(9443, 9080, Arc::clone(&db));
         let app = create_router(state);
 
         let password = "testpass123";
 
-        // Create init request with custom management SANs
-        let body = serde_json::json!({
-            "password_hash": password,
-            "management_sans": ["DNS:example.com", "IP:192.168.1.1"]
-        });
-
-        let response = app
-            .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri("/init")
-                    .header("content-type", "application/json")
-                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-
-        assert_eq!(response.status(), StatusCode::OK);
-
-        // Verify management cert and key were stored
-        let mgmt_cert = db.get_config("mgmt:cert").await.expect("get mgmt:cert");
-        assert!(mgmt_cert.is_some(), "Management cert should be stored");
-
-        let mgmt_key = db.get_config("mgmt:key").await.expect("get mgmt:key");
-        assert!(mgmt_key.is_some(), "Management key should be stored");
-
-        // Verify the stored SANs
-        let mgmt_sans = db.get_config("mgmt:sans").await.expect("get mgmt:sans");
-        assert!(mgmt_sans.is_some(), "Management SANs should be stored");
-        let sans: Vec<String> = serde_json::from_slice(&mgmt_sans.unwrap()).expect("parse SANs JSON");
-        assert_eq!(sans, vec!["DNS:example.com", "IP:192.168.1.1"]);
-    }
-
-    #[tokio::test]
-    #[serial]
-    async fn test_init_endpoint_with_default_management_sans() {
-        use gap_lib::tls::CertificateAuthority;
-
-        let temp_dir = tempfile::tempdir().expect("create temp dir");
-        std::env::set_var("GAP_DATA_DIR", temp_dir.path());
-
-        let db = create_test_db().await;
-
-        // Pre-create CA in database (as server does at startup)
-        let ca = CertificateAuthority::generate().expect("generate CA");
-        db.set_config("ca:cert", ca.ca_cert_pem().as_bytes()).await.expect("store CA cert");
-        db.set_config("ca:key", ca.ca_key_pem().as_bytes()).await.expect("store CA key");
-
-        let state = ApiState::new(9443, 9080, Arc::clone(&db));
-        let app = create_router(state);
-
-        let password = "testpass123";
-
-        // Create init request without management SANs (should use defaults)
         let body = serde_json::json!({
             "password_hash": password
         });
@@ -2133,189 +1910,23 @@ mod tests {
 
         assert_eq!(response.status(), StatusCode::OK);
 
-        // Verify management cert and key were stored
-        let mgmt_cert = db.get_config("mgmt:cert").await.expect("get mgmt:cert");
-        assert!(mgmt_cert.is_some(), "Management cert should be stored");
-
-        let mgmt_key = db.get_config("mgmt:key").await.expect("get mgmt:key");
-        assert!(mgmt_key.is_some(), "Management key should be stored");
-
-        // Verify the default SANs were used
-        let mgmt_sans = db.get_config("mgmt:sans").await.expect("get mgmt:sans");
-        assert!(mgmt_sans.is_some(), "Management SANs should be stored");
-        let sans: Vec<String> = serde_json::from_slice(&mgmt_sans.unwrap()).expect("parse SANs JSON");
-        assert_eq!(sans, vec!["DNS:localhost", "IP:127.0.0.1", "IP:::1"]);
-    }
-
-    #[tokio::test]
-    #[serial]
-    async fn test_rotate_management_cert_endpoint() {
-        use gap_lib::tls::CertificateAuthority;
-        use argon2::password_hash::{rand_core::OsRng, SaltString};
-        use argon2::{Argon2, PasswordHasher};
-
-        let temp_dir = tempfile::tempdir().expect("create temp dir");
-        std::env::set_var("GAP_DATA_DIR", temp_dir.path());
-
-        let db = create_test_db().await;
-
-        // Pre-create CA in database
-        let ca = CertificateAuthority::generate().expect("generate CA");
-        db.set_config("ca:cert", ca.ca_cert_pem().as_bytes()).await.expect("store CA cert");
-        db.set_config("ca:key", ca.ca_key_pem().as_bytes()).await.expect("store CA key");
-
-        // Pre-create initial management cert
-        let initial_sans = vec!["DNS:localhost".to_string()];
-        let (initial_cert_der, initial_key_der) = ca.sign_server_cert(&initial_sans).expect("sign initial cert");
-        let initial_cert_pem = gap_lib::tls::der_to_pem(&initial_cert_der, "CERTIFICATE");
-        let initial_key_pem = gap_lib::tls::der_to_pem(&initial_key_der, "PRIVATE KEY");
-        db.set_config("mgmt:cert", initial_cert_pem.as_bytes()).await.expect("store initial cert");
-        db.set_config("mgmt:key", initial_key_pem.as_bytes()).await.expect("store initial key");
-
-        let state = ApiState::new(9443, 9080, Arc::clone(&db));
-
-        // Set up password hash
-        let password = "testpass123";
-        let salt = SaltString::generate(&mut OsRng);
-        let argon2 = Argon2::default();
-        let password_hash = argon2.hash_password(password.as_bytes(), &salt).unwrap().to_string();
-        state.set_password_hash(password_hash).await;
-
-        let app = create_router(state);
-
-        // Rotate certificate with new SANs
-        let body = serde_json::json!({
-            "password_hash": password,
-            "sans": ["DNS:example.com", "IP:192.168.1.100"]
-        });
-
-        let response = app
-            .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri("/v1/management-cert")
-                    .header("content-type", "application/json")
-                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-
-        assert_eq!(response.status(), StatusCode::OK);
-
-        // Verify new cert and key were stored
-        let new_cert = db.get_config("mgmt:cert").await.expect("get new cert");
-        assert!(new_cert.is_some());
-        let new_cert_pem = String::from_utf8(new_cert.unwrap()).expect("parse cert PEM");
-
-        // Cert should be different from initial
-        assert_ne!(new_cert_pem, initial_cert_pem);
-
-        // Verify the response contains cert details
         let body_bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
             .await
             .unwrap();
-        let response_json: serde_json::Value = serde_json::from_slice(&body_bytes).unwrap();
+        let init_response: InitResponse = serde_json::from_slice(&body_bytes).unwrap();
 
-        // Response should have sans field
-        assert!(response_json.get("sans").is_some());
-        let returned_sans = response_json["sans"].as_array().unwrap();
-        assert_eq!(returned_sans.len(), 2);
-    }
+        // Should return a CA path
+        assert!(!init_response.ca_path.is_empty());
 
-    #[tokio::test]
-    #[serial]
-    async fn test_rotate_management_cert_requires_auth() {
-        let db = create_test_db().await;
-        let state = ApiState::new(9443, 9080, db);
-        let app = create_router(state);
+        // Management cert/key/SANs should NOT be stored in database
+        let mgmt_cert = db.get_config("mgmt:cert").await.expect("get mgmt:cert");
+        assert!(mgmt_cert.is_none(), "Management cert should NOT be stored");
 
-        // Try to rotate without password
-        let body = serde_json::json!({
-            "sans": ["DNS:example.com"]
-        });
+        let mgmt_key = db.get_config("mgmt:key").await.expect("get mgmt:key");
+        assert!(mgmt_key.is_none(), "Management key should NOT be stored");
 
-        let response = app
-            .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri("/v1/management-cert")
-                    .header("content-type", "application/json")
-                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-
-        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
-    }
-
-    // Test for TLS hot-swap - verify rotate_management_cert updates storage and attempts reload
-    #[tokio::test]
-    #[serial]
-    async fn test_rotate_management_cert_hot_swap() {
-        use gap_lib::tls::CertificateAuthority;
-        use argon2::password_hash::{rand_core::OsRng, SaltString};
-        use argon2::{Argon2, PasswordHasher};
-
-        let temp_dir = tempfile::tempdir().expect("create temp dir");
-        std::env::set_var("GAP_DATA_DIR", temp_dir.path());
-
-        let db = create_test_db().await;
-
-        // Pre-create CA in database
-        let ca = CertificateAuthority::generate().expect("generate CA");
-        db.set_config("ca:cert", ca.ca_cert_pem().as_bytes()).await.expect("store CA cert");
-        db.set_config("ca:key", ca.ca_key_pem().as_bytes()).await.expect("store CA key");
-
-        // Pre-create initial management cert
-        let initial_sans = vec!["DNS:localhost".to_string()];
-        let (initial_cert_der, initial_key_der) = ca.sign_server_cert(&initial_sans).expect("sign initial cert");
-        let initial_cert_pem = gap_lib::tls::der_to_pem(&initial_cert_der, "CERTIFICATE");
-        let initial_key_pem = gap_lib::tls::der_to_pem(&initial_key_der, "PRIVATE KEY");
-        db.set_config("mgmt:cert", initial_cert_pem.as_bytes()).await.expect("store initial cert");
-        db.set_config("mgmt:key", initial_key_pem.as_bytes()).await.expect("store initial key");
-
-        // Create ApiState without TLS config (tls_config field will be None)
-        // This simulates the scenario where hot-swap is optional
-        let state = ApiState::new(9443, 9080, Arc::clone(&db));
-
-        // Set up password hash
-        let password = "testpass123";
-        let salt = SaltString::generate(&mut OsRng);
-        let argon2 = Argon2::default();
-        let password_hash = argon2.hash_password(password.as_bytes(), &salt).unwrap().to_string();
-        state.set_password_hash(password_hash).await;
-
-        let app = create_router(state);
-
-        // Rotate certificate with new SANs
-        let body = serde_json::json!({
-            "password_hash": password,
-            "sans": ["DNS:example.com", "IP:192.168.1.100"]
-        });
-
-        let response = app
-            .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri("/v1/management-cert")
-                    .header("content-type", "application/json")
-                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-
-        assert_eq!(response.status(), StatusCode::OK);
-
-        // Verify new cert and key were stored
-        let new_cert = db.get_config("mgmt:cert").await.expect("get new cert");
-        assert!(new_cert.is_some());
-        let new_cert_pem = String::from_utf8(new_cert.unwrap()).expect("parse cert PEM");
-
-        // Cert should be different from initial (rotation occurred)
-        assert_ne!(new_cert_pem, initial_cert_pem);
+        let mgmt_sans = db.get_config("mgmt:sans").await.expect("get mgmt:sans");
+        assert!(mgmt_sans.is_none(), "Management SANs should NOT be stored");
     }
 
     #[tokio::test]
