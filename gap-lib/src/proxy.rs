@@ -56,35 +56,24 @@ impl ProxyServer {
             roots: webpki_roots::TLS_SERVER_ROOTS.iter().cloned().collect(),
         });
 
-        // Generate localhost certificate for the proxy's TLS
-        // Use "localhost" as the hostname since the proxy listens on 127.0.0.1
-        let (cert_der, key_der) = ca
-            .sign_for_hostname("localhost", None)
-            .map_err(|e| GapError::tls(format!("Failed to sign localhost certificate: {}", e)))?;
+        // Wrap CA in Arc early so it can be shared between the resolver and the struct
+        let ca = Arc::new(ca);
 
-        // Convert DER bytes to rustls types
-        // Include CA cert in chain so clients can verify
-        let certs = vec![
-            CertificateDer::from(cert_der),
-            CertificateDer::from(ca.ca_cert_der()),
-        ];
-
-        // Parse private key from DER
-        let key_der = rustls::pki_types::PrivateKeyDer::try_from(key_der)
-            .map_err(|e| GapError::tls(format!("Failed to parse key DER: {:?}", e)))?;
-
-        // Build server config for proxy TLS
+        // Use DynamicCertResolver so the proxy presents a cert matching whatever
+        // hostname the client connects with (e.g. "gap-server" in Docker, "localhost"
+        // locally). The previous static "localhost" cert caused TLS hostname mismatches
+        // when Docker tests connected to gap-server:9443.
+        let resolver = crate::tls::DynamicCertResolver::new(Arc::clone(&ca));
         let proxy_server_config = ServerConfig::builder()
             .with_no_client_auth()
-            .with_single_cert(certs, key_der)
-            .map_err(|e| GapError::tls(format!("Failed to create proxy server config: {}", e)))?;
+            .with_cert_resolver(Arc::new(resolver));
 
         let proxy_acceptor = TlsAcceptor::from(Arc::new(proxy_server_config));
 
         Ok(Self {
             port,
             bind_address,
-            ca: Arc::new(ca),
+            ca,
             db,
             upstream_root_certs,
             proxy_acceptor,
@@ -105,35 +94,24 @@ impl ProxyServer {
         upstream_root_certs: Arc<rustls::RootCertStore>,
         bind_address: String,
     ) -> Result<Self> {
-        // Generate localhost certificate for the proxy's TLS
-        // Use "localhost" as the hostname since the proxy listens on 127.0.0.1
-        let (cert_der, key_der) = ca
-            .sign_for_hostname("localhost", None)
-            .map_err(|e| GapError::tls(format!("Failed to sign localhost certificate: {}", e)))?;
+        // Wrap CA in Arc early so it can be shared between the resolver and the struct
+        let ca = Arc::new(ca);
 
-        // Convert DER bytes to rustls types
-        // Include CA cert in chain so clients can verify
-        let certs = vec![
-            CertificateDer::from(cert_der),
-            CertificateDer::from(ca.ca_cert_der()),
-        ];
-
-        // Parse private key from DER
-        let key_der = rustls::pki_types::PrivateKeyDer::try_from(key_der)
-            .map_err(|e| GapError::tls(format!("Failed to parse key DER: {:?}", e)))?;
-
-        // Build server config for proxy TLS
+        // Use DynamicCertResolver so the proxy presents a cert matching whatever
+        // hostname the client connects with (e.g. "gap-server" in Docker, "localhost"
+        // locally). The previous static "localhost" cert caused TLS hostname mismatches
+        // when Docker tests connected to gap-server:9443.
+        let resolver = crate::tls::DynamicCertResolver::new(Arc::clone(&ca));
         let proxy_server_config = ServerConfig::builder()
             .with_no_client_auth()
-            .with_single_cert(certs, key_der)
-            .map_err(|e| GapError::tls(format!("Failed to create proxy server config: {}", e)))?;
+            .with_cert_resolver(Arc::new(resolver));
 
         let proxy_acceptor = TlsAcceptor::from(Arc::new(proxy_server_config));
 
         Ok(Self {
             port,
             bind_address,
-            ca: Arc::new(ca),
+            ca,
             db,
             upstream_root_certs,
             proxy_acceptor,
