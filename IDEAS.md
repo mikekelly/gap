@@ -8,6 +8,7 @@ Raw thoughts, not yet evaluated.
         - for mac: encryption/decryption handled by keychain?
 - Activity log
 
+- crypto API for the plugin runtime (mTLS, HTTP signature, etc)(mTLS, HTTP signature, etc)
 - Transparent proxy mode (capture and forward all HTTP(S) traffic) related: SOCKS proxy
     - This is likely dependent on in memory database for recording and analysing activity (occasional flush to disk)
 - related to above: mitmproxy + gap to provide transparent proxy (for monitoring) and explicit proxy (for credential injection)
