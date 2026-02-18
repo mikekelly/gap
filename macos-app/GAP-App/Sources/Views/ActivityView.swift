@@ -347,12 +347,21 @@ struct FilterField: View {
 struct ActivityEntryRow: View {
     let entry: ActivityEntry
     @State private var isExpanded = false
+    @EnvironmentObject var appState: AppState
+    @State private var showDetailSheet = false
+    @State private var detailsLoading = false
+    @State private var detailsError: String? = nil
 
     var body: some View {
         DisclosureGroup(isExpanded: $isExpanded) {
             detailView
         } label: {
             compactRow
+        }
+        .sheet(isPresented: $showDetailSheet) {
+            if let details = appState.selectedRequestDetails {
+                RequestDetailSheet(entry: entry, details: details)
+            }
         }
     }
 
@@ -385,6 +394,18 @@ struct ActivityEntryRow: View {
                 .font(.system(.caption, design: .monospaced))
                 .lineLimit(1)
                 .truncationMode(.middle)
+
+            // Rejection badge
+            if entry.status == 0, let stage = entry.rejectionStage {
+                Text(stage)
+                    .font(.caption2)
+                    .fontWeight(.medium)
+                    .foregroundColor(.white)
+                    .padding(.horizontal, 6)
+                    .padding(.vertical, 1)
+                    .background(Color.red.opacity(0.8))
+                    .cornerRadius(3)
+            }
 
             Spacer()
 
@@ -439,6 +460,66 @@ struct ActivityEntryRow: View {
             DetailRow(label: "Full URL", value: entry.url, monospaced: true)
 
             DetailRow(label: "Timestamp", value: entry.timestamp, monospaced: true)
+
+            // Rejection info
+            if let stage = entry.rejectionStage {
+                DetailRow(label: "Rejection", value: stage, monospaced: false)
+            }
+            if let reason = entry.rejectionReason {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Rejection Reason")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                        .fontWeight(.medium)
+                    Text(reason)
+                        .font(.system(.caption, design: .monospaced))
+                        .foregroundColor(.red)
+                        .textSelection(.enabled)
+                        .padding(6)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .background(Color.red.opacity(0.05))
+                        .cornerRadius(4)
+                }
+            }
+
+            // View Details button
+            if let requestId = entry.requestId, !requestId.isEmpty {
+                HStack {
+                    Spacer()
+                    Button(action: {
+                        Task {
+                            detailsLoading = true
+                            detailsError = nil
+                            do {
+                                try await appState.loadRequestDetails(requestId: requestId)
+                                showDetailSheet = true
+                            } catch {
+                                detailsError = error.localizedDescription
+                            }
+                            detailsLoading = false
+                        }
+                    }) {
+                        HStack(spacing: 4) {
+                            if detailsLoading {
+                                ProgressView()
+                                    .scaleEffect(0.6)
+                            }
+                            Text("View Full Details")
+                                .font(.caption)
+                            Image(systemName: "arrow.up.right.square")
+                                .font(.caption)
+                        }
+                    }
+                    .disabled(detailsLoading)
+                }
+                .padding(.top, 4)
+
+                if let error = detailsError {
+                    Text(error)
+                        .font(.caption2)
+                        .foregroundColor(.red)
+                }
+            }
         }
         .padding(.vertical, 4)
     }
@@ -475,6 +556,7 @@ struct ActivityEntryRow: View {
 
     private func statusColor(_ status: Int) -> Color {
         switch status {
+        case 0: return .red
         case 200..<300: return .green
         case 300..<400: return .yellow
         case 400..<500: return .orange
@@ -492,6 +574,203 @@ struct ActivityEntryRow: View {
             return prettyStr
         }
         return headers
+    }
+}
+
+// MARK: - Request Detail Sheet
+
+/// Full detail sheet showing three phases of a proxied request
+struct RequestDetailSheet: View {
+    let entry: ActivityEntry
+    let details: RequestDetails
+    @Environment(\.dismiss) var dismiss
+
+    var body: some View {
+        VStack(spacing: 0) {
+            // Header
+            HStack {
+                VStack(alignment: .leading) {
+                    Text("\(entry.method) \(entry.url)")
+                        .font(.headline)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                    HStack(spacing: 8) {
+                        Text("Status: \(entry.status)")
+                            .font(.caption)
+                        if let plugin = entry.pluginName {
+                            Text("Plugin: \(plugin)")
+                                .font(.caption)
+                        }
+                    }
+                    .foregroundColor(.secondary)
+                }
+                Spacer()
+                Button("Done") { dismiss() }
+            }
+            .padding()
+
+            Divider()
+
+            ScrollView {
+                VStack(alignment: .leading, spacing: 16) {
+                    // Rejection info (if present)
+                    if let stage = entry.rejectionStage {
+                        GroupBox {
+                            VStack(alignment: .leading, spacing: 4) {
+                                HStack {
+                                    Image(systemName: "xmark.octagon.fill")
+                                        .foregroundColor(.red)
+                                    Text("Rejected at: \(stage)")
+                                        .fontWeight(.medium)
+                                }
+                                if let reason = entry.rejectionReason {
+                                    Text(reason)
+                                        .font(.system(.body, design: .monospaced))
+                                        .foregroundColor(.red)
+                                }
+                            }
+                        }
+                    }
+
+                    // Section 1: Incoming Request
+                    if details.reqHeaders != nil || details.reqBodyString != nil {
+                        DisclosureGroup("Incoming Request (Pre-Transform)") {
+                            VStack(alignment: .leading, spacing: 8) {
+                                if let headers = details.reqHeaders {
+                                    HeadersSection(title: "Headers", json: headers)
+                                }
+                                if let body = details.reqBodyString {
+                                    BodySection(title: "Body", text: body)
+                                }
+                            }
+                            .padding(.top, 4)
+                        }
+                    }
+
+                    // Section 2: Transformed Request
+                    if details.transformedHeaders != nil || details.transformedBodyString != nil || details.transformedUrl != nil {
+                        DisclosureGroup("Transformed Request (Post-Plugin)") {
+                            VStack(alignment: .leading, spacing: 8) {
+                                if let url = details.transformedUrl {
+                                    DetailRow(label: "URL", value: url, monospaced: true)
+                                }
+                                if let headers = details.transformedHeaders {
+                                    HeadersSection(title: "Headers", json: headers)
+                                }
+                                if let body = details.transformedBodyString {
+                                    BodySection(title: "Body", text: body)
+                                }
+                            }
+                            .padding(.top, 4)
+                        }
+                    }
+
+                    // Section 3: Origin Response
+                    if details.responseStatus != nil || details.responseHeaders != nil || details.responseBodyString != nil {
+                        DisclosureGroup("Origin Response") {
+                            VStack(alignment: .leading, spacing: 8) {
+                                if let status = details.responseStatus {
+                                    DetailRow(label: "Status", value: "\(status)", monospaced: false)
+                                }
+                                if let headers = details.responseHeaders {
+                                    HeadersSection(title: "Headers", json: headers)
+                                }
+                                if let body = details.responseBodyString {
+                                    BodySection(title: "Body", text: body)
+                                }
+                            }
+                            .padding(.top, 4)
+                        }
+                    }
+
+                    if details.bodyTruncated {
+                        HStack {
+                            Image(systemName: "exclamationmark.triangle")
+                                .foregroundColor(.orange)
+                            Text("Some bodies were truncated to 64KB")
+                                .font(.caption)
+                                .foregroundColor(.orange)
+                        }
+                    }
+                }
+                .padding()
+            }
+        }
+        .frame(minWidth: 600, minHeight: 400)
+        .frame(idealWidth: 700, idealHeight: 500)
+    }
+}
+
+// MARK: - Headers Section
+
+/// Display headers as YAML-style key: value pairs
+struct HeadersSection: View {
+    let title: String
+    let json: String
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 2) {
+            Text(title)
+                .font(.caption)
+                .foregroundColor(.secondary)
+                .fontWeight(.medium)
+            Text(formatHeadersYaml(json))
+                .font(.system(.caption, design: .monospaced))
+                .textSelection(.enabled)
+                .padding(6)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .background(Color(NSColor.textBackgroundColor))
+                .cornerRadius(4)
+        }
+    }
+
+    private func formatHeadersYaml(_ json: String) -> String {
+        guard let data = json.data(using: .utf8),
+              let dict = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            return json
+        }
+        return dict.sorted(by: { $0.key < $1.key })
+            .map { "\($0.key): \($0.value)" }
+            .joined(separator: "\n")
+    }
+}
+
+// MARK: - Body Section
+
+/// Display body text with expand/collapse
+struct BodySection: View {
+    let title: String
+    let text: String
+    @State private var isExpanded = false
+
+    private let previewLimit = 500
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 2) {
+            Text(title)
+                .font(.caption)
+                .foregroundColor(.secondary)
+                .fontWeight(.medium)
+
+            let displayText = (!isExpanded && text.count > previewLimit)
+                ? String(text.prefix(previewLimit)) + "..."
+                : text
+
+            Text(displayText)
+                .font(.system(.caption, design: .monospaced))
+                .textSelection(.enabled)
+                .padding(6)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .background(Color(NSColor.textBackgroundColor))
+                .cornerRadius(4)
+
+            if text.count > previewLimit {
+                Button(isExpanded ? "Show less" : "Show full (\(text.count) chars)") {
+                    isExpanded.toggle()
+                }
+                .font(.caption)
+            }
+        }
     }
 }
 

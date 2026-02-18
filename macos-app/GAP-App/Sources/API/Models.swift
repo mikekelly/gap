@@ -140,6 +140,8 @@ struct ActivityEntry: Codable, Identifiable {
     let pluginSha: String?
     let sourceHash: String?
     let requestHeaders: String?
+    let rejectionStage: String?
+    let rejectionReason: String?
 
     var id: String { "\(timestamp)-\(url)-\(requestId ?? "")" }
 
@@ -151,6 +153,57 @@ struct ActivityEntry: Codable, Identifiable {
         case pluginSha = "plugin_sha"
         case sourceHash = "source_hash"
         case requestHeaders = "request_headers"
+        case rejectionStage = "rejection_stage"
+        case rejectionReason = "rejection_reason"
+    }
+}
+
+/// Detailed request/response data for a single proxied request
+struct RequestDetails: Codable {
+    let requestId: String
+    // Pre-transform (incoming from agent)
+    let reqHeaders: String?
+    let reqBody: [UInt8]?
+    // Post-transform (after plugin, scrubbed)
+    let transformedUrl: String?
+    let transformedHeaders: String?
+    let transformedBody: [UInt8]?
+    // Origin response (scrubbed)
+    let responseStatus: Int?
+    let responseHeaders: String?
+    let responseBody: [UInt8]?
+    // Metadata
+    let bodyTruncated: Bool
+
+    enum CodingKeys: String, CodingKey {
+        case requestId = "request_id"
+        case reqHeaders = "req_headers"
+        case reqBody = "req_body"
+        case transformedUrl = "transformed_url"
+        case transformedHeaders = "transformed_headers"
+        case transformedBody = "transformed_body"
+        case responseStatus = "response_status"
+        case responseHeaders = "response_headers"
+        case responseBody = "response_body"
+        case bodyTruncated = "body_truncated"
+    }
+
+    /// Get req_body as a UTF-8 string (or hex for binary)
+    var reqBodyString: String? {
+        guard let bytes = reqBody, !bytes.isEmpty else { return nil }
+        return String(bytes: bytes, encoding: .utf8) ?? "<binary \(bytes.count) bytes>"
+    }
+
+    /// Get transformed_body as a UTF-8 string (or hex for binary)
+    var transformedBodyString: String? {
+        guard let bytes = transformedBody, !bytes.isEmpty else { return nil }
+        return String(bytes: bytes, encoding: .utf8) ?? "<binary \(bytes.count) bytes>"
+    }
+
+    /// Get response_body as a UTF-8 string (or hex for binary)
+    var responseBodyString: String? {
+        guard let bytes = responseBody, !bytes.isEmpty else { return nil }
+        return String(bytes: bytes, encoding: .utf8) ?? "<binary \(bytes.count) bytes>"
     }
 }
 

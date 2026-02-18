@@ -28,6 +28,9 @@ class AppState: ObservableObject {
     @Published var isStreaming = false
     @Published var streamError: String? = nil
 
+    // Request details state
+    @Published var selectedRequestDetails: RequestDetails? = nil
+
     private var streamTask: Task<Void, Never>? = nil
 
     let client = GAPClient()
@@ -163,6 +166,17 @@ class AppState: ObservableObject {
         self.activity = response.entries
     }
 
+    /// Load detailed request/response data for a specific request.
+    ///
+    /// - Parameter requestId: The request correlation ID
+    /// - Throws: GAPError if the request fails
+    func loadRequestDetails(requestId: String) async throws {
+        guard serverRunning else { return }
+        guard let hash = passwordHash else { return }
+        let details = try await client.getRequestDetails(requestId: requestId, passwordHash: hash)
+        self.selectedRequestDetails = details
+    }
+
     /// Start the SSE activity stream. Entries are inserted at the front of streamEntries.
     func startStream() {
         guard let hash = passwordHash else { return }
@@ -207,5 +221,6 @@ class AppState: ObservableObject {
         activity = []
         streamEntries = []
         activityFilter = ActivityFilter()
+        selectedRequestDetails = nil
     }
 }

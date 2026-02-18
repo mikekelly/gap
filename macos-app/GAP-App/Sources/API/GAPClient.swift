@@ -265,6 +265,17 @@ class GAPClient {
         return try await performRequest(request)
     }
 
+    /// Get detailed request/response data for a specific request.
+    ///
+    /// - Parameters:
+    ///   - requestId: The request correlation ID
+    ///   - passwordHash: SHA512 hash of the password
+    /// - Returns: RequestDetails with pre-transform, post-transform, and response data
+    /// - Throws: GAPError if the request fails or request not found (404)
+    func getRequestDetails(requestId: String, passwordHash: String) async throws -> RequestDetails {
+        return try await post("/activity/\(requestId)/details", body: ["password_hash": passwordHash])
+    }
+
     /// Connect to the activity SSE stream.
     ///
     /// Returns an AsyncThrowingStream that yields ActivityEntry values as they
