@@ -30,3 +30,25 @@ guard let encoded = value.addingPercentEncoding(withAllowedCharacters: allowed) 
 3. Add logging or error handling for guard failures
 
 **Fix:** Either propagate errors through guard clauses or add UX feedback for precondition failures.
+
+## Intermittent Test Failures with Env Var Mutations
+
+**Symptom:** Tests in `key_provider::tests` (or any tests using `set_var`/`remove_var`) fail intermittently when running with parallel threads. Errors like "GAP_ENCRYPTION_KEY not set" or "Invalid hex" appear in tests that set the var correctly.
+
+**Root Cause:** `std::env::set_var`/`remove_var` mutate process-global state. Parallel test threads race on the same env var.
+
+**Reproducing:** `cargo test -p gap-lib --lib -- --test-threads=32` makes the race trigger within a few runs.
+
+**Fix:** Add a `static Mutex<()>` in the test module and acquire it at the start of every test that touches the shared env var:
+```rust
+static ENV_KEY_MUTEX: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+#[tokio::test]
+async fn my_test() {
+    let _lock = ENV_KEY_MUTEX.lock().unwrap();
+    unsafe { std::env::set_var("MY_VAR", "value") };
+    // ... test body ...
+    unsafe { std::env::remove_var("MY_VAR") };
+}
+```
+The `_lock` binding keeps the mutex held for the test's duration.
