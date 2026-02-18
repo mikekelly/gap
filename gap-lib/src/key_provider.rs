@@ -114,8 +114,14 @@ impl KeyProvider for KeychainKeyProvider {
 mod tests {
     use super::*;
 
+    // GAP_ENCRYPTION_KEY is a process-global env var. Tests that mutate it must
+    // hold this lock for their entire duration to avoid data races when the test
+    // suite runs in parallel (cargo test --test-threads=N).
+    static ENV_KEY_MUTEX: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     #[tokio::test]
     async fn env_key_provider_returns_decoded_hex() {
+        let _lock = ENV_KEY_MUTEX.lock().unwrap();
         // Set a known hex key (32 bytes = 64 hex chars)
         let key_bytes = [0xABu8; 32];
         let hex_key = hex::encode(&key_bytes);
@@ -131,6 +137,7 @@ mod tests {
 
     #[tokio::test]
     async fn env_key_provider_error_when_not_set() {
+        let _lock = ENV_KEY_MUTEX.lock().unwrap();
         unsafe { std::env::remove_var("GAP_ENCRYPTION_KEY") };
 
         let provider = EnvKeyProvider;
@@ -140,6 +147,7 @@ mod tests {
 
     #[tokio::test]
     async fn env_key_provider_error_on_invalid_hex() {
+        let _lock = ENV_KEY_MUTEX.lock().unwrap();
         unsafe { std::env::set_var("GAP_ENCRYPTION_KEY", "not-valid-hex!@#") };
 
         let provider = EnvKeyProvider;
@@ -152,6 +160,7 @@ mod tests {
 
     #[tokio::test]
     async fn env_key_provider_handles_short_key() {
+        let _lock = ENV_KEY_MUTEX.lock().unwrap();
         // A short hex string is valid hex but only 2 bytes
         unsafe { std::env::set_var("GAP_ENCRYPTION_KEY", "abcd") };
 
