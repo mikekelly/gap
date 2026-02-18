@@ -14,7 +14,6 @@ pub mod launchd;
 
 use gap_lib::{database::GapDatabase, key_provider::KeyProvider, tls::CertificateAuthority, Config, ProxyServer};
 use clap::{Parser, Subcommand};
-use std::path::PathBuf;
 use std::sync::Arc;
 
 #[derive(Parser)]
@@ -174,10 +173,33 @@ async fn main() -> anyhow::Result<()> {
 
     // Default: run the server
 
-    // Initialize tracing with configured log level (must be early for logging to work)
-    tracing_subscriber::fmt()
-        .with_env_filter(args.log_level.clone())
+    // Initialize dual stdout + file tracing with configured log level
+    use tracing_subscriber::{fmt, layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
+
+    let session_id = format!("{:08x}", rand::random::<u32>());
+
+    // Compute data_dir early for log directory
+    let data_dir = match args.data_dir.as_deref().or(std::env::var("GAP_DATA_DIR").ok().as_deref()) {
+        Some(dir) => std::path::PathBuf::from(dir),
+        None => dirs::home_dir()
+            .ok_or_else(|| anyhow::anyhow!("Cannot determine home directory"))?
+            .join(".gap"),
+    };
+    std::fs::create_dir_all(&data_dir)?;
+
+    let log_dir = data_dir.join("logs");
+    std::fs::create_dir_all(&log_dir)?;
+
+    let file_appender = tracing_appender::rolling::daily(&log_dir, format!("gap-server-{session_id}"));
+    let (non_blocking, _guard) = tracing_appender::non_blocking(file_appender);
+
+    tracing_subscriber::registry()
+        .with(EnvFilter::new(&args.log_level))
+        .with(fmt::layer())  // stdout
+        .with(fmt::layer().with_writer(non_blocking).with_ansi(false))  // file
         .init();
+
+    tracing::info!(session_id = %session_id, "GAP Server session starting");
 
     // Orphan detection at startup: if running from within Gap.app, check if main app still exists
     #[cfg(target_os = "macos")]
@@ -215,20 +237,26 @@ async fn main() -> anyhow::Result<()> {
     tracing::info!("API port: {}", config.api_port);
 
     // Open database
-    let db_path = match config.data_dir.as_ref() {
-        Some(dir) => {
-            let p = PathBuf::from(dir);
-            std::fs::create_dir_all(&p)?;
-            p.join("gap.db")
-        }
-        None => {
-            let home = dirs::home_dir()
-                .ok_or_else(|| anyhow::anyhow!("Cannot determine home directory"))?;
-            let gap_dir = home.join(".gap");
-            std::fs::create_dir_all(&gap_dir)?;
-            gap_dir.join("gap.db")
-        }
+    let db_path = {
+        std::fs::create_dir_all(&data_dir)?;
+        data_dir.join("gap.db")
     };
+
+    // Log database file state before open attempt
+    let db_path_check = db_path.clone();
+    if db_path_check.exists() {
+        if let Ok(metadata) = std::fs::metadata(&db_path_check) {
+            tracing::info!(
+                path = %db_path_check.display(),
+                size_bytes = metadata.len(),
+                modified = ?metadata.modified().ok(),
+                "Existing database file found"
+            );
+        }
+    } else {
+        tracing::info!(path = %db_path_check.display(), "No existing database file — will create new");
+    }
+
     let db_path_str = db_path.to_str().unwrap();
 
     // Key provider selection precedence:
@@ -242,7 +270,7 @@ async fn main() -> anyhow::Result<()> {
         DbMode::EnvKey => {
             let provider = gap_lib::EnvKeyProvider;
             let key = provider.get_key().await?;
-            tracing::info!("Using encryption key from GAP_ENCRYPTION_KEY");
+            tracing::info!(key_fingerprint = %key_fingerprint(&key), "Using encryption key from GAP_ENCRYPTION_KEY");
             Arc::new(GapDatabase::open(db_path_str, &key).await?)
         }
         DbMode::Unencrypted => {
@@ -253,7 +281,7 @@ async fn main() -> anyhow::Result<()> {
         DbMode::Keychain => {
             let provider = gap_lib::key_provider::KeychainKeyProvider;
             let key = provider.get_key().await?;
-            tracing::info!("Using encryption key from macOS keychain");
+            tracing::info!(key_fingerprint = %key_fingerprint(&key), "Using encryption key from macOS keychain");
             Arc::new(GapDatabase::open(db_path_str, &key).await?)
         }
         DbMode::Error => {
@@ -339,6 +367,14 @@ async fn main() -> anyhow::Result<()> {
         .await?;
 
     Ok(())
+}
+
+/// Produce a 16-char hex fingerprint for debugging key identity.
+fn key_fingerprint(key: &[u8]) -> String {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    key.hash(&mut hasher);
+    format!("{:016x}", hasher.finish())
 }
 
 /// Describes which database mode to use based on environment.

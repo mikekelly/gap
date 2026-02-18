@@ -92,14 +92,37 @@ impl GapDatabase {
 
     /// Open an encrypted database at the given path.
     pub async fn open(path: &str, encryption_key: &[u8]) -> Result<Self> {
-        let db = libsql::Builder::new_local(path)
+        let db = match libsql::Builder::new_local(path)
             .encryption_config(libsql::EncryptionConfig::new(
                 libsql::Cipher::Aes256Cbc,
                 bytes::Bytes::copy_from_slice(encryption_key),
             ))
             .build()
             .await
-            .map_err(|e| GapError::database(format!("Failed to open encrypted database: {}", e)))?;
+        {
+            Ok(db) => db,
+            Err(e) => {
+                // Log file header to help diagnose encryption mismatches
+                if let Ok(bytes) = std::fs::read(path) {
+                    let header = &bytes[..16.min(bytes.len())];
+                    let is_sqlite = header.starts_with(b"SQLite format 3\0");
+                    tracing::error!(
+                        path = %std::path::Path::new(path).display(),
+                        header_hex = %hex::encode(header),
+                        appears_unencrypted = is_sqlite,
+                        error = %e,
+                        "Database open failed — check encryption key"
+                    );
+                } else {
+                    tracing::error!(
+                        path = %std::path::Path::new(path).display(),
+                        error = %e,
+                        "Database open failed"
+                    );
+                }
+                return Err(GapError::database(format!("Failed to open encrypted database: {}", e)));
+            }
+        };
         let conn = db
             .connect()
             .map_err(|e| GapError::database(format!("Failed to connect: {}", e)))?;
@@ -117,10 +140,32 @@ impl GapDatabase {
 
     /// Open an unencrypted database at the given path.
     pub async fn open_unencrypted(path: &str) -> Result<Self> {
-        let db = libsql::Builder::new_local(path)
+        let db = match libsql::Builder::new_local(path)
             .build()
             .await
-            .map_err(|e| GapError::database(format!("Failed to open database: {}", e)))?;
+        {
+            Ok(db) => db,
+            Err(e) => {
+                if let Ok(bytes) = std::fs::read(path) {
+                    let header = &bytes[..16.min(bytes.len())];
+                    let is_sqlite = header.starts_with(b"SQLite format 3\0");
+                    tracing::error!(
+                        path = %std::path::Path::new(path).display(),
+                        header_hex = %hex::encode(header),
+                        appears_unencrypted = is_sqlite,
+                        error = %e,
+                        "Database open failed"
+                    );
+                } else {
+                    tracing::error!(
+                        path = %std::path::Path::new(path).display(),
+                        error = %e,
+                        "Database open failed"
+                    );
+                }
+                return Err(GapError::database(format!("Failed to open database: {}", e)));
+            }
+        };
         let conn = db
             .connect()
             .map_err(|e| GapError::database(format!("Failed to connect: {}", e)))?;
@@ -157,27 +202,36 @@ impl GapDatabase {
     }
 
     async fn run_migrations(&self) -> Result<()> {
+        tracing::debug!("Applying database schema");
         self.conn
             .execute_batch(SCHEMA)
             .await
-            .map_err(|e| GapError::database(format!("Failed to run migrations: {}", e)))?;
+            .map_err(|e| {
+                tracing::error!(error = %e, "Schema creation failed");
+                GapError::database(format!("Failed to run migrations: {}", e))
+            })?;
 
         // Migration for existing DBs — ignore error if columns already exist
-        let _ = self.conn.execute("ALTER TABLE access_logs ADD COLUMN plugin_name TEXT", ()).await;
-        let _ = self.conn.execute("ALTER TABLE access_logs ADD COLUMN plugin_sha TEXT", ()).await;
-        let _ = self.conn.execute("ALTER TABLE access_logs ADD COLUMN source_hash TEXT", ()).await;
-        let _ = self.conn.execute("ALTER TABLE access_logs ADD COLUMN request_headers TEXT", ()).await;
-        let _ = self.conn.execute("ALTER TABLE access_logs ADD COLUMN request_id TEXT", ()).await;
+        let alter_migrations = [
+            "ALTER TABLE access_logs ADD COLUMN plugin_name TEXT",
+            "ALTER TABLE access_logs ADD COLUMN plugin_sha TEXT",
+            "ALTER TABLE access_logs ADD COLUMN source_hash TEXT",
+            "ALTER TABLE access_logs ADD COLUMN request_headers TEXT",
+            "ALTER TABLE access_logs ADD COLUMN request_id TEXT",
+            "ALTER TABLE plugin_versions ADD COLUMN hosts TEXT NOT NULL DEFAULT '[]'",
+            "ALTER TABLE plugin_versions ADD COLUMN credential_schema TEXT NOT NULL DEFAULT '[]'",
+            "ALTER TABLE plugin_versions ADD COLUMN deleted INTEGER NOT NULL DEFAULT 0",
+            "ALTER TABLE plugin_versions ADD COLUMN dangerously_permit_http INTEGER NOT NULL DEFAULT 0",
+            "ALTER TABLE access_logs ADD COLUMN rejection_stage TEXT",
+            "ALTER TABLE access_logs ADD COLUMN rejection_reason TEXT",
+        ];
 
-        // Migrate plugin_versions for append-only plugin storage
-        let _ = self.conn.execute("ALTER TABLE plugin_versions ADD COLUMN hosts TEXT NOT NULL DEFAULT '[]'", ()).await;
-        let _ = self.conn.execute("ALTER TABLE plugin_versions ADD COLUMN credential_schema TEXT NOT NULL DEFAULT '[]'", ()).await;
-        let _ = self.conn.execute("ALTER TABLE plugin_versions ADD COLUMN deleted INTEGER NOT NULL DEFAULT 0", ()).await;
-        let _ = self.conn.execute("ALTER TABLE plugin_versions ADD COLUMN dangerously_permit_http INTEGER NOT NULL DEFAULT 0", ()).await;
-
-        // Migration for rejection tracking
-        let _ = self.conn.execute("ALTER TABLE access_logs ADD COLUMN rejection_stage TEXT", ()).await;
-        let _ = self.conn.execute("ALTER TABLE access_logs ADD COLUMN rejection_reason TEXT", ()).await;
+        for migration in &alter_migrations {
+            match self.conn.execute(migration, ()).await {
+                Ok(_) => tracing::debug!("Migration applied: {}", migration),
+                Err(_) => tracing::debug!("Migration skipped (already applied): {}", migration),
+            }
+        }
 
         Ok(())
     }
