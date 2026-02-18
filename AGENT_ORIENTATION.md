@@ -8,7 +8,7 @@ GAP (Gated Agent Proxy) lets AI agents access APIs without seeing your credentia
 - On macOS, database encryption key stored in traditional macOS keychain
 - No API to retrieve credentials - write-only storage
 - Agent tokens are for audit/tracking only, not authentication
-- Proxy listens on localhost - stolen tokens useless off-machine
+- Proxy defaults to localhost (`--bind-address 127.0.0.1`) - stolen tokens useless off-machine
 
 ## Structure
 - **Cargo workspace** with 3 crates:
@@ -49,6 +49,31 @@ All persistent data (tokens, plugins, credentials, config, activity) is stored i
 - Key provider selection: GAP_ENCRYPTION_KEY env > GAP_DISABLE_ENCRYPTION=1 (unencrypted, dev only) > macOS keychain > error
 - Data directory (--data-dir / GAP_DATA_DIR) affects only the DB file path, never encryption mode
 - Data types (`TokenEntry`, `PluginEntry`, `CredentialEntry`, `TokenMetadata`) live in `types.rs`
+
+## Logging & Diagnostics
+
+**Log files:** `~/.gap/logs/gap-server-{session_id}.YYYY-MM-DD`
+- `session_id` is a random 8-char hex generated per server boot, also logged at startup for correlation
+- Daily rotation — date suffix changes at midnight; old files persist
+- Multiple instances write to separate files (no interleaving)
+- Both stdout and file output; file output has no ANSI color codes
+- Run with `--log-level debug` to see keychain OSStatus codes and migration details
+
+**Bind address:** `--bind-address` controls where proxy and management API listen.
+- Default: `127.0.0.1` (loopback — local macOS use)
+- Docker: `0.0.0.0` (set via Dockerfile CMD for network access)
+- Both proxy (port 9443) and management API (port 9080) use the same bind address
+
+**Encryption key lifecycle:**
+- Key generated on first run: random 32 bytes stored in macOS keychain (traditional, not Data Protection)
+- Keychain identifiers: service=`com.gap.db-encryption`, account=`master-key`, `use_data_protection: false`
+- Same key retrieved on every subsequent open; key fingerprint logged (non-cryptographic hash) for identity tracking
+- Common failure: "file is not a database" = encryption key mismatch between keychain and DB file
+- On DB open failure, the file header (first 16 bytes) is logged as hex — if it starts with `SQLite format 3`, the DB is unencrypted but was opened in encrypted mode (or vice versa)
+
+**LaunchAgent:**
+- Code generates plist with `com.gap.server` label (see `launchd.rs`)
+- Logs written to `~/.gap/logs/` (via the file appender, not stdout redirect)
 
 ## Detailed Reference Documentation
 
