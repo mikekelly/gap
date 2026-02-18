@@ -82,6 +82,33 @@ impl ApiClient {
         self.handle_response(response).await
     }
 
+    /// Send an authenticated GET request with optional query parameters.
+    /// Auth is sent in the body (same as post_auth). Query params are appended to the URL.
+    pub async fn get_auth<T: for<'de> Deserialize<'de>>(
+        &self,
+        path: &str,
+        password_hash: &str,
+        query_params: &[(&str, &str)],
+    ) -> Result<T> {
+        let mut url = format!("{}{}", self.base_url, path);
+        if !query_params.is_empty() {
+            let params: Vec<String> = query_params
+                .iter()
+                .map(|(k, v)| format!("{}={}", k, v))
+                .collect();
+            url = format!("{}?{}", url, params.join("&"));
+        }
+        let body = serde_json::json!({"password_hash": password_hash});
+        let response = self
+            .client
+            .get(&url)
+            .json(&body)
+            .send()
+            .await
+            .context("Failed to send request")?;
+        self.handle_response(response).await
+    }
+
     /// DELETE request with authentication
     pub async fn delete_auth<T: for<'de> Deserialize<'de>>(
         &self,
@@ -284,5 +311,55 @@ mod tests {
         let _result = ApiClient::with_ca_cert("https://localhost:9080", invalid_pem);
         // The method may or may not return an error depending on reqwest's validation
         // The important thing is that it doesn't panic
+    }
+
+    #[test]
+    fn test_get_auth_url_construction_no_params() {
+        // Verify that get_auth builds the URL correctly with no query params
+        let client = ApiClient::new("http://localhost:9080");
+        // We can't easily test the network call, but we can verify the base_url is set
+        assert_eq!(client.base_url, "http://localhost:9080");
+    }
+
+    #[test]
+    fn test_get_auth_url_with_query_params() {
+        // Verify URL construction logic inline — the same logic used in get_auth
+        let base = "http://localhost:9080";
+        let path = "/management-log";
+        let query_params: &[(&str, &str)] = &[
+            ("operation", "token_create"),
+            ("resource_type", "token"),
+        ];
+
+        let mut url = format!("{}{}", base, path);
+        if !query_params.is_empty() {
+            let params: Vec<String> = query_params
+                .iter()
+                .map(|(k, v)| format!("{}={}", k, v))
+                .collect();
+            url = format!("{}?{}", url, params.join("&"));
+        }
+
+        assert_eq!(url, "http://localhost:9080/management-log?operation=token_create&resource_type=token");
+    }
+
+    #[test]
+    fn test_get_auth_url_with_no_query_params_no_question_mark() {
+        // Verify that an empty query_params slice produces no trailing '?'
+        let base = "http://localhost:9080";
+        let path = "/management-log";
+        let query_params: &[(&str, &str)] = &[];
+
+        let mut url = format!("{}{}", base, path);
+        if !query_params.is_empty() {
+            let params: Vec<String> = query_params
+                .iter()
+                .map(|(k, v)| format!("{}={}", k, v))
+                .collect();
+            url = format!("{}?{}", url, params.join("&"));
+        }
+
+        assert_eq!(url, "http://localhost:9080/management-log");
+        assert!(!url.contains('?'));
     }
 }

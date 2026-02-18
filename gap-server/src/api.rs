@@ -345,8 +345,8 @@ pub fn create_router(state: ApiState) -> Router {
         .route("/activity", get(get_activity).post(get_activity))
         .route("/activity/stream", get(activity_stream).post(activity_stream))
         .route("/activity/:request_id/details", get(get_activity_details).post(get_activity_details))
-        .route("/management-log", get(get_management_log).post(get_management_log))
-        .route("/management-log/stream", get(management_log_stream).post(management_log_stream))
+        .route("/management-log", get(get_management_log))
+        .route("/management-log/stream", get(management_log_stream))
         .with_state(state)
 }
 
@@ -2735,7 +2735,7 @@ mod tests {
         let response = app
             .oneshot(
                 Request::builder()
-                    .method("POST")
+                    .method("GET")
                     .uri("/management-log")
                     .header("content-type", "application/json")
                     .body(Body::from(serde_json::to_vec(&serde_json::json!({
@@ -2786,7 +2786,7 @@ mod tests {
         let response = app
             .oneshot(
                 Request::builder()
-                    .method("POST")
+                    .method("GET")
                     .uri("/management-log")
                     .header("content-type", "application/json")
                     .body(Body::from(serde_json::to_vec(&body).unwrap()))

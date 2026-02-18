@@ -2,7 +2,6 @@
 
 use crate::auth::{hash_password, read_password};
 use anyhow::Result;
-use serde_json::json;
 
 pub async fn run(
     server_url: &str,
@@ -19,22 +18,24 @@ pub async fn run(
     if follow {
         anyhow::bail!("Management log streaming not yet implemented");
     } else {
-        let mut query_params = json!({});
+        let mut params: Vec<(&str, String)> = Vec::new();
         if let Some(ref op) = operation {
-            query_params["operation"] = json!(op);
+            params.push(("operation", op.clone()));
         }
         if let Some(ref rt) = resource_type {
-            query_params["resource_type"] = json!(rt);
+            params.push(("resource_type", rt.clone()));
         }
         if let Some(ref rid) = resource_id {
-            query_params["resource_id"] = json!(rid);
+            params.push(("resource_id", rid.clone()));
         }
         if let Some(l) = limit {
-            query_params["limit"] = json!(l);
+            params.push(("limit", l.to_string()));
         }
 
+        let param_refs: Vec<(&str, &str)> = params.iter().map(|(k, v)| (*k, v.as_str())).collect();
+
         let response: crate::client::ManagementLogResponse =
-            client.post_auth("/management-log", &password_hash, query_params).await?;
+            client.get_auth("/management-log", &password_hash, &param_refs).await?;
 
         if response.entries.is_empty() {
             println!("No management log entries.");
