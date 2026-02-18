@@ -27,7 +27,7 @@ log_fail() {
 }
 
 # Configuration
-GAP_SERVER_URL="${GAP_SERVER_URL:-http://gap-server:9080}"
+GAP_SERVER_URL="${GAP_SERVER_URL:-https://gap-server:9080}"
 TEST_PASSWORD="test-integration-password"
 
 log_info "Starting GAP Docker integration tests..."
@@ -41,7 +41,7 @@ echo "===================="
 MAX_RETRIES=30
 RETRY_COUNT=0
 while [ $RETRY_COUNT -lt $MAX_RETRIES ]; do
-    if curl -f -s "$GAP_SERVER_URL/status" > /dev/null 2>&1; then
+    if curl -fks "$GAP_SERVER_URL/status" > /dev/null 2>&1; then
         log_pass "Server health check passed"
         break
     fi
@@ -57,7 +57,7 @@ echo ""
 echo "Test 2: Status check"
 echo "===================="
 
-STATUS_RESPONSE=$(curl -s "$GAP_SERVER_URL/status")
+STATUS_RESPONSE=$(curl -ks "$GAP_SERVER_URL/status")
 if echo "$STATUS_RESPONSE" | grep -q '"version"'; then
     log_pass "Status endpoint returns version info"
 else
@@ -69,7 +69,7 @@ echo ""
 echo "Test 3: Initialize GAP"
 echo "======================"
 
-INIT_RESPONSE=$(curl -s -X POST "$GAP_SERVER_URL/init" \
+INIT_RESPONSE=$(curl -ks -X POST "$GAP_SERVER_URL/init" \
     -H "Content-Type: application/json" \
     -d "{\"password_hash\": \"$(echo -n "$TEST_PASSWORD" | sha512sum | cut -d' ' -f1)\", \"ca_path\": \"/var/lib/gap/ca.crt\"}")
 
@@ -86,7 +86,7 @@ echo ""
 echo "Test 4: Status check (after init)"
 echo "=================================="
 
-STATUS_RESPONSE=$(curl -s "$GAP_SERVER_URL/status")
+STATUS_RESPONSE=$(curl -ks "$GAP_SERVER_URL/status")
 if echo "$STATUS_RESPONSE" | grep -q '"version"'; then
     log_pass "Status endpoint still works after init"
 else
@@ -98,7 +98,7 @@ echo ""
 echo "Test 5: Create agent token"
 echo "=========================="
 
-TOKEN_RESPONSE=$(curl -s -X POST "$GAP_SERVER_URL/tokens/create" \
+TOKEN_RESPONSE=$(curl -ks -X POST "$GAP_SERVER_URL/tokens/create" \
     -H "Content-Type: application/json" \
     -d "{
         \"password_hash\": \"$(echo -n "$TEST_PASSWORD" | sha512sum | cut -d' ' -f1)\",
@@ -117,7 +117,7 @@ echo ""
 echo "Test 6: List tokens"
 echo "==================="
 
-TOKENS_RESPONSE=$(curl -s -X POST "$GAP_SERVER_URL/tokens" \
+TOKENS_RESPONSE=$(curl -ks -X POST "$GAP_SERVER_URL/tokens" \
     -H "Content-Type: application/json" \
     -d "{
         \"password_hash\": \"$(echo -n "$TEST_PASSWORD" | sha512sum | cut -d' ' -f1)\"
@@ -147,7 +147,7 @@ echo ""
 echo "Test 8: Set credential"
 echo "======================"
 
-CRED_STATUS=$(curl -s -o /dev/null -w "%{http_code}" -X POST "$GAP_SERVER_URL/credentials/test-plugin/api_key" \
+CRED_STATUS=$(curl -ks -o /dev/null -w "%{http_code}" -X POST "$GAP_SERVER_URL/credentials/test-plugin/api_key" \
     -H "Content-Type: application/json" \
     -d "{
         \"password_hash\": \"$(echo -n "$TEST_PASSWORD" | sha512sum | cut -d' ' -f1)\",
@@ -166,7 +166,7 @@ echo "Test 9: Install plugin"
 echo "======================"
 
 # Note: Plugin installation requires network access to GitHub
-INSTALL_RESPONSE=$(curl -s -X POST "$GAP_SERVER_URL/plugins/install" \
+INSTALL_RESPONSE=$(curl -ks -X POST "$GAP_SERVER_URL/plugins/install" \
     -H "Content-Type: application/json" \
     -d "{
         \"password_hash\": \"$(echo -n "$TEST_PASSWORD" | sha512sum | cut -d' ' -f1)\",
@@ -185,7 +185,7 @@ echo ""
 echo "Test 10: List plugins"
 echo "====================="
 
-PLUGINS_RESPONSE=$(curl -s -X POST "$GAP_SERVER_URL/plugins" \
+PLUGINS_RESPONSE=$(curl -ks -X POST "$GAP_SERVER_URL/plugins" \
     -H "Content-Type: application/json" \
     -d "{
         \"password_hash\": \"$(echo -n "$TEST_PASSWORD" | sha512sum | cut -d' ' -f1)\"
@@ -230,7 +230,7 @@ if [ -n "$AGENT_TOKEN" ]; then
     # Extract token ID from TOKEN_RESPONSE
     TOKEN_ID=$(echo "$TOKEN_RESPONSE" | jq -r '.id')
 
-    DELETE_STATUS=$(curl -s -o /dev/null -w "%{http_code}" -X DELETE "$GAP_SERVER_URL/tokens/$TOKEN_ID" \
+    DELETE_STATUS=$(curl -ks -o /dev/null -w "%{http_code}" -X DELETE "$GAP_SERVER_URL/tokens/$TOKEN_ID" \
         -H "Content-Type: application/json" \
         -d "{
             \"password_hash\": \"$(echo -n "$TEST_PASSWORD" | sha512sum | cut -d' ' -f1)\"
@@ -376,7 +376,7 @@ PW_HASH="$(echo -n "$TEST_PASSWORD" | sha512sum | cut -d' ' -f1)"
 if [ "$PROXY_TEST_SKIPPED" = true ]; then
     log_warn "Skipping activity tests (proxy tests were skipped — no activity data)"
 else
-    ACTIVITY_RESPONSE=$(curl -s \
+    ACTIVITY_RESPONSE=$(curl -ks \
         -H "Content-Type: application/json" \
         -d "{\"password_hash\": \"$PW_HASH\"}" \
         "$GAP_SERVER_URL/activity")
@@ -394,7 +394,7 @@ else
     echo "Test 15: Activity filtering by method"
     echo "======================================"
 
-    METHOD_RESPONSE=$(curl -s \
+    METHOD_RESPONSE=$(curl -ks \
         -H "Content-Type: application/json" \
         -d "{\"password_hash\": \"$PW_HASH\"}" \
         "$GAP_SERVER_URL/activity?method=GET")
@@ -416,7 +416,7 @@ else
     echo "Test 16: Activity filtering by limit"
     echo "======================================"
 
-    LIMIT_RESPONSE=$(curl -s \
+    LIMIT_RESPONSE=$(curl -ks \
         -H "Content-Type: application/json" \
         -d "{\"password_hash\": \"$PW_HASH\"}" \
         "$GAP_SERVER_URL/activity?limit=1")
@@ -436,7 +436,7 @@ else
     echo "Test 17: Activity filtering by domain"
     echo "======================================"
 
-    DOMAIN_RESPONSE=$(curl -s \
+    DOMAIN_RESPONSE=$(curl -ks \
         -H "Content-Type: application/json" \
         -d "{\"password_hash\": \"$PW_HASH\"}" \
         "$GAP_SERVER_URL/activity?domain=httpbin.org")
@@ -454,7 +454,7 @@ else
     echo "Test 18: Activity entries contain expected fields"
     echo "=================================================="
 
-    FIELDS_RESPONSE=$(curl -s \
+    FIELDS_RESPONSE=$(curl -ks \
         -H "Content-Type: application/json" \
         -d "{\"password_hash\": \"$PW_HASH\"}" \
         "$GAP_SERVER_URL/activity?limit=1")
