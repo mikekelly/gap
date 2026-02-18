@@ -56,7 +56,26 @@ impl ApiClient {
         self.handle_response(response).await
     }
 
-    /// POST request with authentication
+    /// POST request without authentication (used for init endpoint)
+    pub async fn post<T: for<'de> Deserialize<'de>>(
+        &self,
+        path: &str,
+        body: serde_json::Value,
+    ) -> Result<T> {
+        let url = format!("{}{}", self.base_url, path);
+
+        let response = self
+            .client
+            .post(&url)
+            .json(&body)
+            .send()
+            .await
+            .context("Failed to send request")?;
+
+        self.handle_response(response).await
+    }
+
+    /// Send an authenticated POST request with auth in Authorization header.
     pub async fn post_auth<T: for<'de> Deserialize<'de>>(
         &self,
         path: &str,
@@ -65,16 +84,11 @@ impl ApiClient {
     ) -> Result<T> {
         let url = format!("{}{}", self.base_url, path);
 
-        // Merge password_hash into body
-        let mut body_with_auth = body;
-        if let Some(obj) = body_with_auth.as_object_mut() {
-            obj.insert("password_hash".to_string(), serde_json::Value::String(password_hash.to_string()));
-        }
-
         let response = self
             .client
             .post(&url)
-            .json(&body_with_auth)
+            .header("Authorization", format!("Bearer {}", password_hash))
+            .json(&body)
             .send()
             .await
             .context("Failed to send request")?;
@@ -83,7 +97,6 @@ impl ApiClient {
     }
 
     /// Send an authenticated GET request with optional query parameters.
-    /// Auth is sent in the body (same as post_auth). Query params are appended to the URL.
     pub async fn get_auth<T: for<'de> Deserialize<'de>>(
         &self,
         path: &str,
@@ -98,18 +111,17 @@ impl ApiClient {
                 .collect();
             url = format!("{}?{}", url, params.join("&"));
         }
-        let body = serde_json::json!({"password_hash": password_hash});
         let response = self
             .client
             .get(&url)
-            .json(&body)
+            .header("Authorization", format!("Bearer {}", password_hash))
             .send()
             .await
             .context("Failed to send request")?;
         self.handle_response(response).await
     }
 
-    /// DELETE request with authentication
+    /// Send an authenticated DELETE request.
     pub async fn delete_auth<T: for<'de> Deserialize<'de>>(
         &self,
         path: &str,
@@ -117,14 +129,10 @@ impl ApiClient {
     ) -> Result<T> {
         let url = format!("{}{}", self.base_url, path);
 
-        let body = serde_json::json!({
-            "password_hash": password_hash
-        });
-
         let response = self
             .client
             .delete(&url)
-            .json(&body)
+            .header("Authorization", format!("Bearer {}", password_hash))
             .send()
             .await
             .context("Failed to send request")?;

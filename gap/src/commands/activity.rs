@@ -2,7 +2,6 @@
 
 use crate::auth::{hash_password, read_password};
 use anyhow::Result;
-use serde_json::json;
 
 pub async fn run(server_url: &str, follow: bool) -> Result<()> {
     let password = read_password("Password: ")?;
@@ -15,7 +14,7 @@ pub async fn run(server_url: &str, follow: bool) -> Result<()> {
         anyhow::bail!("Activity streaming not yet implemented");
     } else {
         let response: crate::client::ActivityResponse =
-            client.post_auth("/activity", &password_hash, json!({})).await?;
+            client.get_auth("/activity", &password_hash, &[]).await?;
 
         if response.entries.is_empty() {
             println!("No activity recorded.");

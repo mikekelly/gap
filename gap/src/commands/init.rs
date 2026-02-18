@@ -35,8 +35,11 @@ pub async fn run(server_url: &str, ca_path: Option<&str>, management_sans: Optio
             .collect::<Vec<String>>()
     });
 
-    // Build request body
-    let mut body = json!({});
+    // Build request body — init is the one endpoint that takes password_hash in
+    // the body (since it's setting the password, not authenticating with it).
+    let mut body = json!({
+        "password_hash": password_hash
+    });
     if let Some(path) = ca_path {
         body.as_object_mut().unwrap().insert("ca_path".to_string(), json!(path));
     }
@@ -44,7 +47,7 @@ pub async fn run(server_url: &str, ca_path: Option<&str>, management_sans: Optio
         body.as_object_mut().unwrap().insert("management_sans".to_string(), json!(sans));
     }
 
-    let response: crate::client::InitResponse = client.post_auth("/init", &password_hash, body).await?;
+    let response: crate::client::InitResponse = client.post("/init", body).await?;
 
     println!();
     println!("GAP initialized successfully!");

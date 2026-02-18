@@ -10,7 +10,7 @@ pub async fn list(server_url: &str) -> Result<()> {
 
     let client = crate::create_api_client(server_url)?;
     let response: crate::client::TokensResponse =
-        client.post_auth("/tokens", &password_hash, json!({})).await?;
+        client.get_auth("/tokens", &password_hash, &[]).await?;
 
     if response.tokens.is_empty() {
         println!("No tokens found.");

@@ -29,6 +29,7 @@ log_fail() {
 # Configuration
 GAP_SERVER_URL="${GAP_SERVER_URL:-https://gap-server:9080}"
 TEST_PASSWORD="test-integration-password"
+PW_HASH="$(echo -n "$TEST_PASSWORD" | sha512sum | cut -d' ' -f1)"
 
 log_info "Starting GAP Docker integration tests..."
 log_info "Server URL: $GAP_SERVER_URL"
@@ -71,7 +72,7 @@ echo "======================"
 
 INIT_RESPONSE=$(curl -ks -X POST "$GAP_SERVER_URL/init" \
     -H "Content-Type: application/json" \
-    -d "{\"password_hash\": \"$(echo -n "$TEST_PASSWORD" | sha512sum | cut -d' ' -f1)\", \"ca_path\": \"/var/lib/gap/ca.crt\"}")
+    -d "{\"password_hash\": \"$PW_HASH\", \"ca_path\": \"/var/lib/gap/ca.crt\"}")
 
 if echo "$INIT_RESPONSE" | grep -q '"ca_path"'; then
     log_pass "GAP initialized successfully (CA generated)"
@@ -100,8 +101,8 @@ echo "=========================="
 
 TOKEN_RESPONSE=$(curl -ks -X POST "$GAP_SERVER_URL/tokens/create" \
     -H "Content-Type: application/json" \
+    -H "Authorization: Bearer $PW_HASH" \
     -d "{
-        \"password_hash\": \"$(echo -n "$TEST_PASSWORD" | sha512sum | cut -d' ' -f1)\",
         \"name\": \"test-agent-$(date +%s)\"
     }")
 
@@ -117,11 +118,8 @@ echo ""
 echo "Test 6: List tokens"
 echo "==================="
 
-TOKENS_RESPONSE=$(curl -ks -X POST "$GAP_SERVER_URL/tokens" \
-    -H "Content-Type: application/json" \
-    -d "{
-        \"password_hash\": \"$(echo -n "$TEST_PASSWORD" | sha512sum | cut -d' ' -f1)\"
-    }")
+TOKENS_RESPONSE=$(curl -ks "$GAP_SERVER_URL/tokens" \
+    -H "Authorization: Bearer $PW_HASH")
 
 if echo "$TOKENS_RESPONSE" | grep -q '"tokens"'; then
     TOKEN_COUNT=$(echo "$TOKENS_RESPONSE" | jq '.tokens | length')
@@ -149,8 +147,8 @@ echo "======================"
 
 CRED_STATUS=$(curl -ks -o /dev/null -w "%{http_code}" -X POST "$GAP_SERVER_URL/credentials/test-plugin/api_key" \
     -H "Content-Type: application/json" \
+    -H "Authorization: Bearer $PW_HASH" \
     -d "{
-        \"password_hash\": \"$(echo -n "$TEST_PASSWORD" | sha512sum | cut -d' ' -f1)\",
         \"value\": \"test-secret-key-12345\"
     }")
 
@@ -168,8 +166,8 @@ echo "======================"
 # Note: Plugin installation requires network access to GitHub
 INSTALL_RESPONSE=$(curl -ks -X POST "$GAP_SERVER_URL/plugins/install" \
     -H "Content-Type: application/json" \
+    -H "Authorization: Bearer $PW_HASH" \
     -d "{
-        \"password_hash\": \"$(echo -n "$TEST_PASSWORD" | sha512sum | cut -d' ' -f1)\",
         \"name\": \"mikekelly/exa-gap\"
     }")
 
@@ -187,9 +185,8 @@ echo "====================="
 
 PLUGINS_RESPONSE=$(curl -ks -X POST "$GAP_SERVER_URL/plugins" \
     -H "Content-Type: application/json" \
-    -d "{
-        \"password_hash\": \"$(echo -n "$TEST_PASSWORD" | sha512sum | cut -d' ' -f1)\"
-    }")
+    -H "Authorization: Bearer $PW_HASH" \
+    -d "{}")
 
 if echo "$PLUGINS_RESPONSE" | grep -q '"plugins"'; then
     PLUGIN_COUNT=$(echo "$PLUGINS_RESPONSE" | jq '.plugins | length')
@@ -354,15 +351,11 @@ echo ""
 echo "Test 13: Activity endpoint returns entries"
 echo "==========================================="
 
-PW_HASH="$(echo -n "$TEST_PASSWORD" | sha512sum | cut -d' ' -f1)"
-
 if [ "$PROXY_TEST_SKIPPED" = true ]; then
     log_warn "Skipping activity tests (proxy tests were skipped — no activity data)"
 else
-    ACTIVITY_RESPONSE=$(curl -ks \
-        -H "Content-Type: application/json" \
-        -d "{\"password_hash\": \"$PW_HASH\"}" \
-        "$GAP_SERVER_URL/activity")
+    ACTIVITY_RESPONSE=$(curl -ks "$GAP_SERVER_URL/activity" \
+        -H "Authorization: Bearer $PW_HASH")
 
     ACTIVITY_COUNT=$(echo "$ACTIVITY_RESPONSE" | jq '.entries | length' 2>/dev/null || echo "0")
 
@@ -377,10 +370,8 @@ else
     echo "Test 14: Activity filtering by method"
     echo "======================================"
 
-    METHOD_RESPONSE=$(curl -ks \
-        -H "Content-Type: application/json" \
-        -d "{\"password_hash\": \"$PW_HASH\"}" \
-        "$GAP_SERVER_URL/activity?method=GET")
+    METHOD_RESPONSE=$(curl -ks "$GAP_SERVER_URL/activity?method=GET" \
+        -H "Authorization: Bearer $PW_HASH")
 
     # Verify all returned entries have method "GET"
     NON_GET_COUNT=$(echo "$METHOD_RESPONSE" | jq '[.entries[] | select(.method != "GET")] | length' 2>/dev/null || echo "0")
@@ -399,10 +390,8 @@ else
     echo "Test 15: Activity filtering by limit"
     echo "======================================"
 
-    LIMIT_RESPONSE=$(curl -ks \
-        -H "Content-Type: application/json" \
-        -d "{\"password_hash\": \"$PW_HASH\"}" \
-        "$GAP_SERVER_URL/activity?limit=1")
+    LIMIT_RESPONSE=$(curl -ks "$GAP_SERVER_URL/activity?limit=1" \
+        -H "Authorization: Bearer $PW_HASH")
 
     LIMIT_COUNT=$(echo "$LIMIT_RESPONSE" | jq '.entries | length' 2>/dev/null || echo "0")
 
@@ -419,10 +408,8 @@ else
     echo "Test 16: Activity filtering by domain"
     echo "======================================"
 
-    DOMAIN_RESPONSE=$(curl -ks \
-        -H "Content-Type: application/json" \
-        -d "{\"password_hash\": \"$PW_HASH\"}" \
-        "$GAP_SERVER_URL/activity?domain=httpbin.org")
+    DOMAIN_RESPONSE=$(curl -ks "$GAP_SERVER_URL/activity?domain=httpbin.org" \
+        -H "Authorization: Bearer $PW_HASH")
 
     DOMAIN_COUNT=$(echo "$DOMAIN_RESPONSE" | jq '.entries | length' 2>/dev/null || echo "0")
 
@@ -437,10 +424,8 @@ else
     echo "Test 17: Activity entries contain expected fields"
     echo "=================================================="
 
-    FIELDS_RESPONSE=$(curl -ks \
-        -H "Content-Type: application/json" \
-        -d "{\"password_hash\": \"$PW_HASH\"}" \
-        "$GAP_SERVER_URL/activity?limit=1")
+    FIELDS_RESPONSE=$(curl -ks "$GAP_SERVER_URL/activity?limit=1" \
+        -H "Authorization: Bearer $PW_HASH")
 
     ENTRY_COUNT=$(echo "$FIELDS_RESPONSE" | jq '.entries | length' 2>/dev/null || echo "0")
 
@@ -482,10 +467,7 @@ if [ -n "$AGENT_TOKEN" ]; then
     TOKEN_ID=$(echo "$TOKEN_RESPONSE" | jq -r '.id')
 
     DELETE_STATUS=$(curl -ks -o /dev/null -w "%{http_code}" -X DELETE "$GAP_SERVER_URL/tokens/$TOKEN_ID" \
-        -H "Content-Type: application/json" \
-        -d "{
-            \"password_hash\": \"$(echo -n "$TEST_PASSWORD" | sha512sum | cut -d' ' -f1)\"
-        }")
+        -H "Authorization: Bearer $PW_HASH")
 
     if [ "$DELETE_STATUS" = "200" ]; then
         log_pass "Token deleted successfully (HTTP $DELETE_STATUS)"
@@ -501,11 +483,8 @@ echo ""
 echo "Test 19: Management log has entries"
 echo "===================================="
 
-MGMT_LOG_RESPONSE=$(curl -ks -X POST "$GAP_SERVER_URL/management-log" \
-    -H "Content-Type: application/json" \
-    -d "{
-        \"password_hash\": \"$(echo -n "$TEST_PASSWORD" | sha512sum | cut -d' ' -f1)\"
-    }")
+MGMT_LOG_RESPONSE=$(curl -ks "$GAP_SERVER_URL/management-log" \
+    -H "Authorization: Bearer $PW_HASH")
 
 MGMT_LOG_COUNT=$(echo "$MGMT_LOG_RESPONSE" | jq '.entries | length')
 
@@ -533,11 +512,8 @@ echo ""
 echo "Test 20: Management log filter by operation"
 echo "============================================="
 
-TOKEN_CREATE_RESPONSE=$(curl -ks -X POST "$GAP_SERVER_URL/management-log?operation=token_create" \
-    -H "Content-Type: application/json" \
-    -d "{
-        \"password_hash\": \"$(echo -n "$TEST_PASSWORD" | sha512sum | cut -d' ' -f1)\"
-    }")
+TOKEN_CREATE_RESPONSE=$(curl -ks "$GAP_SERVER_URL/management-log?operation=token_create" \
+    -H "Authorization: Bearer $PW_HASH")
 
 TOKEN_CREATE_COUNT=$(echo "$TOKEN_CREATE_RESPONSE" | jq '.entries | length')
 ALL_TOKEN_CREATE=$(echo "$TOKEN_CREATE_RESPONSE" | jq '[.entries[] | select(.operation == "token_create")] | length')
@@ -553,11 +529,8 @@ echo ""
 echo "Test 21: Management log filter by resource_type"
 echo "================================================="
 
-TOKEN_TYPE_RESPONSE=$(curl -ks -X POST "$GAP_SERVER_URL/management-log?resource_type=token" \
-    -H "Content-Type: application/json" \
-    -d "{
-        \"password_hash\": \"$(echo -n "$TEST_PASSWORD" | sha512sum | cut -d' ' -f1)\"
-    }")
+TOKEN_TYPE_RESPONSE=$(curl -ks "$GAP_SERVER_URL/management-log?resource_type=token" \
+    -H "Authorization: Bearer $PW_HASH")
 
 TOKEN_TYPE_COUNT=$(echo "$TOKEN_TYPE_RESPONSE" | jq '.entries | length')
 ALL_TOKEN_TYPE=$(echo "$TOKEN_TYPE_RESPONSE" | jq '[.entries[] | select(.resource_type == "token")] | length')
