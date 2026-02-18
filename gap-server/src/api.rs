@@ -7,7 +7,7 @@
 //! - Token management
 //! - Activity monitoring
 
-use gap_lib::{AgentToken, ActivityEntry};
+use gap_lib::{AgentToken, ActivityEntry, ManagementLogEntry};
 use gap_lib::types::RequestDetails;
 use gap_lib::database::GapDatabase;
 use gap_lib::types::PluginEntry;
@@ -46,6 +46,8 @@ pub struct ApiState {
     pub db: Arc<GapDatabase>,
     /// Broadcast channel for real-time activity streaming (SSE)
     pub activity_tx: Option<tokio::sync::broadcast::Sender<ActivityEntry>>,
+    /// Broadcast channel for real-time management log streaming (SSE)
+    pub management_tx: Option<tokio::sync::broadcast::Sender<ManagementLogEntry>>,
 }
 
 impl ApiState {
@@ -58,15 +60,17 @@ impl ApiState {
             password_hash: Arc::new(RwLock::new(None)),
             db,
             activity_tx: None,
+            management_tx: None,
         }
     }
 
-    /// Create ApiState with broadcast channel for activity streaming
+    /// Create ApiState with broadcast channels for activity and management log streaming
     pub fn new_with_broadcast(
         proxy_port: u16,
         api_port: u16,
         db: Arc<GapDatabase>,
         activity_tx: tokio::sync::broadcast::Sender<ActivityEntry>,
+        management_tx: tokio::sync::broadcast::Sender<ManagementLogEntry>,
     ) -> Self {
         Self {
             start_time: std::time::Instant::now(),
@@ -75,6 +79,7 @@ impl ApiState {
             password_hash: Arc::new(RwLock::new(None)),
             db,
             activity_tx: Some(activity_tx),
+            management_tx: Some(management_tx),
         }
     }
 
@@ -241,6 +246,33 @@ pub struct ActivityQuery {
     pub limit: Option<u32>,
 }
 
+/// Management log response
+#[derive(Debug, Serialize, Deserialize)]
+pub struct ManagementLogResponse {
+    pub entries: Vec<ManagementLogEntry>,
+}
+
+/// Query parameters for GET /management-log
+#[derive(Debug, Deserialize, Default)]
+pub struct ManagementLogQuery {
+    pub operation: Option<String>,
+    pub resource_type: Option<String>,
+    pub resource_id: Option<String>,
+    pub success: Option<bool>,
+    /// ISO 8601 timestamp string
+    pub since: Option<String>,
+    pub limit: Option<u32>,
+}
+
+/// Query parameters for filtering the management log SSE stream
+#[derive(Debug, Default, Deserialize)]
+pub struct ManagementLogStreamFilter {
+    pub operation: Option<String>,
+    pub resource_type: Option<String>,
+    pub resource_id: Option<String>,
+    pub success: Option<bool>,
+}
+
 /// Init request
 #[derive(Debug, Deserialize)]
 pub struct InitRequest {}
@@ -313,6 +345,8 @@ pub fn create_router(state: ApiState) -> Router {
         .route("/activity", get(get_activity).post(get_activity))
         .route("/activity/stream", get(activity_stream).post(activity_stream))
         .route("/activity/:request_id/details", get(get_activity_details).post(get_activity_details))
+        .route("/management-log", get(get_management_log).post(get_management_log))
+        .route("/management-log/stream", get(management_log_stream).post(management_log_stream))
         .with_state(state)
 }
 
@@ -371,6 +405,16 @@ async fn init(
 
     // Return the well-known CA path (CA was already exported at server boot)
     let ca_path = gap_lib::ca_cert_path().to_string_lossy().to_string();
+
+    emit_management_log(&state, ManagementLogEntry {
+        timestamp: chrono::Utc::now(),
+        operation: "server_init".to_string(),
+        resource_type: "server".to_string(),
+        resource_id: None,
+        detail: None,
+        success: true,
+        error_message: None,
+    });
 
     Ok(Json(InitResponse { ca_path }))
 }
@@ -452,6 +496,16 @@ async fn install_plugin(
 
     tracing::info!("Installed plugin: {} (matches: {:?}, commit: {})", plugin_name, plugin.match_patterns, commit_sha);
 
+    emit_management_log(&state, ManagementLogEntry {
+        timestamp: chrono::Utc::now(),
+        operation: "plugin_install".to_string(),
+        resource_type: "plugin".to_string(),
+        resource_id: Some(plugin_name.clone()),
+        detail: Some(serde_json::json!({"repo": req.name}).to_string()),
+        success: true,
+        error_message: None,
+    });
+
     Ok(Json(InstallResponse {
         name: plugin_name,
         installed: true,
@@ -490,6 +544,16 @@ async fn uninstall_plugin(
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to remove plugin: {}", e)))?;
 
     tracing::info!("Uninstalled plugin: {}", plugin_name);
+
+    emit_management_log(&state, ManagementLogEntry {
+        timestamp: chrono::Utc::now(),
+        operation: "plugin_uninstall".to_string(),
+        resource_type: "plugin".to_string(),
+        resource_id: Some(plugin_name.clone()),
+        detail: None,
+        success: true,
+        error_message: None,
+    });
 
     Ok(Json(UninstallResponse {
         name: plugin_name,
@@ -531,6 +595,16 @@ async fn update_plugin(
     let (plugin, commit_sha) = clone_and_validate_plugin(&state, &plugin_name).await?;
 
     tracing::info!("Updated plugin: {} (matches: {:?}, commit: {})", plugin_name, plugin.match_patterns, commit_sha);
+
+    emit_management_log(&state, ManagementLogEntry {
+        timestamp: chrono::Utc::now(),
+        operation: "plugin_update".to_string(),
+        resource_type: "plugin".to_string(),
+        resource_id: Some(plugin_name.clone()),
+        detail: None,
+        success: true,
+        error_message: None,
+    });
 
     Ok(Json(UpdateResponse {
         name: plugin_name,
@@ -698,6 +772,16 @@ async fn create_token(
 
     let token_value = token.token.clone();
 
+    emit_management_log(&state, ManagementLogEntry {
+        timestamp: chrono::Utc::now(),
+        operation: "token_create".to_string(),
+        resource_type: "token".to_string(),
+        resource_id: Some(token_value.clone()),
+        detail: Some(serde_json::json!({"name": req.name}).to_string()),
+        success: true,
+        error_message: None,
+    });
+
     // Return with full token (only time it's revealed)
     // NOTE: id is the token value (not UUID) to match list_tokens behavior
     Ok(Json(TokenResponse {
@@ -732,6 +816,16 @@ async fn delete_token(
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to remove token: {}", e)))?;
 
+    emit_management_log(&state, ManagementLogEntry {
+        timestamp: chrono::Utc::now(),
+        operation: "token_delete".to_string(),
+        resource_type: "token".to_string(),
+        resource_id: Some(id.clone()),
+        detail: None,
+        success: true,
+        error_message: None,
+    });
+
     Ok(Json(serde_json::json!({
         "id": id,
         "revoked": true
@@ -752,6 +846,17 @@ async fn set_credential(
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to set credential: {}", e)))?;
 
     tracing::info!("Setting credential {}:{}", plugin, key);
+
+    emit_management_log(&state, ManagementLogEntry {
+        timestamp: chrono::Utc::now(),
+        operation: "credential_set".to_string(),
+        resource_type: "credential".to_string(),
+        resource_id: Some(format!("{}/{}", plugin, key)),
+        detail: None, // NEVER log credential values
+        success: true,
+        error_message: None,
+    });
+
     Ok(Json(serde_json::json!({
         "plugin": plugin,
         "key": key,
@@ -773,6 +878,17 @@ async fn delete_credential(
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to remove credential: {}", e)))?;
 
     tracing::info!("Deleting credential {}:{}", plugin, key);
+
+    emit_management_log(&state, ManagementLogEntry {
+        timestamp: chrono::Utc::now(),
+        operation: "credential_delete".to_string(),
+        resource_type: "credential".to_string(),
+        resource_id: Some(format!("{}/{}", plugin, key)),
+        detail: None,
+        success: true,
+        error_message: None,
+    });
+
     Ok(StatusCode::OK)
 }
 
@@ -910,6 +1026,104 @@ async fn activity_stream(
     };
 
     Ok(Sse::new(stream).keep_alive(KeepAlive::default()))
+}
+
+/// Emit a management log event: writes to DB and broadcasts to SSE subscribers.
+/// Fire-and-forget — errors are logged but don't propagate.
+fn emit_management_log(state: &ApiState, entry: ManagementLogEntry) {
+    let db = Arc::clone(&state.db);
+    let tx = state.management_tx.clone();
+    tokio::spawn(async move {
+        if let Err(e) = db.log_management_event(&entry).await {
+            tracing::error!(error = %e, "Failed to log management event");
+        }
+        if let Some(tx) = tx {
+            let _ = tx.send(entry); // ignore SendError (no subscribers)
+        }
+    });
+}
+
+/// Convert ManagementLogQuery to ManagementLogFilter
+fn management_query_to_filter(q: &ManagementLogQuery) -> gap_lib::ManagementLogFilter {
+    gap_lib::ManagementLogFilter {
+        operation: q.operation.clone(),
+        resource_type: q.resource_type.clone(),
+        resource_id: q.resource_id.clone(),
+        success: q.success,
+        since: q.since.as_ref().and_then(|s| {
+            DateTime::parse_from_rfc3339(s).ok().map(|dt| dt.with_timezone(&Utc))
+        }),
+        limit: q.limit.or(Some(100)),
+    }
+}
+
+/// GET/POST /management-log - Get management audit log entries (requires auth)
+async fn get_management_log(
+    State(state): State<ApiState>,
+    Query(query): Query<ManagementLogQuery>,
+    body: Bytes,
+) -> Result<Json<ManagementLogResponse>, (StatusCode, String)> {
+    verify_auth::<serde_json::Value>(&state, &body).await?;
+
+    let filter = management_query_to_filter(&query);
+    let entries = state.db.query_management_log(&filter).await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to get management log: {}", e)))?;
+    Ok(Json(ManagementLogResponse { entries }))
+}
+
+/// GET/POST /management-log/stream - Stream management log entries via SSE (requires auth)
+async fn management_log_stream(
+    State(state): State<ApiState>,
+    Query(filter): Query<ManagementLogStreamFilter>,
+    body: Bytes,
+) -> Result<Sse<impl Stream<Item = Result<Event, Infallible>>>, (StatusCode, String)> {
+    verify_auth::<serde_json::Value>(&state, &body).await?;
+
+    let tx = state.management_tx.as_ref().ok_or_else(|| {
+        (StatusCode::SERVICE_UNAVAILABLE, "Management log streaming not configured".to_string())
+    })?;
+
+    let mut rx = tx.subscribe();
+
+    let stream = async_stream::stream! {
+        loop {
+            match rx.recv().await {
+                Ok(entry) => {
+                    if matches_management_filter(&entry, &filter) {
+                        if let Ok(json) = serde_json::to_string(&entry) {
+                            yield Ok(Event::default().event("management").data(json));
+                        }
+                    }
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                    tracing::warn!("Management log SSE subscriber lagged by {} entries", n);
+                    continue;
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                    break;
+                }
+            }
+        }
+    };
+
+    Ok(Sse::new(stream).keep_alive(KeepAlive::default()))
+}
+
+/// Check if a management log entry matches the given filter criteria
+fn matches_management_filter(entry: &ManagementLogEntry, filter: &ManagementLogStreamFilter) -> bool {
+    if let Some(ref op) = filter.operation {
+        if entry.operation != *op { return false; }
+    }
+    if let Some(ref rt) = filter.resource_type {
+        if entry.resource_type != *rt { return false; }
+    }
+    if let Some(ref rid) = filter.resource_id {
+        if entry.resource_id.as_deref() != Some(rid.as_str()) { return false; }
+    }
+    if let Some(success) = filter.success {
+        if entry.success != success { return false; }
+    }
+    true
 }
 
 #[cfg(test)]
@@ -1936,7 +2150,8 @@ mod tests {
 
         let db = create_test_db().await;
         let (activity_tx, _) = tokio::sync::broadcast::channel(100);
-        let state = ApiState::new_with_broadcast(9443, 9080, db, activity_tx);
+        let (management_tx, _) = tokio::sync::broadcast::channel(100);
+        let state = ApiState::new_with_broadcast(9443, 9080, db, activity_tx, management_tx);
 
         // Set up password hash
         let password = "testpass123";
@@ -1969,7 +2184,8 @@ mod tests {
     async fn test_activity_stream_requires_auth() {
         let db = create_test_db().await;
         let (activity_tx, _) = tokio::sync::broadcast::channel(100);
-        let state = ApiState::new_with_broadcast(9443, 9080, db, activity_tx);
+        let (management_tx, _) = tokio::sync::broadcast::channel(100);
+        let state = ApiState::new_with_broadcast(9443, 9080, db, activity_tx, management_tx);
 
         let app = create_router(state);
 
@@ -1996,7 +2212,8 @@ mod tests {
         use argon2::{Argon2, PasswordHasher};
         let db = create_test_db().await;
         let (activity_tx, _) = tokio::sync::broadcast::channel(100);
-        let state = ApiState::new_with_broadcast(9443, 9080, db, activity_tx.clone());
+        let (management_tx, _) = tokio::sync::broadcast::channel(100);
+        let state = ApiState::new_with_broadcast(9443, 9080, db, activity_tx.clone(), management_tx);
 
         // Set up password hash
         let password = "testpass123";
@@ -2065,7 +2282,8 @@ mod tests {
 
         let db = create_test_db().await;
         let (activity_tx, _) = tokio::sync::broadcast::channel(100);
-        let state = ApiState::new_with_broadcast(9443, 9080, db, activity_tx.clone());
+        let (management_tx, _) = tokio::sync::broadcast::channel(100);
+        let state = ApiState::new_with_broadcast(9443, 9080, db, activity_tx.clone(), management_tx);
 
         // Set up password hash
         let password = "testpass123";
@@ -2503,5 +2721,320 @@ mod tests {
             .unwrap();
 
         assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
+
+    // ── Management Log Tests ─────────────────────────────────────────
+
+    #[tokio::test]
+    async fn test_management_log_requires_auth() {
+        let db = create_test_db().await;
+        let state = ApiState::new(9443, 9080, db);
+        let app = create_router(state);
+
+        // No password hash set on server, so auth should fail
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/management-log")
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&serde_json::json!({
+                        "password_hash": "wrongpass"
+                    })).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn test_management_log_returns_entries() {
+        use argon2::password_hash::{rand_core::OsRng, SaltString};
+        use argon2::{Argon2, PasswordHasher};
+
+        let db = create_test_db().await;
+
+        // Pre-populate management log entries directly in DB
+        db.log_management_event(&ManagementLogEntry {
+            timestamp: chrono::Utc::now(),
+            operation: "token_create".to_string(),
+            resource_type: "token".to_string(),
+            resource_id: Some("tok_abc".to_string()),
+            detail: None,
+            success: true,
+            error_message: None,
+        }).await.unwrap();
+
+        let state = ApiState::new(9443, 9080, Arc::clone(&db));
+
+        // Set up password hash
+        let password = "testpass123";
+        let salt = SaltString::generate(&mut OsRng);
+        let argon2 = Argon2::default();
+        let password_hash = argon2.hash_password(password.as_bytes(), &salt).unwrap().to_string();
+        state.set_password_hash(password_hash).await;
+
+        let app = create_router(state);
+
+        let body = serde_json::json!({
+            "password_hash": password
+        });
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/management-log")
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let body_bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let log_response: ManagementLogResponse = serde_json::from_slice(&body_bytes).unwrap();
+
+        assert_eq!(log_response.entries.len(), 1);
+        assert_eq!(log_response.entries[0].operation, "token_create");
+        assert_eq!(log_response.entries[0].resource_id, Some("tok_abc".to_string()));
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn test_management_log_emit_from_create_token() {
+        use argon2::password_hash::{rand_core::OsRng, SaltString};
+        use argon2::{Argon2, PasswordHasher};
+
+        let temp_dir = tempfile::tempdir().expect("create temp dir");
+        std::env::set_var("GAP_DATA_DIR", temp_dir.path());
+
+        let db = create_test_db().await;
+        let state = ApiState::new(9443, 9080, Arc::clone(&db));
+
+        // Set up password hash
+        let password = "testpass123";
+        let salt = SaltString::generate(&mut OsRng);
+        let argon2 = Argon2::default();
+        let password_hash = argon2.hash_password(password.as_bytes(), &salt).unwrap().to_string();
+        state.set_password_hash(password_hash).await;
+
+        // Create a token via API (this should emit a management log event)
+        let app = create_router(state);
+        let body = serde_json::json!({
+            "password_hash": password,
+            "name": "audit-test-token"
+        });
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/tokens/create")
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+
+        // Give the spawned task time to write to DB
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+        // Check management log was written
+        let logs = db.query_management_log(&gap_lib::ManagementLogFilter::default()).await.unwrap();
+        assert_eq!(logs.len(), 1);
+        assert_eq!(logs[0].operation, "token_create");
+        assert_eq!(logs[0].resource_type, "token");
+        assert!(logs[0].success);
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn test_management_log_emit_from_set_credential() {
+        use argon2::password_hash::{rand_core::OsRng, SaltString};
+        use argon2::{Argon2, PasswordHasher};
+
+        let temp_dir = tempfile::tempdir().expect("create temp dir");
+        std::env::set_var("GAP_DATA_DIR", temp_dir.path());
+
+        let db = create_test_db().await;
+        let state = ApiState::new(9443, 9080, Arc::clone(&db));
+
+        // Set up password hash
+        let password = "testpass123";
+        let salt = SaltString::generate(&mut OsRng);
+        let argon2 = Argon2::default();
+        let password_hash = argon2.hash_password(password.as_bytes(), &salt).unwrap().to_string();
+        state.set_password_hash(password_hash).await;
+
+        let app = create_router(state);
+        let body = serde_json::json!({
+            "password_hash": password,
+            "value": "secret_api_key_12345"
+        });
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/credentials/test-plugin/api_key")
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+
+        // Give the spawned task time to write to DB
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+        // Check management log was written — credential values should NOT be in the log
+        let logs = db.query_management_log(&gap_lib::ManagementLogFilter::default()).await.unwrap();
+        assert_eq!(logs.len(), 1);
+        assert_eq!(logs[0].operation, "credential_set");
+        assert_eq!(logs[0].resource_type, "credential");
+        assert_eq!(logs[0].resource_id, Some("test-plugin/api_key".to_string()));
+        // Ensure credential value is NOT in the detail
+        assert!(logs[0].detail.is_none(), "Credential value must never appear in management log");
+    }
+
+    #[tokio::test]
+    async fn test_management_log_stream_returns_sse_content_type() {
+        use argon2::password_hash::{rand_core::OsRng, SaltString};
+        use argon2::{Argon2, PasswordHasher};
+
+        let db = create_test_db().await;
+        let (activity_tx, _) = tokio::sync::broadcast::channel(100);
+        let (management_tx, _) = tokio::sync::broadcast::channel(100);
+        let state = ApiState::new_with_broadcast(9443, 9080, db, activity_tx, management_tx);
+
+        // Set up password hash
+        let password = "testpass123";
+        let salt = SaltString::generate(&mut OsRng);
+        let argon2 = Argon2::default();
+        let password_hash = argon2.hash_password(password.as_bytes(), &salt).unwrap().to_string();
+        state.set_password_hash(password_hash).await;
+
+        let app = create_router(state);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/management-log/stream")
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&serde_json::json!({
+                        "password_hash": password
+                    })).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let content_type = response.headers().get("content-type").unwrap().to_str().unwrap();
+        assert!(content_type.contains("text/event-stream"), "Expected SSE content type, got: {}", content_type);
+    }
+
+    #[tokio::test]
+    async fn test_management_log_stream_requires_auth() {
+        let db = create_test_db().await;
+        let (activity_tx, _) = tokio::sync::broadcast::channel(100);
+        let (management_tx, _) = tokio::sync::broadcast::channel(100);
+        let state = ApiState::new_with_broadcast(9443, 9080, db, activity_tx, management_tx);
+
+        let app = create_router(state);
+
+        // No password hash set, so auth should fail
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/management-log/stream")
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&serde_json::json!({
+                        "password_hash": "wrongpass"
+                    })).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn test_management_log_stream_receives_broadcast_entries() {
+        use argon2::password_hash::{rand_core::OsRng, SaltString};
+        use argon2::{Argon2, PasswordHasher};
+
+        let db = create_test_db().await;
+        let (activity_tx, _) = tokio::sync::broadcast::channel(100);
+        let (management_tx, _) = tokio::sync::broadcast::channel(100);
+        let state = ApiState::new_with_broadcast(9443, 9080, db, activity_tx, management_tx.clone());
+
+        // Set up password hash
+        let password = "testpass123";
+        let salt = SaltString::generate(&mut OsRng);
+        let argon2 = Argon2::default();
+        let password_hash = argon2.hash_password(password.as_bytes(), &salt).unwrap().to_string();
+        state.set_password_hash(password_hash).await;
+
+        let app = create_router(state);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/management-log/stream")
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&serde_json::json!({
+                        "password_hash": password
+                    })).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+
+        // Send a management log entry through the broadcast channel
+        let entry = ManagementLogEntry {
+            timestamp: chrono::Utc::now(),
+            operation: "token_create".to_string(),
+            resource_type: "token".to_string(),
+            resource_id: Some("tok_test".to_string()),
+            detail: None,
+            success: true,
+            error_message: None,
+        };
+        management_tx.send(entry).unwrap();
+
+        // Read the SSE response body
+        let mut body = response.into_body();
+        let chunk = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            http_body_util::BodyExt::frame(&mut body),
+        )
+        .await
+        .expect("should receive data within timeout")
+        .expect("should have a frame")
+        .expect("frame should be ok");
+
+        let data = chunk.into_data().expect("should be data frame");
+        let text = String::from_utf8(data.to_vec()).unwrap();
+
+        // SSE format: "event: management\ndata: {...}\n\n"
+        assert!(text.contains("event: management"), "SSE event should have 'management' type, got: {}", text);
+        assert!(text.contains("token_create"), "SSE data should contain the operation, got: {}", text);
     }
 }

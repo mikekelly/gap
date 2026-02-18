@@ -303,8 +303,9 @@ async fn main() -> anyhow::Result<()> {
     let initial_tokens = db.list_tokens().await?;
     tracing::info!("Loaded {} agent tokens from storage", initial_tokens.len());
 
-    // Create broadcast channel for real-time activity streaming (SSE)
+    // Create broadcast channels for real-time streaming (SSE)
     let (activity_tx, _activity_rx) = tokio::sync::broadcast::channel(1000);
+    let (management_tx, _management_rx) = tokio::sync::broadcast::channel(1000);
 
     // Build DynamicCertResolver for the management API before proxy consumes the CA.
     // Reconstruct a second CA from PEM because ProxyServer::new takes CA by value.
@@ -347,6 +348,7 @@ async fn main() -> anyhow::Result<()> {
         Arc::clone(&db),
     );
     api_state.activity_tx = Some(activity_tx);
+    api_state.management_tx = Some(management_tx);
 
     // Load persisted password hash from database (if server was previously initialized)
     if let Ok(Some(hash)) = db.get_password_hash().await {
