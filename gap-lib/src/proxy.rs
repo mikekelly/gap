@@ -632,6 +632,8 @@ where
                         plugin_sha: plugin_info.commit_sha,
                         source_hash: plugin_info.source_hash,
                         request_headers: plugin_info.scrubbed_headers,
+                        rejection_stage: None,
+                        rejection_reason: None,
                     };
                     if let Err(e) = db_log.log_activity(&entry).await {
                         tracing::warn!("Failed to log activity: {}", e);
@@ -716,6 +718,8 @@ where
                         plugin_sha: plugin_info.commit_sha,
                         source_hash: plugin_info.source_hash,
                         request_headers: plugin_info.scrubbed_headers,
+                        rejection_stage: None,
+                        rejection_reason: None,
                     };
                     if let Err(e) = db_log.log_activity(&entry).await {
                         tracing::warn!("Failed to log activity: {}", e);

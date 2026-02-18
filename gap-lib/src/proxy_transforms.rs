@@ -38,6 +38,9 @@ pub struct PluginInfo {
     pub source_hash: Option<String>,
     /// JSON string of post-transform request headers with credential values scrubbed
     pub scrubbed_headers: Option<String>,
+    /// Raw credential values for scrubbing post-transform body and response.
+    /// Transient — never serialized, never stored.
+    pub credential_values: HashMap<String, String>,
 }
 
 /// Scrub credential values from post-transform request headers.
@@ -96,6 +99,103 @@ fn scrub_headers(request: &GAPRequest, credentials: &HashMap<String, String>) ->
     }
 
     // Serialize as JSON object (deterministic key order via BTreeMap)
+    let header_map: std::collections::BTreeMap<&str, &str> = headers
+        .iter()
+        .map(|(k, v)| (k.as_str(), v.as_str()))
+        .collect();
+    serde_json::to_string(&header_map).unwrap_or_default()
+}
+
+/// Maximum body size stored in request details (64KB).
+pub const MAX_BODY_SIZE: usize = 64 * 1024;
+
+/// Truncate a body to MAX_BODY_SIZE, returning (truncated_body, was_truncated).
+pub fn truncate_body(body: &[u8]) -> (&[u8], bool) {
+    if body.len() > MAX_BODY_SIZE {
+        (&body[..MAX_BODY_SIZE], true)
+    } else {
+        (body, false)
+    }
+}
+
+/// Scrub credential values from a request/response body.
+///
+/// For UTF-8 bodies: replaces literal values, base64 encodings, and hex encodings.
+/// For non-UTF-8 bodies: returns body unchanged (binary data unlikely to contain text credentials).
+/// Body is truncated to `max_len` bytes if larger.
+pub fn scrub_body(body: &[u8], credentials: &HashMap<String, String>, max_len: usize) -> (Vec<u8>, bool) {
+    let truncated = body.len() > max_len;
+    let body = if truncated { &body[..max_len] } else { body };
+
+    // Only scrub UTF-8 text bodies
+    let Ok(text) = std::str::from_utf8(body) else {
+        return (body.to_vec(), truncated);
+    };
+
+    let mut scrubbed = text.to_string();
+    for cred_value in credentials.values() {
+        if cred_value.is_empty() {
+            continue;
+        }
+
+        // Base64-encoded value
+        let b64_value = base64::engine::general_purpose::STANDARD.encode(cred_value);
+        if scrubbed.contains(&b64_value) {
+            scrubbed = scrubbed.replace(&b64_value, "[REDACTED]");
+        }
+
+        // Hex-encoded value
+        let hex_value = hex::encode(cred_value.as_bytes());
+        if scrubbed.contains(&hex_value) {
+            scrubbed = scrubbed.replace(&hex_value, "[REDACTED]");
+        }
+
+        // Literal value (last to avoid double-redaction)
+        if scrubbed.contains(cred_value.as_str()) {
+            scrubbed = scrubbed.replace(cred_value.as_str(), "[REDACTED]");
+        }
+    }
+
+    (scrubbed.into_bytes(), truncated)
+}
+
+/// Scrub credential values from response headers and return as JSON string.
+///
+/// Same scrub strategy as `scrub_headers` but takes `Vec<(String, String)>`
+/// (since response headers aren't a GAPRequest).
+pub fn scrub_response_headers(headers: &[(String, String)], credentials: &HashMap<String, String>) -> String {
+    let mut headers: Vec<(String, String)> = headers.to_vec();
+
+    for cred_value in credentials.values() {
+        if cred_value.is_empty() {
+            continue;
+        }
+
+        // Base64-encoded value
+        let b64_value = base64::engine::general_purpose::STANDARD.encode(cred_value);
+        for header in &mut headers {
+            if header.1.contains(&b64_value) {
+                header.1 = header.1.replace(&b64_value, "[REDACTED]");
+            }
+        }
+
+        // Hex-encoded value
+        let hex_value = hex::encode(cred_value.as_bytes());
+        for header in &mut headers {
+            if header.1.contains(&hex_value) {
+                header.1 = header.1.replace(&hex_value, "[REDACTED]");
+            }
+        }
+
+        // Literal value
+        for header in &mut headers {
+            if header.1.contains(cred_value.as_str()) {
+                header.1 = header.1.replace(cred_value.as_str(), "[REDACTED]");
+            }
+        }
+    }
+
+    // Serialize as JSON object (deterministic key order)
     let header_map: std::collections::BTreeMap<&str, &str> = headers
         .iter()
         .map(|(k, v)| (k.as_str(), v.as_str()))
@@ -199,6 +299,7 @@ pub async fn transform_request(
         commit_sha: plugin.commit_sha.clone(),
         source_hash: plugin.source_hash.clone(),
         scrubbed_headers: Some(scrubbed),
+        credential_values: credentials.credentials.clone(),
     };
 
     Ok((transformed_request, plugin_info))
@@ -582,5 +683,124 @@ mod tests {
             result.get_header("Authorization"),
             Some(&"Bearer secret-key-123".to_string())
         );
+    }
+
+    #[test]
+    fn test_scrub_body_literal_replacement() {
+        let body = br#"{"api_key":"sk-secret-123","data":"hello"}"#;
+        let mut credentials = HashMap::new();
+        credentials.insert("api_key".to_string(), "sk-secret-123".to_string());
+
+        let (scrubbed, truncated) = scrub_body(body, &credentials, 64 * 1024);
+        assert!(!truncated);
+        let text = String::from_utf8(scrubbed).unwrap();
+        assert!(!text.contains("sk-secret-123"));
+        assert!(text.contains("[REDACTED]"));
+        assert!(text.contains("hello"));
+    }
+
+    #[test]
+    fn test_scrub_body_base64_replacement() {
+        let secret = "my-secret-key";
+        let b64 = base64::engine::general_purpose::STANDARD.encode(secret);
+        let body = format!(r#"{{"token":"{}"}}"#, b64);
+        let mut credentials = HashMap::new();
+        credentials.insert("key".to_string(), secret.to_string());
+
+        let (scrubbed, _) = scrub_body(body.as_bytes(), &credentials, 64 * 1024);
+        let text = String::from_utf8(scrubbed).unwrap();
+        assert!(!text.contains(&b64));
+        assert!(text.contains("[REDACTED]"));
+    }
+
+    #[test]
+    fn test_scrub_body_binary_passthrough() {
+        // Non-UTF-8 binary data should pass through unchanged
+        let body: Vec<u8> = vec![0xFF, 0xFE, 0x00, 0x01, 0x80];
+        let mut credentials = HashMap::new();
+        credentials.insert("key".to_string(), "secret".to_string());
+
+        let (scrubbed, truncated) = scrub_body(&body, &credentials, 64 * 1024);
+        assert!(!truncated);
+        assert_eq!(scrubbed, body);
+    }
+
+    #[test]
+    fn test_scrub_body_truncation() {
+        let body = vec![b'A'; 100_000]; // 100KB
+        let credentials = HashMap::new();
+
+        let (scrubbed, truncated) = scrub_body(&body, &credentials, 64 * 1024);
+        assert!(truncated);
+        assert_eq!(scrubbed.len(), 64 * 1024);
+    }
+
+    #[test]
+    fn test_scrub_body_empty_credentials() {
+        let body = b"some body content";
+        let credentials = HashMap::new();
+
+        let (scrubbed, _) = scrub_body(body, &credentials, 64 * 1024);
+        assert_eq!(scrubbed, body);
+    }
+
+    #[test]
+    fn test_scrub_response_headers_literal() {
+        let headers = vec![
+            ("Content-Type".to_string(), "application/json".to_string()),
+            ("X-Api-Key".to_string(), "secret-value-here".to_string()),
+        ];
+        let mut credentials = HashMap::new();
+        credentials.insert("key".to_string(), "secret-value-here".to_string());
+
+        let scrubbed = scrub_response_headers(&headers, &credentials);
+        let parsed: serde_json::Value = serde_json::from_str(&scrubbed).unwrap();
+        assert_eq!(parsed["Content-Type"], "application/json");
+        assert_eq!(parsed["X-Api-Key"], "[REDACTED]");
+    }
+
+    #[test]
+    fn test_scrub_response_headers_empty_credentials() {
+        let headers = vec![
+            ("Content-Type".to_string(), "text/html".to_string()),
+        ];
+        let credentials = HashMap::new();
+
+        let scrubbed = scrub_response_headers(&headers, &credentials);
+        let parsed: serde_json::Value = serde_json::from_str(&scrubbed).unwrap();
+        assert_eq!(parsed["Content-Type"], "text/html");
+    }
+
+    #[test]
+    fn test_truncate_body_under_limit() {
+        let body = vec![0u8; 100];
+        let (truncated, was_truncated) = truncate_body(&body);
+        assert!(!was_truncated);
+        assert_eq!(truncated.len(), 100);
+    }
+
+    #[test]
+    fn test_truncate_body_over_limit() {
+        let body = vec![0u8; 100_000];
+        let (truncated, was_truncated) = truncate_body(&body);
+        assert!(was_truncated);
+        assert_eq!(truncated.len(), 64 * 1024);
+    }
+
+    #[tokio::test]
+    async fn test_transform_request_returns_credential_values() {
+        let db = GapDatabase::in_memory().await.unwrap();
+        setup_test_plugin(&db).await;
+
+        let request = GAPRequest::new("GET", "https://api.test.com/data")
+            .with_header("Host", "api.test.com");
+
+        let (_result, plugin_info) = transform_request(request, "api.test.com", &db, true)
+            .await
+            .expect("transform should succeed");
+
+        // credential_values should be populated
+        assert!(!plugin_info.credential_values.is_empty());
+        assert_eq!(plugin_info.credential_values.get("api_key"), Some(&"secret-key-123".to_string()));
     }
 }

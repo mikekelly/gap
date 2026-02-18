@@ -61,6 +61,19 @@ CREATE TABLE IF NOT EXISTS plugin_versions (
 
 CREATE INDEX IF NOT EXISTS idx_plugin_versions_plugin ON plugin_versions(plugin_name);
 CREATE INDEX IF NOT EXISTS idx_plugin_versions_hash ON plugin_versions(source_hash);
+
+CREATE TABLE IF NOT EXISTS request_details (
+    request_id TEXT PRIMARY KEY,
+    req_headers TEXT,
+    req_body BLOB,
+    transformed_url TEXT,
+    transformed_headers TEXT,
+    transformed_body BLOB,
+    response_status INTEGER,
+    response_headers TEXT,
+    response_body BLOB,
+    body_truncated INTEGER DEFAULT 0
+);
 ";
 
 /// Embedded libSQL database for GAP persistent storage.
@@ -161,6 +174,10 @@ impl GapDatabase {
         let _ = self.conn.execute("ALTER TABLE plugin_versions ADD COLUMN credential_schema TEXT NOT NULL DEFAULT '[]'", ()).await;
         let _ = self.conn.execute("ALTER TABLE plugin_versions ADD COLUMN deleted INTEGER NOT NULL DEFAULT 0", ()).await;
         let _ = self.conn.execute("ALTER TABLE plugin_versions ADD COLUMN dangerously_permit_http INTEGER NOT NULL DEFAULT 0", ()).await;
+
+        // Migration for rejection tracking
+        let _ = self.conn.execute("ALTER TABLE access_logs ADD COLUMN rejection_stage TEXT", ()).await;
+        let _ = self.conn.execute("ALTER TABLE access_logs ADD COLUMN rejection_reason TEXT", ()).await;
 
         Ok(())
     }
@@ -608,7 +625,7 @@ impl GapDatabase {
     pub async fn log_activity(&self, entry: &ActivityEntry) -> Result<()> {
         self.conn
             .execute(
-                "INSERT INTO access_logs (timestamp, request_id, method, url, agent_id, status, plugin_name, plugin_sha, source_hash, request_headers) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+                "INSERT INTO access_logs (timestamp, request_id, method, url, agent_id, status, plugin_name, plugin_sha, source_hash, request_headers, rejection_stage, rejection_reason) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
                 libsql::params![
                     entry.timestamp.to_rfc3339(),
                     entry.request_id.as_deref().unwrap_or(""),
@@ -619,7 +636,9 @@ impl GapDatabase {
                     entry.plugin_name.as_deref().unwrap_or(""),
                     entry.plugin_sha.as_deref().unwrap_or(""),
                     entry.source_hash.as_deref().unwrap_or(""),
-                    entry.request_headers.as_deref().unwrap_or("")
+                    entry.request_headers.as_deref().unwrap_or(""),
+                    entry.rejection_stage.as_deref().unwrap_or(""),
+                    entry.rejection_reason.as_deref().unwrap_or("")
                 ],
             )
             .await
@@ -650,7 +669,7 @@ impl GapDatabase {
     /// All filter fields are optional. When not set, that filter is skipped.
     /// Results are ordered by id DESC (newest first). Default limit is 100.
     pub async fn query_activity(&self, filter: &crate::types::ActivityFilter) -> Result<Vec<ActivityEntry>> {
-        let select = "SELECT timestamp, request_id, method, url, agent_id, status, plugin_name, plugin_sha, source_hash, request_headers FROM access_logs";
+        let select = "SELECT timestamp, request_id, method, url, agent_id, status, plugin_name, plugin_sha, source_hash, request_headers, rejection_stage, rejection_reason FROM access_logs";
 
         let mut conditions: Vec<String> = Vec::new();
         let mut params: Vec<libsql::Value> = Vec::new();
@@ -712,7 +731,8 @@ impl GapDatabase {
     /// Helper: convert activity rows into `Vec<ActivityEntry>`.
     ///
     /// Columns expected: timestamp, request_id, method, url, agent_id, status,
-    ///                   plugin_name, plugin_sha, source_hash, request_headers
+    ///                   plugin_name, plugin_sha, source_hash, request_headers,
+    ///                   rejection_stage, rejection_reason
     async fn rows_to_activity(&self, rows: &mut libsql::Rows) -> Result<Vec<ActivityEntry>> {
         let mut result = Vec::new();
         while let Some(row) = rows.next().await.map_err(|e| GapError::database(e.to_string()))? {
@@ -732,6 +752,10 @@ impl GapDatabase {
                 row.get(8).map_err(|e| GapError::database(e.to_string()))?;
             let request_headers_raw: String =
                 row.get(9).map_err(|e| GapError::database(e.to_string()))?;
+            let rejection_stage_raw: String =
+                row.get(10).map_err(|e| GapError::database(e.to_string()))?;
+            let rejection_reason_raw: String =
+                row.get(11).map_err(|e| GapError::database(e.to_string()))?;
 
             let timestamp = DateTime::parse_from_rfc3339(&ts_str)
                 .map_err(|e| GapError::database(format!("Invalid timestamp: {}", e)))?
@@ -752,9 +776,87 @@ impl GapDatabase {
                 plugin_sha: empty_to_none(plugin_sha_raw),
                 source_hash: empty_to_none(source_hash_raw),
                 request_headers: empty_to_none(request_headers_raw),
+                rejection_stage: empty_to_none(rejection_stage_raw),
+                rejection_reason: empty_to_none(rejection_reason_raw),
             });
         }
         Ok(result)
+    }
+
+    /// Save detailed request/response data for a proxied request.
+    pub async fn save_request_details(&self, details: &crate::types::RequestDetails) -> Result<()> {
+        self.conn
+            .execute(
+                "INSERT OR REPLACE INTO request_details (request_id, req_headers, req_body, transformed_url, transformed_headers, transformed_body, response_status, response_headers, response_body, body_truncated) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+                libsql::params![
+                    details.request_id.as_str(),
+                    details.req_headers.as_deref().unwrap_or(""),
+                    libsql::Value::Blob(details.req_body.clone().unwrap_or_default()),
+                    details.transformed_url.as_deref().unwrap_or(""),
+                    details.transformed_headers.as_deref().unwrap_or(""),
+                    libsql::Value::Blob(details.transformed_body.clone().unwrap_or_default()),
+                    details.response_status.map(|s| s as i64).unwrap_or(0),
+                    details.response_headers.as_deref().unwrap_or(""),
+                    libsql::Value::Blob(details.response_body.clone().unwrap_or_default()),
+                    if details.body_truncated { 1i64 } else { 0i64 }
+                ],
+            )
+            .await
+            .map_err(|e| GapError::database(format!("Failed to save request details: {}", e)))?;
+        Ok(())
+    }
+
+    /// Get detailed request/response data for a specific request.
+    pub async fn get_request_details(&self, request_id: &str) -> Result<Option<crate::types::RequestDetails>> {
+        let mut rows = self
+            .conn
+            .query(
+                "SELECT request_id, req_headers, req_body, transformed_url, transformed_headers, transformed_body, response_status, response_headers, response_body, body_truncated FROM request_details WHERE request_id = ?1",
+                libsql::params![request_id],
+            )
+            .await
+            .map_err(|e| GapError::database(e.to_string()))?;
+
+        if let Some(row) = rows.next().await.map_err(|e| GapError::database(e.to_string()))? {
+            fn empty_to_none(s: String) -> Option<String> {
+                if s.is_empty() { None } else { Some(s) }
+            }
+            fn empty_blob_to_none(b: Vec<u8>) -> Option<Vec<u8>> {
+                if b.is_empty() { None } else { Some(b) }
+            }
+            fn blob_from_value(val: libsql::Value) -> Vec<u8> {
+                match val {
+                    libsql::Value::Blob(b) => b,
+                    _ => Vec::new(),
+                }
+            }
+
+            let request_id: String = row.get(0).map_err(|e| GapError::database(e.to_string()))?;
+            let req_headers_raw: String = row.get(1).map_err(|e| GapError::database(e.to_string()))?;
+            let req_body_val = row.get_value(2).map_err(|e| GapError::database(e.to_string()))?;
+            let transformed_url_raw: String = row.get(3).map_err(|e| GapError::database(e.to_string()))?;
+            let transformed_headers_raw: String = row.get(4).map_err(|e| GapError::database(e.to_string()))?;
+            let transformed_body_val = row.get_value(5).map_err(|e| GapError::database(e.to_string()))?;
+            let response_status_raw: i64 = row.get(6).map_err(|e| GapError::database(e.to_string()))?;
+            let response_headers_raw: String = row.get(7).map_err(|e| GapError::database(e.to_string()))?;
+            let response_body_val = row.get_value(8).map_err(|e| GapError::database(e.to_string()))?;
+            let body_truncated_raw: i64 = row.get(9).map_err(|e| GapError::database(e.to_string()))?;
+
+            Ok(Some(crate::types::RequestDetails {
+                request_id,
+                req_headers: empty_to_none(req_headers_raw),
+                req_body: empty_blob_to_none(blob_from_value(req_body_val)),
+                transformed_url: empty_to_none(transformed_url_raw),
+                transformed_headers: empty_to_none(transformed_headers_raw),
+                transformed_body: empty_blob_to_none(blob_from_value(transformed_body_val)),
+                response_status: if response_status_raw == 0 { None } else { Some(response_status_raw as u16) },
+                response_headers: empty_to_none(response_headers_raw),
+                response_body: empty_blob_to_none(blob_from_value(response_body_val)),
+                body_truncated: body_truncated_raw != 0,
+            }))
+        } else {
+            Ok(None)
+        }
     }
 }
 
@@ -1059,6 +1161,8 @@ mod tests {
             plugin_sha: None,
             source_hash: None,
             request_headers: None,
+            rejection_stage: None,
+            rejection_reason: None,
         };
         db.log_activity(&entry).await.unwrap();
 
@@ -1086,6 +1190,8 @@ mod tests {
                 plugin_sha: None,
                 source_hash: None,
                 request_headers: None,
+                rejection_stage: None,
+                rejection_reason: None,
             };
             db.log_activity(&entry).await.unwrap();
         }
@@ -1116,6 +1222,8 @@ mod tests {
             plugin_sha: None,
             source_hash: None,
             request_headers: None,
+            rejection_stage: None,
+            rejection_reason: None,
         })
         .await
         .unwrap();
@@ -1132,6 +1240,8 @@ mod tests {
             plugin_sha: None,
             source_hash: None,
             request_headers: None,
+            rejection_stage: None,
+            rejection_reason: None,
         })
         .await
         .unwrap();
@@ -1156,6 +1266,8 @@ mod tests {
             plugin_sha: None,
             source_hash: None,
             request_headers: None,
+            rejection_stage: None,
+            rejection_reason: None,
         };
         db.log_activity(&entry).await.unwrap();
 
@@ -1179,6 +1291,8 @@ mod tests {
             plugin_sha: Some("abc1234".to_string()),
             source_hash: None,
             request_headers: None,
+            rejection_stage: None,
+            rejection_reason: None,
         };
         db.log_activity(&entry).await.unwrap();
 
@@ -1203,6 +1317,8 @@ mod tests {
             plugin_sha: None,
             source_hash: None,
             request_headers: None,
+            rejection_stage: None,
+            rejection_reason: None,
         };
         db.log_activity(&entry).await.unwrap();
 
@@ -1227,6 +1343,8 @@ mod tests {
             plugin_sha: Some("abc1234".to_string()),
             source_hash: Some("deadbeef1234".to_string()),
             request_headers: None,
+            rejection_stage: None,
+            rejection_reason: None,
         };
         db.log_activity(&entry).await.unwrap();
 
@@ -1251,6 +1369,8 @@ mod tests {
             plugin_sha: None,
             source_hash: None,
             request_headers: Some(headers_json.to_string()),
+            rejection_stage: None,
+            rejection_reason: None,
         };
         db.log_activity(&entry).await.unwrap();
 
@@ -1277,6 +1397,8 @@ mod tests {
             plugin_sha: None,
             source_hash: None,
             request_headers: None,
+            rejection_stage: None,
+            rejection_reason: None,
         };
         db.log_activity(&entry).await.unwrap();
 
@@ -1301,6 +1423,8 @@ mod tests {
                 plugin_sha: None,
                 source_hash: None,
                 request_headers: None,
+                rejection_stage: None,
+                rejection_reason: None,
             },
             ActivityEntry {
                 timestamp: Utc::now() - Duration::seconds(4),
@@ -1313,6 +1437,8 @@ mod tests {
                 plugin_sha: None,
                 source_hash: None,
                 request_headers: None,
+                rejection_stage: None,
+                rejection_reason: None,
             },
             ActivityEntry {
                 timestamp: Utc::now() - Duration::seconds(3),
@@ -1325,6 +1451,8 @@ mod tests {
                 plugin_sha: None,
                 source_hash: None,
                 request_headers: None,
+                rejection_stage: None,
+                rejection_reason: None,
             },
             ActivityEntry {
                 timestamp: Utc::now() - Duration::seconds(2),
@@ -1337,6 +1465,8 @@ mod tests {
                 plugin_sha: None,
                 source_hash: None,
                 request_headers: None,
+                rejection_stage: None,
+                rejection_reason: None,
             },
         ];
         for entry in &entries {
@@ -1484,6 +1614,8 @@ mod tests {
             plugin_sha: None,
             source_hash: None,
             request_headers: None,
+            rejection_stage: None,
+            rejection_reason: None,
         }).await.unwrap();
 
         // Recent entry
@@ -1498,6 +1630,8 @@ mod tests {
             plugin_sha: None,
             source_hash: None,
             request_headers: None,
+            rejection_stage: None,
+            rejection_reason: None,
         }).await.unwrap();
 
         let filter = crate::types::ActivityFilter {
@@ -1524,6 +1658,8 @@ mod tests {
             plugin_sha: None,
             source_hash: None,
             request_headers: None,
+            rejection_stage: None,
+            rejection_reason: None,
         };
         db.log_activity(&entry).await.unwrap();
 
@@ -1756,5 +1892,121 @@ mod tests {
         let plugins = db.list_plugins().await.unwrap();
         assert_eq!(plugins.len(), 1);
         assert!(plugins[0].dangerously_permit_http);
+    }
+
+    // ── Rejection Tracking ─────────────────────────────────────────
+
+    #[tokio::test]
+    async fn test_activity_with_rejection() {
+        let db = GapDatabase::in_memory().await.unwrap();
+
+        let entry = ActivityEntry {
+            timestamp: Utc::now(),
+            request_id: Some("rej001".to_string()),
+            method: "GET".to_string(),
+            url: "https://unknown.host.com/data".to_string(),
+            agent_id: Some("agent-1".to_string()),
+            status: 0,
+            plugin_name: None,
+            plugin_sha: None,
+            source_hash: None,
+            request_headers: None,
+            rejection_stage: Some("no_matching_plugin".to_string()),
+            rejection_reason: Some("Host 'unknown.host.com' has no matching plugin".to_string()),
+        };
+        db.log_activity(&entry).await.unwrap();
+
+        let logs = db.get_activity(None).await.unwrap();
+        assert_eq!(logs.len(), 1);
+        assert_eq!(logs[0].status, 0);
+        assert_eq!(logs[0].rejection_stage, Some("no_matching_plugin".to_string()));
+        assert_eq!(logs[0].rejection_reason, Some("Host 'unknown.host.com' has no matching plugin".to_string()));
+    }
+
+    // ── Request Details ────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn test_request_details_round_trip() {
+        let db = GapDatabase::in_memory().await.unwrap();
+
+        let details = crate::types::RequestDetails {
+            request_id: "test-req-001".to_string(),
+            req_headers: Some(r#"{"Host":"api.example.com","Accept":"*/*"}"#.to_string()),
+            req_body: Some(b"request body here".to_vec()),
+            transformed_url: Some("https://api.example.com/v2/data".to_string()),
+            transformed_headers: Some(r#"{"Authorization":"Bearer [REDACTED]","Host":"api.example.com"}"#.to_string()),
+            transformed_body: Some(b"transformed body".to_vec()),
+            response_status: Some(200),
+            response_headers: Some(r#"{"Content-Type":"application/json"}"#.to_string()),
+            response_body: Some(b"{\"result\":\"ok\"}".to_vec()),
+            body_truncated: false,
+        };
+        db.save_request_details(&details).await.unwrap();
+
+        let got = db.get_request_details("test-req-001").await.unwrap().unwrap();
+        assert_eq!(got.request_id, "test-req-001");
+        assert_eq!(got.req_headers, details.req_headers);
+        assert_eq!(got.req_body, details.req_body);
+        assert_eq!(got.transformed_url, details.transformed_url);
+        assert_eq!(got.transformed_headers, details.transformed_headers);
+        assert_eq!(got.transformed_body, details.transformed_body);
+        assert_eq!(got.response_status, Some(200));
+        assert_eq!(got.response_headers, details.response_headers);
+        assert_eq!(got.response_body, details.response_body);
+        assert!(!got.body_truncated);
+    }
+
+    #[tokio::test]
+    async fn test_request_details_not_found() {
+        let db = GapDatabase::in_memory().await.unwrap();
+        let result = db.get_request_details("nonexistent").await.unwrap();
+        assert!(result.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_request_details_partial_data() {
+        let db = GapDatabase::in_memory().await.unwrap();
+
+        // Only pre-transform data (e.g., rejected request)
+        let details = crate::types::RequestDetails {
+            request_id: "rejected-001".to_string(),
+            req_headers: Some(r#"{"Host":"blocked.com"}"#.to_string()),
+            req_body: None,
+            transformed_url: None,
+            transformed_headers: None,
+            transformed_body: None,
+            response_status: None,
+            response_headers: None,
+            response_body: None,
+            body_truncated: false,
+        };
+        db.save_request_details(&details).await.unwrap();
+
+        let got = db.get_request_details("rejected-001").await.unwrap().unwrap();
+        assert_eq!(got.req_headers, Some(r#"{"Host":"blocked.com"}"#.to_string()));
+        assert!(got.transformed_url.is_none());
+        assert!(got.response_status.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_request_details_with_truncated_body() {
+        let db = GapDatabase::in_memory().await.unwrap();
+
+        let details = crate::types::RequestDetails {
+            request_id: "truncated-001".to_string(),
+            req_headers: None,
+            req_body: Some(vec![0u8; 100]),
+            transformed_url: None,
+            transformed_headers: None,
+            transformed_body: None,
+            response_status: None,
+            response_headers: None,
+            response_body: None,
+            body_truncated: true,
+        };
+        db.save_request_details(&details).await.unwrap();
+
+        let got = db.get_request_details("truncated-001").await.unwrap().unwrap();
+        assert!(got.body_truncated);
     }
 }
