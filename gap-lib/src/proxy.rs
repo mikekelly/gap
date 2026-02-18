@@ -186,6 +186,75 @@ impl ProxyServer {
     }
 }
 
+/// A stream wrapper that prepends buffered bytes before reading from the inner stream.
+///
+/// Used for protocol detection: we read the first byte to determine TLS vs plain HTTP,
+/// then wrap the stream so the consumer (TLS acceptor or HTTP parser) sees the complete
+/// data including that first byte.
+///
+/// Implements both AsyncRead (prefix + inner) and AsyncWrite (delegates to inner).
+struct PrefixedStream<S> {
+    prefix: Vec<u8>,
+    prefix_pos: usize,
+    inner: S,
+}
+
+impl<S> PrefixedStream<S> {
+    fn new(prefix: Vec<u8>, inner: S) -> Self {
+        Self {
+            prefix,
+            prefix_pos: 0,
+            inner,
+        }
+    }
+}
+
+impl<S: tokio::io::AsyncRead + Unpin> tokio::io::AsyncRead for PrefixedStream<S> {
+    fn poll_read(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        buf: &mut tokio::io::ReadBuf<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        let this = self.get_mut();
+
+        // First, drain any remaining prefix bytes
+        if this.prefix_pos < this.prefix.len() {
+            let remaining = &this.prefix[this.prefix_pos..];
+            let to_copy = remaining.len().min(buf.remaining());
+            buf.put_slice(&remaining[..to_copy]);
+            this.prefix_pos += to_copy;
+            return std::task::Poll::Ready(Ok(()));
+        }
+
+        // Then delegate to inner stream
+        std::pin::Pin::new(&mut this.inner).poll_read(cx, buf)
+    }
+}
+
+impl<S: tokio::io::AsyncWrite + Unpin> tokio::io::AsyncWrite for PrefixedStream<S> {
+    fn poll_write(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        buf: &[u8],
+    ) -> std::task::Poll<std::io::Result<usize>> {
+        std::pin::Pin::new(&mut self.get_mut().inner).poll_write(cx, buf)
+    }
+
+    fn poll_flush(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        std::pin::Pin::new(&mut self.get_mut().inner).poll_flush(cx)
+    }
+
+    fn poll_shutdown(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        std::pin::Pin::new(&mut self.get_mut().inner).poll_shutdown(cx)
+    }
+}
+
 /// Handle a single proxy connection
 async fn handle_connection(
     stream: TcpStream,
@@ -248,35 +317,66 @@ async fn handle_connection(
 
     debug!("Sent 200 Connection Established");
 
-    // Now upgrade to TLS on both sides
     let (hostname, port) = parse_host_port(&target)?;
 
-    // Agent-side TLS: accept with dynamic cert, detect negotiated protocol
-    let (agent_stream, is_h2) = accept_agent_tls(stream, &hostname, &ca).await?;
-    debug!("Agent-side TLS established (h2={})", is_h2);
+    // Peek at first byte to detect protocol: TLS ClientHello starts with 0x16,
+    // plain HTTP starts with an ASCII method character (G, P, H, D, O, T, C).
+    //
+    // Since TLS streams don't have a native peek method, we read one byte and
+    // wrap the stream in PrefixedStream to prepend it back for the consumer.
+    let mut first_byte = [0u8; 1];
+    let n = stream.read(&mut first_byte).await
+        .map_err(|e| GapError::network(format!("Failed to read first byte of inner stream: {}", e)))?;
 
-    // Build upstream TLS connector with matching ALPN protocol.
-    // We build a fresh connector per-connection so the ALPN matches what
-    // the agent negotiated. This ensures H2 agents get H2 upstream and
-    // H1 agents get H1 upstream.
-    let alpn = if is_h2 {
-        vec![b"h2".to_vec()]
+    if n == 0 {
+        return Err(GapError::network("Client closed connection after CONNECT"));
+    }
+
+    let is_tls = first_byte[0] == 0x16;
+    debug!("Inner protocol detection: first_byte=0x{:02x} is_tls={}", first_byte[0], is_tls);
+
+    // Wrap stream with the consumed byte prepended so downstream consumers
+    // (TLS handshake or HTTP parser) see the complete data.
+    let stream = PrefixedStream::new(first_byte.to_vec(), stream);
+
+    if is_tls {
+        // --- HTTPS path (existing): MITM TLS on both sides ---
+
+        // Agent-side TLS: accept with dynamic cert, detect negotiated protocol
+        let (agent_stream, is_h2) = accept_agent_tls(stream, &hostname, &ca).await?;
+        debug!("Agent-side TLS established (h2={})", is_h2);
+
+        // Build upstream TLS connector with matching ALPN protocol.
+        let alpn = if is_h2 {
+            vec![b"h2".to_vec()]
+        } else {
+            vec![b"http/1.1".to_vec()]
+        };
+        let mut client_config = rustls::ClientConfig::builder()
+            .with_root_certificates((*upstream_root_certs).clone())
+            .with_no_client_auth();
+        client_config.alpn_protocols = alpn;
+        let connector = TlsConnector::from(Arc::new(client_config));
+
+        // Upstream TLS: connect to target
+        let upstream_stream = connect_upstream(&hostname, port, connector).await?;
+        debug!("Upstream TLS established");
+
+        // Bidirectional proxy with HTTP transformation via hyper
+        proxy_via_hyper(agent_stream, upstream_stream, hostname, db, agent_token.name.clone(), is_h2, true, activity_tx).await?;
     } else {
-        vec![b"http/1.1".to_vec()]
-    };
-    let mut client_config = rustls::ClientConfig::builder()
-        .with_root_certificates((*upstream_root_certs).clone())
-        .with_no_client_auth();
-    client_config.alpn_protocols = alpn;
-    let connector = TlsConnector::from(Arc::new(client_config));
+        // --- Plain HTTP path: no TLS on either side ---
+        debug!("Plain HTTP detected through CONNECT tunnel to {}:{}", hostname, port);
 
-    // Upstream TLS: connect to target
-    let upstream_stream = connect_upstream(&hostname, port, connector).await?;
-    debug!("Upstream TLS established");
+        // Connect to upstream over plain TCP (no TLS)
+        let upstream_stream = TcpStream::connect(format!("{}:{}", hostname, port))
+            .await
+            .map_err(|e| GapError::network(format!("Failed to connect upstream (plain): {}", e)))?;
+        debug!("Upstream plain TCP established");
 
-    // Bidirectional proxy with HTTP transformation via hyper
-    // hyper handles ALL requests per connection (not just the first one)
-    proxy_via_hyper(agent_stream, upstream_stream, hostname, db, agent_token.name.clone(), is_h2, activity_tx).await?;
+        // Proxy via hyper with use_tls=false (HTTP/1.1 only for plain HTTP)
+        proxy_via_hyper(stream, upstream_stream, hostname, db, agent_token.name.clone(), false, false, activity_tx).await?;
+    }
 
     Ok(())
 }
@@ -436,6 +536,11 @@ async fn connect_upstream(
 /// Supports both HTTP/1.1 and HTTP/2 based on the `is_h2` flag (determined
 /// by ALPN negotiation during agent-side TLS handshake).
 ///
+/// The `use_tls` flag controls URL scheme construction: when true, requests
+/// are constructed with `https://`; when false, `http://`. This allows the
+/// same transform pipeline to handle both HTTPS (MITM TLS) and plain HTTP
+/// traffic through a CONNECT tunnel.
+///
 /// Architecture:
 /// - Agent side: `hyper_util::server::conn::auto::Builder` handles both H1/H2
 /// - For each request: convert to GAPRequest, apply plugin transforms, convert back
@@ -448,6 +553,7 @@ async fn proxy_via_hyper<A, U>(
     db: Arc<GapDatabase>,
     agent_name: String,
     is_h2: bool,
+    use_tls: bool,
     activity_tx: Option<tokio::sync::broadcast::Sender<ActivityEntry>>,
 ) -> Result<()>
 where
@@ -487,7 +593,7 @@ where
                     .to_bytes();
                 let req = hyper::Request::from_parts(parts, ());
 
-                let gap_req = hyper_to_gap_request(&req, body_bytes, &hostname);
+                let gap_req = hyper_to_gap_request(&req, body_bytes, &hostname, use_tls);
                 let method = gap_req.method.clone();
                 let url = gap_req.url.clone();
 
@@ -570,7 +676,7 @@ where
                     .to_bytes();
                 let req = hyper::Request::from_parts(parts, ());
 
-                let gap_req = hyper_to_gap_request(&req, body_bytes, &hostname);
+                let gap_req = hyper_to_gap_request(&req, body_bytes, &hostname, use_tls);
                 let method = gap_req.method.clone();
                 let url = gap_req.url.clone();
 
@@ -637,10 +743,14 @@ where
 ///
 /// Used by the hyper-based proxy pipeline to convert incoming requests
 /// into the format expected by `transform_request()`.
+///
+/// The `use_tls` flag determines the URL scheme: `https://` when true (MITM TLS),
+/// `http://` when false (plain HTTP through CONNECT tunnel).
 fn hyper_to_gap_request<B>(
     req: &hyper::Request<B>,
     body_bytes: bytes::Bytes,
     hostname: &str,
+    use_tls: bool,
 ) -> crate::types::GAPRequest {
     use std::collections::HashMap;
 
@@ -652,7 +762,8 @@ fn hyper_to_gap_request<B>(
         .path_and_query()
         .map(|pq| pq.as_str())
         .unwrap_or("/");
-    let url = format!("https://{}{}", hostname, path_and_query);
+    let scheme = if use_tls { "https" } else { "http" };
+    let url = format!("{}://{}{}", scheme, hostname, path_and_query);
 
     // Collect headers
     let mut headers = HashMap::new();
@@ -816,7 +927,7 @@ mod tests {
             .unwrap();
 
         let body_bytes = bytes::Bytes::new();
-        let gap_req = hyper_to_gap_request(&hyper_req, body_bytes, "api.example.com");
+        let gap_req = hyper_to_gap_request(&hyper_req, body_bytes, "api.example.com", true);
 
         assert_eq!(gap_req.method, "GET");
         assert_eq!(gap_req.url, "https://api.example.com/api/data?q=test");
@@ -836,7 +947,7 @@ mod tests {
             .unwrap();
 
         let body_bytes = bytes::Bytes::from(r#"{"key":"value"}"#);
-        let gap_req = hyper_to_gap_request(&hyper_req, body_bytes, "api.example.com");
+        let gap_req = hyper_to_gap_request(&hyper_req, body_bytes, "api.example.com", true);
 
         assert_eq!(gap_req.method, "POST");
         assert_eq!(gap_req.url, "https://api.example.com/api/submit");
@@ -852,7 +963,7 @@ mod tests {
             .body(())
             .unwrap();
 
-        let gap_req = hyper_to_gap_request(&hyper_req, bytes::Bytes::new(), "example.com");
+        let gap_req = hyper_to_gap_request(&hyper_req, bytes::Bytes::new(), "example.com", true);
         assert_eq!(gap_req.url, "https://example.com/");
     }
 
@@ -901,7 +1012,7 @@ mod tests {
 
         // Convert back
         let body_bytes = bytes::Bytes::from(original.body.clone());
-        let roundtripped = hyper_to_gap_request(&hyper_req, body_bytes, "api.example.com");
+        let roundtripped = hyper_to_gap_request(&hyper_req, body_bytes, "api.example.com", true);
 
         assert_eq!(roundtripped.method, original.method);
         assert_eq!(roundtripped.url, original.url);
@@ -989,6 +1100,7 @@ mod tests {
                 proxy_db,
                 "test-agent".to_string(),
                 false, // is_h2 = false for H1
+                true,  // use_tls = true (HTTPS)
                 None,  // no activity broadcast
             )
             .await
@@ -1046,5 +1158,164 @@ mod tests {
             "Credential should be scrubbed, got: {}", auth_value);
         assert!(!auth_value.as_str().unwrap().contains("my-secret-key"),
             "Raw credential should not appear in logged headers");
+    }
+
+    #[test]
+    fn test_hyper_to_gap_request_http_scheme() {
+        let hyper_req = hyper::Request::builder()
+            .method("GET")
+            .uri("/api/data?q=test")
+            .header("Host", "api.example.com")
+            .body(())
+            .unwrap();
+
+        // use_tls = false should produce http:// URL
+        let gap_req = hyper_to_gap_request(&hyper_req, bytes::Bytes::new(), "api.example.com", false);
+        assert_eq!(gap_req.url, "http://api.example.com/api/data?q=test");
+    }
+
+    /// Test proxy_via_hyper with use_tls=false: plain HTTP proxy path.
+    ///
+    /// Verifies that when use_tls is false, the transform pipeline receives
+    /// http:// URLs and the request is correctly proxied through the hyper pipeline.
+    #[tokio::test]
+    async fn test_proxy_via_hyper_plain_http() {
+        use crate::database::GapDatabase;
+        use crate::types::PluginEntry;
+        use http_body_util::{BodyExt, Full};
+        use hyper_util::rt::TokioIo;
+
+        // -- Setup database with plugin + credentials --
+        // Use a plugin that matches on the hostname and injects a header
+        let db = Arc::new(GapDatabase::in_memory().await.unwrap());
+
+        let plugin_code = r#"
+        var plugin = {
+            name: "test-http",
+            matchPatterns: ["api.httptest.com"],
+            credentialSchema: ["api_key"],
+            transform: function(request, credentials) {
+                request.headers["Authorization"] = "Bearer " + credentials.api_key;
+                // Expose the URL scheme to the upstream so we can verify it
+                request.headers["X-Url-Received"] = request.url;
+                return request;
+            }
+        };
+        "#;
+        let plugin_entry = PluginEntry {
+            name: "test-http".to_string(),
+            hosts: vec!["api.httptest.com".to_string()],
+            credential_schema: vec!["api_key".to_string()],
+            commit_sha: None,
+        };
+        db.add_plugin(&plugin_entry, plugin_code).await.unwrap();
+        db.set_credential("test-http", "api_key", "http-secret").await.unwrap();
+
+        // -- Create paired DuplexStreams --
+        let (agent_client, agent_proxy) = tokio::io::duplex(8192);
+        let (upstream_proxy, upstream_server) = tokio::io::duplex(8192);
+
+        // -- Spawn a mock upstream HTTP server --
+        let upstream_handle = tokio::spawn(async move {
+            let io = TokioIo::new(upstream_server);
+            hyper::server::conn::http1::Builder::new()
+                .serve_connection(
+                    io,
+                    hyper::service::service_fn(|req: hyper::Request<hyper::body::Incoming>| async move {
+                        let url_header = req.headers()
+                            .get("x-url-received")
+                            .map(|v| v.to_str().unwrap_or("").to_string())
+                            .unwrap_or_default();
+                        let auth = req.headers()
+                            .get("authorization")
+                            .map(|v| v.to_str().unwrap_or("").to_string())
+                            .unwrap_or_default();
+
+                        let body = format!("url={} auth={}", url_header, auth);
+                        Ok::<_, std::convert::Infallible>(
+                            hyper::Response::new(Full::new(bytes::Bytes::from(body)))
+                        )
+                    }),
+                )
+                .await
+                .expect("upstream server error");
+        });
+
+        // -- Spawn proxy_via_hyper (H1 mode, plain HTTP) --
+        let proxy_db = Arc::clone(&db);
+        let proxy_handle = tokio::spawn(async move {
+            proxy_via_hyper(
+                agent_proxy,
+                upstream_proxy,
+                "api.httptest.com".to_string(),
+                proxy_db,
+                "test-agent".to_string(),
+                false, // is_h2 = false for H1
+                false, // use_tls = false (plain HTTP)
+                None,  // no activity broadcast
+            )
+            .await
+        });
+
+        // -- Agent sends a request through the proxy --
+        let agent_io = TokioIo::new(agent_client);
+        let (mut sender, conn) = hyper::client::conn::http1::handshake(agent_io).await
+            .expect("agent handshake");
+        tokio::spawn(async move { let _ = conn.await; });
+
+        let req = hyper::Request::builder()
+            .method("GET")
+            .uri("/data?q=test")
+            .header("Host", "api.httptest.com")
+            .body(Full::new(bytes::Bytes::new()))
+            .unwrap();
+
+        let resp = sender.send_request(req).await.expect("send request");
+        assert_eq!(resp.status(), 200);
+
+        let body_bytes = resp.into_body().collect().await.unwrap().to_bytes();
+        let body_str = String::from_utf8(body_bytes.to_vec()).unwrap();
+
+        // The plugin should have seen an http:// URL (not https://)
+        assert!(body_str.contains("url=http://api.httptest.com/data?q=test"),
+            "Expected http:// URL, got: {}", body_str);
+        // Credential injection should still work
+        assert!(body_str.contains("auth=Bearer http-secret"),
+            "Expected credential injection, got: {}", body_str);
+
+        // Clean up
+        drop(sender);
+        let _ = proxy_handle.await;
+        let _ = upstream_handle.await;
+    }
+
+    #[tokio::test]
+    async fn test_prefixed_stream_read_write() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        // Create a duplex stream to test with
+        let (client, server) = tokio::io::duplex(1024);
+
+        // Wrap the server side with a prefix byte (simulating protocol detection)
+        let prefix = vec![0x16]; // TLS ClientHello indicator
+        let mut prefixed = PrefixedStream::new(prefix, server);
+
+        // Write through the prefixed stream (should pass through to inner)
+        prefixed.write_all(b"hello").await.unwrap();
+
+        // Read from the client side
+        let mut buf = [0u8; 5];
+        let mut client = client;
+        client.read_exact(&mut buf).await.unwrap();
+        assert_eq!(&buf, b"hello");
+
+        // Write from client to prefixed stream
+        client.write_all(b"world").await.unwrap();
+
+        // Read from prefixed stream: should get prefix byte first, then "world"
+        let mut read_buf = [0u8; 6];
+        prefixed.read_exact(&mut read_buf).await.unwrap();
+        assert_eq!(read_buf[0], 0x16); // prefix byte
+        assert_eq!(&read_buf[1..], b"world");
     }
 }
