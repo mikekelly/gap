@@ -294,6 +294,30 @@ pub struct ActivityEntry {
     pub source_hash: Option<String>,
     /// JSON string of post-transform request headers with credential values scrubbed
     pub request_headers: Option<String>,
+    /// Pipeline stage where request was rejected (auth, no_matching_plugin, missing_credentials, http_blocked, upstream_error)
+    pub rejection_stage: Option<String>,
+    /// Human-readable reason for rejection
+    pub rejection_reason: Option<String>,
+}
+
+/// Detailed request/response data for a single proxied request.
+/// Stored separately from ActivityEntry to keep list queries fast.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct RequestDetails {
+    pub request_id: String,
+    // Pre-transform (incoming from agent)
+    pub req_headers: Option<String>,        // JSON object
+    pub req_body: Option<Vec<u8>>,          // Up to 64KB
+    // Post-transform (after plugin, scrubbed)
+    pub transformed_url: Option<String>,
+    pub transformed_headers: Option<String>, // JSON, credential values scrubbed
+    pub transformed_body: Option<Vec<u8>>,   // Credential values scrubbed, up to 64KB
+    // Origin response (scrubbed)
+    pub response_status: Option<u16>,
+    pub response_headers: Option<String>,    // JSON, credential values scrubbed
+    pub response_body: Option<Vec<u8>>,      // Credential values scrubbed, up to 64KB
+    // Metadata
+    pub body_truncated: bool,
 }
 
 /// Filter for querying activity logs

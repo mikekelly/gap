@@ -2404,6 +2404,8 @@ mod tests {
             plugin_sha: None,
             source_hash: None,
             request_headers: None,
+            rejection_stage: None,
+            rejection_reason: None,
         };
         activity_tx.send(entry.clone()).unwrap();
 
@@ -2472,6 +2474,8 @@ mod tests {
             plugin_sha: None,
             source_hash: None,
             request_headers: None,
+            rejection_stage: None,
+            rejection_reason: None,
         };
         // Send a non-matching entry first
         let non_matching_entry = ActivityEntry {
@@ -2485,6 +2489,8 @@ mod tests {
             plugin_sha: None,
             source_hash: None,
             request_headers: None,
+            rejection_stage: None,
+            rejection_reason: None,
         };
         activity_tx.send(non_matching_entry).unwrap();
         activity_tx.send(matching_entry).unwrap();
@@ -2542,6 +2548,8 @@ mod tests {
                 plugin_sha: None,
                 source_hash: None,
                 request_headers: None,
+                rejection_stage: None,
+                rejection_reason: None,
             },
             // POST on api.openai.com, plugin=openai, req_id=req-002
             ActivityEntry {
@@ -2555,6 +2563,8 @@ mod tests {
                 plugin_sha: None,
                 source_hash: None,
                 request_headers: None,
+                rejection_stage: None,
+                rejection_reason: None,
             },
             // POST on api.anthropic.com, plugin=anthropic, req_id=req-003
             ActivityEntry {
@@ -2568,6 +2578,8 @@ mod tests {
                 plugin_sha: None,
                 source_hash: None,
                 request_headers: None,
+                rejection_stage: None,
+                rejection_reason: None,
             },
             // PUT on api.openai.com, no plugin, req_id=req-004
             ActivityEntry {
@@ -2581,6 +2593,8 @@ mod tests {
                 plugin_sha: None,
                 source_hash: None,
                 request_headers: None,
+                rejection_stage: None,
+                rejection_reason: None,
             },
         ];
         for entry in &entries {
@@ -2728,6 +2742,8 @@ mod tests {
             plugin_sha: None,
             source_hash: None,
             request_headers: None,
+            rejection_stage: None,
+            rejection_reason: None,
         }).await.unwrap();
 
         db.log_activity(&ActivityEntry {
@@ -2741,6 +2757,8 @@ mod tests {
             plugin_sha: None,
             source_hash: None,
             request_headers: None,
+            rejection_stage: None,
+            rejection_reason: None,
         }).await.unwrap();
 
         let since_param = urlencoding::encode(&cutoff.to_rfc3339()).into_owned();
