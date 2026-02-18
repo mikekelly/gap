@@ -7,6 +7,15 @@
 use async_trait::async_trait;
 use crate::Result;
 
+/// Produce a 16-char hex fingerprint for debugging key identity.
+/// NOT cryptographic — only for detecting "did the key change?" in logs.
+pub fn key_fingerprint(key: &[u8]) -> String {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    key.hash(&mut hasher);
+    format!("{:016x}", hasher.finish())
+}
+
 /// Provides encryption key bytes for the database.
 ///
 /// Implementations determine where the key comes from (environment, keychain, etc).
@@ -53,31 +62,49 @@ impl KeyProvider for KeychainKeyProvider {
             set_generic_password_with_access_group,
         };
 
-        // Try to retrieve existing key from keychain (traditional keychain, no access group)
-        if let Some(key) = get_generic_password_with_access_group(
+        tracing::info!("Attempting to retrieve encryption key from keychain");
+
+        match get_generic_password_with_access_group(
             KEYCHAIN_SERVICE,
             KEYCHAIN_ACCOUNT,
             None,
             false,
-        )? {
-            tracing::info!("Retrieved database encryption key from keychain");
-            return Ok(key);
+        ) {
+            Ok(Some(key)) => {
+                let fp = key_fingerprint(&key);
+                tracing::info!(key_fingerprint = %fp, "Retrieved encryption key from keychain");
+                return Ok(key);
+            }
+            Ok(None) => {
+                tracing::info!("No existing key in keychain — generating new 32-byte key");
+            }
+            Err(e) => {
+                tracing::error!(error = %e, "Failed to read encryption key from keychain");
+                return Err(e);
+            }
         }
 
-        // Not found: generate a random 32-byte key
+        // Generate a random 32-byte key
         use rand::RngCore;
         let mut key = vec![0u8; 32];
         rand::thread_rng().fill_bytes(&mut key);
+        let fp = key_fingerprint(&key);
 
-        // Store in keychain for next time
-        set_generic_password_with_access_group(
+        match set_generic_password_with_access_group(
             KEYCHAIN_SERVICE,
             KEYCHAIN_ACCOUNT,
             &key,
             None,
             false,
-        )?;
-        tracing::info!("Generated and stored new database encryption key in keychain");
+        ) {
+            Ok(()) => {
+                tracing::info!(key_fingerprint = %fp, "Stored new encryption key in keychain");
+            }
+            Err(e) => {
+                tracing::error!(error = %e, "Failed to store encryption key in keychain");
+                return Err(e);
+            }
+        }
 
         Ok(key)
     }
@@ -189,32 +216,35 @@ mod tests {
     #[tokio::test]
     #[ignore]
     async fn keychain_key_provider_stores_and_retrieves() {
-        use crate::keychain_impl::delete_generic_password_with_access_group;
+        use crate::keychain_impl::{
+            delete_generic_password_with_access_group,
+            get_generic_password_with_access_group,
+            set_generic_password_with_access_group,
+        };
+
+        const TEST_SERVICE: &str = "com.gap.test.db-encryption";
+        const TEST_ACCOUNT: &str = "test-master-key";
 
         // Clean up any existing test key
-        let _ = delete_generic_password_with_access_group(
-            KEYCHAIN_SERVICE,
-            KEYCHAIN_ACCOUNT,
-            None,
-            false,
-        );
+        let _ = delete_generic_password_with_access_group(TEST_SERVICE, TEST_ACCOUNT, None, false);
 
-        let provider = KeychainKeyProvider;
+        // No key initially
+        let existing = get_generic_password_with_access_group(TEST_SERVICE, TEST_ACCOUNT, None, false)
+            .unwrap();
+        assert!(existing.is_none(), "No key should exist before test");
 
-        // First call should generate and store a new key
-        let key1 = provider.get_key().await.unwrap();
-        assert_eq!(key1.len(), 32, "Generated key should be 32 bytes");
+        // Store a key
+        let key = vec![0x42u8; 32];
+        set_generic_password_with_access_group(TEST_SERVICE, TEST_ACCOUNT, &key, None, false)
+            .unwrap();
 
-        // Second call should retrieve the same key
-        let key2 = provider.get_key().await.unwrap();
-        assert_eq!(key1, key2, "Subsequent calls should return the same key");
+        // Retrieve it
+        let retrieved = get_generic_password_with_access_group(TEST_SERVICE, TEST_ACCOUNT, None, false)
+            .unwrap()
+            .expect("Key should be retrievable");
+        assert_eq!(retrieved, key, "Retrieved key should match stored key");
 
         // Clean up
-        let _ = delete_generic_password_with_access_group(
-            KEYCHAIN_SERVICE,
-            KEYCHAIN_ACCOUNT,
-            None,
-            false,
-        );
+        let _ = delete_generic_password_with_access_group(TEST_SERVICE, TEST_ACCOUNT, None, false);
     }
 }

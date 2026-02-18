@@ -72,6 +72,7 @@ pub fn set_generic_password_with_access_group(
     }
 
     let status = unsafe { SecItemAdd(dict.as_concrete_TypeRef(), std::ptr::null_mut()) };
+    tracing::debug!(status = status, "SecItemAdd completed");
     cvt(status)
 }
 
@@ -115,6 +116,7 @@ pub fn get_generic_password_with_access_group(
 
     let mut ret: CFTypeRef = std::ptr::null_mut();
     let status = unsafe { SecItemCopyMatching(dict.as_concrete_TypeRef(), &mut ret) };
+    tracing::debug!(status = status, "SecItemCopyMatching completed");
 
     if status == errSecItemNotFound {
         return Ok(None);
@@ -172,6 +174,7 @@ pub fn delete_generic_password_with_access_group(
     }
 
     let status = unsafe { SecItemDelete(dict.as_concrete_TypeRef()) };
+    tracing::debug!(status = status, "SecItemDelete completed");
 
     // Idempotent - OK if item not found
     if status == errSecItemNotFound {
