@@ -244,10 +244,8 @@ impl CertificateAuthority {
         if let Some(first_san) = sans.first() {
             let cn = if let Some(dns) = first_san.strip_prefix("DNS:") {
                 dns
-            } else if let Some(ip) = first_san.strip_prefix("IP:") {
-                ip
             } else {
-                "GAP Server"
+                first_san.strip_prefix("IP:").unwrap_or("GAP Server")
             };
             dn.push(DnType::CommonName, cn);
         }

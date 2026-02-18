@@ -1,7 +1,7 @@
-/// Platform-specific path utilities for GAP
-///
-/// This module provides functions to get well-known paths for GAP resources
-/// like the CA certificate, ensuring consistent paths across platforms.
+//! Platform-specific path utilities for GAP
+//!
+//! This module provides functions to get well-known paths for GAP resources
+//! like the CA certificate, ensuring consistent paths across platforms.
 
 use std::path::PathBuf;
 

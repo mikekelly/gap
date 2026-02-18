@@ -208,6 +208,7 @@ pub struct RevokeTokenResponse {
 }
 
 #[derive(Debug, Deserialize)]
+#[allow(dead_code)]
 pub struct ActivityEntry {
     pub timestamp: String,
     pub request_id: Option<String>,

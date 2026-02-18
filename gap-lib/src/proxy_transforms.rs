@@ -55,7 +55,7 @@ fn scrub_headers(request: &GAPRequest, credentials: &HashMap<String, String>) ->
         .map(|(k, v)| (k.clone(), v.clone()))
         .collect();
 
-    for (_field_name, cred_value) in credentials {
+    for cred_value in credentials.values() {
         if cred_value.is_empty() {
             continue;
         }

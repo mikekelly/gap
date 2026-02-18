@@ -53,7 +53,7 @@ impl ProxyServer {
     ) -> Result<Self> {
         // Store root certs for building per-connection upstream TLS connectors
         let upstream_root_certs = Arc::new(rustls::RootCertStore {
-            roots: webpki_roots::TLS_SERVER_ROOTS.iter().cloned().collect(),
+            roots: webpki_roots::TLS_SERVER_ROOTS.to_vec(),
         });
 
         // Wrap CA in Arc early so it can be shared between the resolver and the struct
@@ -531,6 +531,7 @@ async fn connect_upstream(
 /// - For each request: convert to GAPRequest, apply plugin transforms, convert back
 /// - Upstream side: matching hyper client (H1 or H2)
 /// - Response flows back to agent unchanged
+#[allow(clippy::too_many_arguments)]
 async fn proxy_via_hyper<A, U>(
     agent_stream: A,
     upstream_stream: U,
@@ -594,7 +595,7 @@ where
                 );
 
                 let transform_result = crate::proxy_transforms::transform_request(
-                    gap_req, &hostname, &*db, use_tls
+                    gap_req, &hostname, &db, use_tls
                 ).instrument(span.clone()).await;
 
                 let (gap_req, plugin_info) = match transform_result {
@@ -779,7 +780,7 @@ where
                 );
 
                 let transform_result = crate::proxy_transforms::transform_request(
-                    gap_req, &hostname, &*db, use_tls
+                    gap_req, &hostname, &db, use_tls
                 ).instrument(span.clone()).await;
 
                 let (gap_req, plugin_info) = match transform_result {
