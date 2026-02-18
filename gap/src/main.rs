@@ -83,6 +83,25 @@ enum Commands {
         #[arg(long)]
         follow: bool,
     },
+
+    /// View management audit log
+    ManagementLog {
+        /// Stream log entries in real-time
+        #[arg(long)]
+        follow: bool,
+        /// Filter by operation (e.g., token_create, plugin_install)
+        #[arg(long)]
+        operation: Option<String>,
+        /// Filter by resource type (token, plugin, credential, server)
+        #[arg(long)]
+        resource_type: Option<String>,
+        /// Filter by resource ID
+        #[arg(long)]
+        resource_id: Option<String>,
+        /// Maximum number of entries to return
+        #[arg(long)]
+        limit: Option<u32>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -156,6 +175,8 @@ async fn main() {
             TokenCommands::Revoke { id } => commands::tokens::revoke(&cli.server, &id).await,
         },
         Commands::Activity { follow } => commands::activity::run(&cli.server, follow).await,
+        Commands::ManagementLog { follow, operation, resource_type, resource_id, limit } =>
+            commands::management_log::run(&cli.server, follow, operation, resource_type, resource_id, limit).await,
     };
 
     if let Err(e) = result {
@@ -267,6 +288,43 @@ mod tests {
                 assert!(follow);
             }
             _ => panic!("Expected Activity command"),
+        }
+    }
+
+    #[test]
+    fn test_cli_management_log_parses() {
+        let _cli = Cli::parse_from(["gap", "management-log"]);
+    }
+
+    #[test]
+    fn test_cli_management_log_follow_parses() {
+        let cli = Cli::parse_from(["gap", "management-log", "--follow"]);
+        match cli.command {
+            Commands::ManagementLog { follow, .. } => {
+                assert!(follow);
+            }
+            _ => panic!("Expected ManagementLog command"),
+        }
+    }
+
+    #[test]
+    fn test_cli_management_log_filters_parse() {
+        let cli = Cli::parse_from([
+            "gap", "management-log",
+            "--operation", "token_create",
+            "--resource-type", "token",
+            "--resource-id", "abc123",
+            "--limit", "50",
+        ]);
+        match cli.command {
+            Commands::ManagementLog { follow, operation, resource_type, resource_id, limit } => {
+                assert!(!follow);
+                assert_eq!(operation.as_deref(), Some("token_create"));
+                assert_eq!(resource_type.as_deref(), Some("token"));
+                assert_eq!(resource_id.as_deref(), Some("abc123"));
+                assert_eq!(limit, Some(50));
+            }
+            _ => panic!("Expected ManagementLog command"),
         }
     }
 

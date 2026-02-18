@@ -227,6 +227,23 @@ pub struct ActivityResponse {
     pub entries: Vec<ActivityEntry>,
 }
 
+#[derive(Debug, Deserialize)]
+#[allow(dead_code)]
+pub struct ManagementLogEntry {
+    pub timestamp: String,
+    pub operation: String,
+    pub resource_type: String,
+    pub resource_id: Option<String>,
+    pub detail: Option<String>,
+    pub success: bool,
+    pub error_message: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ManagementLogResponse {
+    pub entries: Vec<ManagementLogEntry>,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
