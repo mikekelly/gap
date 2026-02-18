@@ -13,10 +13,9 @@ use gap_lib::database::GapDatabase;
 use gap_lib::types::PluginEntry;
 use argon2::{Argon2, PasswordHash, PasswordVerifier};
 use axum::{
-    async_trait,
     body::Bytes,
-    extract::{FromRequestParts, Path, Query, State},
-    http::{request::Parts, StatusCode},
+    extract::{Path, Query, State},
+    http::{HeaderMap, StatusCode},
     response::{
         sse::{Event, KeepAlive, Sse},
         IntoResponse, Response,
@@ -98,54 +97,21 @@ pub struct StatusResponse {
     pub initialized: bool,
 }
 
-/// Request body containing password_hash for authentication
-#[derive(Debug, Deserialize, Clone)]
-pub struct AuthenticatedRequest<T> {
-    /// SHA512 hash of password (hex encoded)
-    pub password_hash: String,
-    #[serde(flatten)]
-    pub data: T,
-}
-
-/// Extractor that validates authentication
-pub struct Authenticated<T>(pub T);
-
-#[async_trait]
-impl<T> FromRequestParts<ApiState> for Authenticated<T>
-where
-    T: for<'de> Deserialize<'de> + Send,
-{
-    type Rejection = (StatusCode, String);
-
-    async fn from_request_parts(
-        _parts: &mut Parts,
-        _state: &ApiState,
-    ) -> Result<Self, Self::Rejection> {
-        // For now, this is a placeholder - actual auth will be done in handlers
-        // that have access to the request body
-        Err((
-            StatusCode::UNAUTHORIZED,
-            "Use request body for authentication".to_string(),
-        ))
-    }
-}
-
-/// Helper function to verify authentication from request body
-async fn verify_auth<T>(
+/// Verify authentication from the Authorization header.
+/// Expected format: "Bearer <password_hash>"
+async fn verify_auth(
     state: &ApiState,
-    body: &[u8],
-) -> Result<T, (StatusCode, String)>
-where
-    T: for<'de> Deserialize<'de>,
-{
-    // Parse as authenticated request
-    let auth_req: AuthenticatedRequest<T> =
-        serde_json::from_slice(body).map_err(|e| {
-            (
-                StatusCode::BAD_REQUEST,
-                format!("Invalid JSON: {}", e),
-            )
-        })?;
+    headers: &axum::http::HeaderMap,
+) -> Result<(), (StatusCode, String)> {
+    let auth_header = headers
+        .get(axum::http::header::AUTHORIZATION)
+        .ok_or_else(|| (StatusCode::UNAUTHORIZED, "Missing Authorization header".to_string()))?
+        .to_str()
+        .map_err(|_| (StatusCode::UNAUTHORIZED, "Invalid Authorization header".to_string()))?;
+
+    let hash = auth_header
+        .strip_prefix("Bearer ")
+        .ok_or_else(|| (StatusCode::UNAUTHORIZED, "Invalid auth format, expected 'Bearer <hash>'".to_string()))?;
 
     // Verify password hash
     let stored_hash = state.password_hash.read().await;
@@ -160,10 +126,10 @@ where
 
         // The client sends SHA512(password), we verify Argon2(SHA512(password))
         Argon2::default()
-            .verify_password(auth_req.password_hash.as_bytes(), &parsed_hash)
+            .verify_password(hash.as_bytes(), &parsed_hash)
             .map_err(|_| (StatusCode::UNAUTHORIZED, "Invalid credentials".to_string()))?;
 
-        Ok(auth_req.data)
+        Ok(())
     } else {
         Err((
             StatusCode::UNAUTHORIZED,
@@ -273,9 +239,11 @@ pub struct ManagementLogStreamFilter {
     pub success: Option<bool>,
 }
 
-/// Init request
+/// Init request — the password_hash is the SHA512 hash of the password to set
 #[derive(Debug, Deserialize)]
-pub struct InitRequest {}
+pub struct InitRequest {
+    pub password_hash: String,
+}
 
 /// Init response
 #[derive(Debug, Serialize, Deserialize)]
@@ -385,7 +353,7 @@ async fn init(
     }
 
     // Parse request
-    let req: AuthenticatedRequest<InitRequest> = serde_json::from_slice(&body)
+    let req: InitRequest = serde_json::from_slice(&body)
         .map_err(|e| (StatusCode::BAD_REQUEST, format!("Invalid JSON: {}", e)))?;
 
     // Hash the password_hash with Argon2 (password_hash is already SHA512 from client)
@@ -423,9 +391,9 @@ async fn init(
 #[allow(dead_code)]
 async fn get_plugins(
     State(state): State<ApiState>,
-    body: Bytes,
+    headers: HeaderMap,
 ) -> Result<Json<PluginsResponse>, (StatusCode, String)> {
-    verify_auth::<serde_json::Value>(&state, &body).await?;
+    verify_auth(&state, &headers).await?;
 
     // Get plugins from database
     let plugin_entries = state.db.list_plugins().await
@@ -447,9 +415,9 @@ async fn get_plugins(
 /// POST /plugins - List installed plugins (requires auth, same as GET)
 async fn post_plugins(
     State(state): State<ApiState>,
-    body: Bytes,
+    headers: HeaderMap,
 ) -> Result<Json<PluginsResponse>, (StatusCode, String)> {
-    verify_auth::<serde_json::Value>(&state, &body).await?;
+    verify_auth(&state, &headers).await?;
 
     // Get plugins from database
     let plugin_entries = state.db.list_plugins().await
@@ -473,9 +441,12 @@ async fn post_plugins(
 #[axum::debug_handler]
 async fn install_plugin(
     State(state): State<ApiState>,
+    headers: HeaderMap,
     body: Bytes,
 ) -> std::result::Result<Json<InstallResponse>, (StatusCode, String)> {
-    let req: InstallRequest = verify_auth(&state, &body).await?;
+    verify_auth(&state, &headers).await?;
+    let req: InstallRequest = serde_json::from_slice(&body)
+        .map_err(|e| (StatusCode::BAD_REQUEST, format!("Invalid request body: {}", e)))?;
 
     // Parse GitHub owner/repo from name (e.g., "mikekelly/exa-gap")
     let plugin_name = parse_plugin_name(&req.name)?;
@@ -518,10 +489,9 @@ async fn install_plugin(
 async fn uninstall_plugin(
     State(state): State<ApiState>,
     Path(name): Path<String>,
-    body: Bytes,
+    headers: HeaderMap,
 ) -> std::result::Result<Json<UninstallResponse>, (StatusCode, String)> {
-    // Verify auth (body contains password hash)
-    verify_auth::<serde_json::Value>(&state, &body).await?;
+    verify_auth(&state, &headers).await?;
 
     // URL-decode the name (handles owner/repo with %2F)
     let plugin_name = urlencoding::decode(&name)
@@ -566,10 +536,9 @@ async fn uninstall_plugin(
 async fn update_plugin(
     State(state): State<ApiState>,
     Path(name): Path<String>,
-    body: Bytes,
+    headers: HeaderMap,
 ) -> std::result::Result<Json<UpdateResponse>, (StatusCode, String)> {
-    // Verify auth
-    verify_auth::<serde_json::Value>(&state, &body).await?;
+    verify_auth(&state, &headers).await?;
 
     // URL-decode the name
     let plugin_name = urlencoding::decode(&name)
@@ -719,9 +688,9 @@ fn transform_es6_export(code: &str) -> String {
 /// GET /tokens - List agent tokens (requires auth)
 async fn list_tokens(
     State(state): State<ApiState>,
-    body: Bytes,
+    headers: HeaderMap,
 ) -> Result<Json<TokensResponse>, (StatusCode, String)> {
-    verify_auth::<serde_json::Value>(&state, &body).await?;
+    verify_auth(&state, &headers).await?;
 
     // List tokens from database
     let token_entries = state.db.list_tokens().await
@@ -750,17 +719,20 @@ async fn list_tokens(
 /// POST /tokens - List agent tokens (requires auth, same as GET)
 async fn post_list_tokens(
     State(state): State<ApiState>,
-    body: Bytes,
+    headers: HeaderMap,
 ) -> Result<Json<TokensResponse>, (StatusCode, String)> {
-    list_tokens(State(state), body).await
+    list_tokens(State(state), headers).await
 }
 
 /// POST /tokens/create - Create new agent token (requires auth)
 async fn create_token(
     State(state): State<ApiState>,
+    headers: HeaderMap,
     body: Bytes,
 ) -> Result<Json<TokenResponse>, (StatusCode, String)> {
-    let req: CreateTokenRequest = verify_auth(&state, &body).await?;
+    verify_auth(&state, &headers).await?;
+    let req: CreateTokenRequest = serde_json::from_slice(&body)
+        .map_err(|e| (StatusCode::BAD_REQUEST, format!("Invalid request body: {}", e)))?;
 
     // Create a new AgentToken
     let token = AgentToken::new(&req.name);
@@ -797,9 +769,9 @@ async fn create_token(
 async fn delete_token(
     State(state): State<ApiState>,
     Path(id): Path<String>,
-    body: Bytes,
+    headers: HeaderMap,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
-    verify_auth::<serde_json::Value>(&state, &body).await?;
+    verify_auth(&state, &headers).await?;
 
     // The id is the token value
     // Check if token exists in database
@@ -836,9 +808,12 @@ async fn delete_token(
 async fn set_credential(
     State(state): State<ApiState>,
     Path((plugin, key)): Path<(String, String)>,
+    headers: HeaderMap,
     body: Bytes,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
-    let req: SetCredentialRequest = verify_auth(&state, &body).await?;
+    verify_auth(&state, &headers).await?;
+    let req: SetCredentialRequest = serde_json::from_slice(&body)
+        .map_err(|e| (StatusCode::BAD_REQUEST, format!("Invalid request body: {}", e)))?;
 
     // Store credential in database
     state.db.set_credential(&plugin, &key, &req.value)
@@ -868,9 +843,9 @@ async fn set_credential(
 async fn delete_credential(
     State(state): State<ApiState>,
     Path((plugin, key)): Path<(String, String)>,
-    body: Bytes,
+    headers: HeaderMap,
 ) -> Result<StatusCode, (StatusCode, String)> {
-    verify_auth::<serde_json::Value>(&state, &body).await?;
+    verify_auth(&state, &headers).await?;
 
     // Remove credential from database
     state.db.remove_credential(&plugin, &key)
@@ -912,9 +887,9 @@ fn query_to_filter(q: &ActivityQuery) -> gap_lib::ActivityFilter {
 async fn get_activity(
     State(state): State<ApiState>,
     Query(query): Query<ActivityQuery>,
-    body: Bytes,
+    headers: HeaderMap,
 ) -> Result<Json<ActivityResponse>, (StatusCode, String)> {
-    verify_auth::<serde_json::Value>(&state, &body).await?;
+    verify_auth(&state, &headers).await?;
 
     let filter = query_to_filter(&query);
     let entries = state.db.query_activity(&filter).await
@@ -926,9 +901,9 @@ async fn get_activity(
 async fn get_activity_details(
     State(state): State<ApiState>,
     Path(request_id): Path<String>,
-    body: Bytes,
+    headers: HeaderMap,
 ) -> Result<Json<RequestDetails>, (StatusCode, String)> {
-    verify_auth::<serde_json::Value>(&state, &body).await?;
+    verify_auth(&state, &headers).await?;
 
     let details = state.db.get_request_details(&request_id).await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to get request details: {}", e)))?;
@@ -989,9 +964,9 @@ fn matches_filter(entry: &ActivityEntry, filter: &ActivityStreamFilter) -> bool 
 async fn activity_stream(
     State(state): State<ApiState>,
     Query(filter): Query<ActivityStreamFilter>,
-    body: Bytes,
+    headers: HeaderMap,
 ) -> Result<Sse<impl Stream<Item = Result<Event, Infallible>>>, (StatusCode, String)> {
-    verify_auth::<serde_json::Value>(&state, &body).await?;
+    verify_auth(&state, &headers).await?;
 
     let tx = state.activity_tx.as_ref().ok_or_else(|| {
         (
@@ -1057,13 +1032,13 @@ fn management_query_to_filter(q: &ManagementLogQuery) -> gap_lib::ManagementLogF
     }
 }
 
-/// GET/POST /management-log - Get management audit log entries (requires auth)
+/// GET /management-log - Get management audit log entries (requires auth)
 async fn get_management_log(
     State(state): State<ApiState>,
     Query(query): Query<ManagementLogQuery>,
-    body: Bytes,
+    headers: HeaderMap,
 ) -> Result<Json<ManagementLogResponse>, (StatusCode, String)> {
-    verify_auth::<serde_json::Value>(&state, &body).await?;
+    verify_auth(&state, &headers).await?;
 
     let filter = management_query_to_filter(&query);
     let entries = state.db.query_management_log(&filter).await
@@ -1071,13 +1046,13 @@ async fn get_management_log(
     Ok(Json(ManagementLogResponse { entries }))
 }
 
-/// GET/POST /management-log/stream - Stream management log entries via SSE (requires auth)
+/// GET /management-log/stream - Stream management log entries via SSE (requires auth)
 async fn management_log_stream(
     State(state): State<ApiState>,
     Query(filter): Query<ManagementLogStreamFilter>,
-    body: Bytes,
+    headers: HeaderMap,
 ) -> Result<Sse<impl Stream<Item = Result<Event, Infallible>>>, (StatusCode, String)> {
-    verify_auth::<serde_json::Value>(&state, &body).await?;
+    verify_auth(&state, &headers).await?;
 
     let tx = state.management_tx.as_ref().ok_or_else(|| {
         (StatusCode::SERVICE_UNAVAILABLE, "Management log streaming not configured".to_string())
@@ -1203,18 +1178,13 @@ mod tests {
 
         let app = create_router(state);
 
-        // Create auth request body
-        let body = serde_json::json!({
-            "password_hash": password
-        });
-
         let response = app
             .oneshot(
                 Request::builder()
                     .method("POST")
                     .uri("/plugins")
-                    .header("content-type", "application/json")
-                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .header("Authorization", format!("Bearer {}", password))
+                    .body(Body::empty())
                     .unwrap(),
             )
             .await
@@ -1240,18 +1210,13 @@ mod tests {
 
         let app = create_router(state);
 
-        // Create auth request body
-        let body = serde_json::json!({
-            "password_hash": password
-        });
-
         let response = app
             .oneshot(
                 Request::builder()
                     .method("POST")
                     .uri("/tokens")
-                    .header("content-type", "application/json")
-                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .header("Authorization", format!("Bearer {}", password))
+                    .body(Body::empty())
                     .unwrap(),
             )
             .await
@@ -1284,9 +1249,7 @@ mod tests {
 
         let app = create_router(state);
 
-        // Create auth request body with name
         let body = serde_json::json!({
-            "password_hash": password,
             "name": "test-token"
         });
 
@@ -1296,6 +1259,7 @@ mod tests {
                     .method("POST")
                     .uri("/tokens/create")
                     .header("content-type", "application/json")
+                    .header("Authorization", format!("Bearer {}", password))
                     .body(Body::from(serde_json::to_vec(&body).unwrap()))
                     .unwrap(),
             )
@@ -1330,18 +1294,13 @@ mod tests {
 
         let app = create_router(state);
 
-        // Create auth request body
-        let body = serde_json::json!({
-            "password_hash": password
-        });
-
         let response = app
             .oneshot(
                 Request::builder()
                     .method("POST")
                     .uri("/activity")
-                    .header("content-type", "application/json")
-                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .header("Authorization", format!("Bearer {}", password))
+                    .body(Body::empty())
                     .unwrap(),
             )
             .await
@@ -1371,7 +1330,7 @@ mod tests {
 
         let password = "testpass123";
 
-        // Create init request body
+        // Init sends password_hash in request body (not via Authorization header)
         let body = serde_json::json!({
             "password_hash": password
         });
@@ -1423,7 +1382,7 @@ mod tests {
 
         let password = "testpass123";
 
-        // Create init request body WITHOUT ca_path (it's no longer user-configurable)
+        // Init sends password_hash in request body (not via Authorization header)
         let body = serde_json::json!({
             "password_hash": password
         });
@@ -1476,7 +1435,6 @@ mod tests {
 
         // Install plugin from GitHub (mikekelly/test-plugin doesn't exist, so expect 502)
         let body = serde_json::json!({
-            "password_hash": password,
             "name": "mikekelly/test-plugin"
         });
 
@@ -1486,6 +1444,7 @@ mod tests {
                     .method("POST")
                     .uri("/plugins/install")
                     .header("content-type", "application/json")
+                    .header("Authorization", format!("Bearer {}", password))
                     .body(Body::from(serde_json::to_vec(&body).unwrap()))
                     .unwrap(),
             )
@@ -1520,9 +1479,7 @@ mod tests {
         let app = create_router(state);
 
         // Try to install a real plugin from GitHub
-        // Using a test repo that should have plugin.js
         let body = serde_json::json!({
-            "password_hash": password,
             "name": "mikekelly/exa-gap"  // Real repo with plugin.js
         });
 
@@ -1532,6 +1489,7 @@ mod tests {
                     .method("POST")
                     .uri("/plugins/install")
                     .header("content-type", "application/json")
+                    .header("Authorization", format!("Bearer {}", password))
                     .body(Body::from(serde_json::to_vec(&body).unwrap()))
                     .unwrap(),
             )
@@ -1570,9 +1528,7 @@ mod tests {
         let app = create_router(state);
 
         // Try to install a real plugin from GitHub
-        // Using the same test repo that should have plugin.js
         let body = serde_json::json!({
-            "password_hash": password,
             "name": "mikekelly/exa-gap"  // Real repo with plugin.js
         });
 
@@ -1582,6 +1538,7 @@ mod tests {
                     .method("POST")
                     .uri("/plugins/install")
                     .header("content-type", "application/json")
+                    .header("Authorization", format!("Bearer {}", password))
                     .body(Body::from(serde_json::to_vec(&body).unwrap()))
                     .unwrap(),
             )
@@ -1614,7 +1571,7 @@ mod tests {
         let state = ApiState::new(9443, 9080, db);
         let app = create_router(state);
 
-        // Try to install without password
+        // Try to install without Authorization header
         let body = serde_json::json!({
             "name": "mikekelly/test-plugin"
         });
@@ -1631,7 +1588,7 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
     }
 
     #[tokio::test]
@@ -1656,9 +1613,7 @@ mod tests {
 
         let app = create_router(state);
 
-        // Create auth request body with credential value
         let body = serde_json::json!({
-            "password_hash": password,
             "value": "secret_api_key_12345"
         });
 
@@ -1668,6 +1623,7 @@ mod tests {
                     .method("POST")
                     .uri("/credentials/test-plugin/api_key")
                     .header("content-type", "application/json")
+                    .header("Authorization", format!("Bearer {}", password))
                     .body(Body::from(serde_json::to_vec(&body).unwrap()))
                     .unwrap(),
             )
@@ -1700,18 +1656,13 @@ mod tests {
 
         let app = create_router(state);
 
-        // Create auth request body
-        let body = serde_json::json!({
-            "password_hash": password
-        });
-
         let response = app
             .oneshot(
                 Request::builder()
                     .method("DELETE")
                     .uri("/credentials/test-plugin/api_key")
-                    .header("content-type", "application/json")
-                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .header("Authorization", format!("Bearer {}", password))
+                    .body(Body::empty())
                     .unwrap(),
             )
             .await
@@ -1740,7 +1691,6 @@ mod tests {
         // Now set a credential via the API
         let app = create_router(state.clone());
         let body = serde_json::json!({
-            "password_hash": password,
             "value": "api_write_value"
         });
 
@@ -1750,6 +1700,7 @@ mod tests {
                     .method("POST")
                     .uri("/credentials/test-plugin/api_key")
                     .header("content-type", "application/json")
+                    .header("Authorization", format!("Bearer {}", password))
                     .body(Body::from(serde_json::to_vec(&body).unwrap()))
                     .unwrap(),
             )
@@ -1793,7 +1744,6 @@ mod tests {
 
         // Set a credential via the API
         let body = serde_json::json!({
-            "password_hash": password,
             "value": "secret_api_key_12345"
         });
 
@@ -1803,6 +1753,7 @@ mod tests {
                     .method("POST")
                     .uri("/credentials/exa/api_key")
                     .header("content-type", "application/json")
+                    .header("Authorization", format!("Bearer {}", password))
                     .body(Body::from(serde_json::to_vec(&body).unwrap()))
                     .unwrap(),
             )
@@ -1844,18 +1795,13 @@ mod tests {
 
         let app = create_router(state);
 
-        // Delete the credential via the API
-        let body = serde_json::json!({
-            "password_hash": password
-        });
-
         let response = app
             .oneshot(
                 Request::builder()
                     .method("DELETE")
                     .uri("/credentials/exa/api_key")
-                    .header("content-type", "application/json")
-                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .header("Authorization", format!("Bearer {}", password))
+                    .body(Body::empty())
                     .unwrap(),
             )
             .await
@@ -1890,7 +1836,6 @@ mod tests {
 
         // Set a credential via the API
         let body = serde_json::json!({
-            "password_hash": password,
             "value": "secret_api_key_12345"
         });
 
@@ -1902,6 +1847,7 @@ mod tests {
                     .method("POST")
                     .uri("/credentials/exa/api_key")
                     .header("content-type", "application/json")
+                    .header("Authorization", format!("Bearer {}", password))
                     .body(Body::from(serde_json::to_vec(&body).unwrap()))
                     .unwrap(),
             )
@@ -1911,7 +1857,6 @@ mod tests {
 
         // Set the same credential again with different value
         let body2 = serde_json::json!({
-            "password_hash": password,
             "value": "new_secret_value"
         });
 
@@ -1922,6 +1867,7 @@ mod tests {
                     .method("POST")
                     .uri("/credentials/exa/api_key")
                     .header("content-type", "application/json")
+                    .header("Authorization", format!("Bearer {}", password))
                     .body(Body::from(serde_json::to_vec(&body2).unwrap()))
                     .unwrap(),
             )
@@ -1963,17 +1909,14 @@ mod tests {
 
         // List tokens via API
         let app = create_router(state);
-        let body = serde_json::json!({
-            "password_hash": password
-        });
 
         let response = app
             .oneshot(
                 Request::builder()
                     .method("POST")
                     .uri("/tokens")
-                    .header("content-type", "application/json")
-                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .header("Authorization", format!("Bearer {}", password))
+                    .body(Body::empty())
                     .unwrap(),
             )
             .await
@@ -2015,7 +1958,6 @@ mod tests {
         // Create token via API
         let app = create_router(state);
         let body = serde_json::json!({
-            "password_hash": password,
             "name": "new-token"
         });
 
@@ -2025,6 +1967,7 @@ mod tests {
                     .method("POST")
                     .uri("/tokens/create")
                     .header("content-type", "application/json")
+                    .header("Authorization", format!("Bearer {}", password))
                     .body(Body::from(serde_json::to_vec(&body).unwrap()))
                     .unwrap(),
             )
@@ -2070,17 +2013,14 @@ mod tests {
 
         // Delete token via API
         let app = create_router(state);
-        let body = serde_json::json!({
-            "password_hash": password
-        });
 
         let response = app
             .oneshot(
                 Request::builder()
                     .method("DELETE")
                     .uri(&format!("/tokens/{}", token.token))
-                    .header("content-type", "application/json")
-                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .header("Authorization", format!("Bearer {}", password))
+                    .body(Body::empty())
                     .unwrap(),
             )
             .await
@@ -2106,6 +2046,7 @@ mod tests {
 
         let password = "testpass123";
 
+        // Init sends password_hash in request body (not via Authorization header)
         let body = serde_json::json!({
             "password_hash": password
         });
@@ -2166,10 +2107,8 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .uri("/activity/stream")
-                    .header("content-type", "application/json")
-                    .body(Body::from(serde_json::to_vec(&serde_json::json!({
-                        "password_hash": password
-                    })).unwrap()))
+                    .header("Authorization", format!("Bearer {}", password))
+                    .body(Body::empty())
                     .unwrap(),
             )
             .await
@@ -2194,10 +2133,8 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .uri("/activity/stream")
-                    .header("content-type", "application/json")
-                    .body(Body::from(serde_json::to_vec(&serde_json::json!({
-                        "password_hash": "wrongpass"
-                    })).unwrap()))
+                    .header("Authorization", "Bearer wrongpass")
+                    .body(Body::empty())
                     .unwrap(),
             )
             .await
@@ -2228,10 +2165,8 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .uri("/activity/stream")
-                    .header("content-type", "application/json")
-                    .body(Body::from(serde_json::to_vec(&serde_json::json!({
-                        "password_hash": password
-                    })).unwrap()))
+                    .header("Authorization", format!("Bearer {}", password))
+                    .body(Body::empty())
                     .unwrap(),
             )
             .await
@@ -2299,10 +2234,8 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .uri("/activity/stream?domain=api.example.com")
-                    .header("content-type", "application/json")
-                    .body(Body::from(serde_json::to_vec(&serde_json::json!({
-                        "password_hash": password
-                    })).unwrap()))
+                    .header("Authorization", format!("Bearer {}", password))
+                    .body(Body::empty())
                     .unwrap(),
             )
             .await
@@ -2453,15 +2386,14 @@ mod tests {
     /// GET /activity with a filter parameter and return the activity entries.
     async fn get_activity_filtered(state: ApiState, password: &str, query: &str) -> Vec<ActivityEntry> {
         let app = create_router(state);
-        let auth_body = serde_json::to_vec(&serde_json::json!({ "password_hash": password })).unwrap();
 
         let response = app
             .oneshot(
                 Request::builder()
                     .method("GET")
                     .uri(format!("/activity{}", query))
-                    .header("content-type", "application/json")
-                    .body(Body::from(auth_body))
+                    .header("Authorization", format!("Bearer {}", password))
+                    .body(Body::empty())
                     .unwrap(),
             )
             .await
@@ -2629,8 +2561,8 @@ mod tests {
                 Request::builder()
                     .method("GET")
                     .uri("/activity")
-                    .header("content-type", "application/json")
-                    .body(Body::from(serde_json::to_vec(&serde_json::json!({ "password_hash": "wrongpass" })).unwrap()))
+                    .header("Authorization", "Bearer wrongpass")
+                    .body(Body::empty())
                     .unwrap(),
             )
             .await
@@ -2670,15 +2602,14 @@ mod tests {
         db.save_request_details(&details).await.unwrap();
 
         let app = create_router(state);
-        let body = serde_json::json!({"password_hash": password});
 
         let response = app
             .oneshot(
                 Request::builder()
-                    .method("POST")
+                    .method("GET")
                     .uri("/activity/test-details-001/details")
-                    .header("content-type", "application/json")
-                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .header("Authorization", format!("Bearer {}", password))
+                    .body(Body::empty())
                     .unwrap(),
             )
             .await
@@ -2706,15 +2637,14 @@ mod tests {
         state.set_password_hash(password_hash).await;
 
         let app = create_router(state);
-        let body = serde_json::json!({"password_hash": password});
 
         let response = app
             .oneshot(
                 Request::builder()
-                    .method("POST")
+                    .method("GET")
                     .uri("/activity/nonexistent-id/details")
-                    .header("content-type", "application/json")
-                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .header("Authorization", format!("Bearer {}", password))
+                    .body(Body::empty())
                     .unwrap(),
             )
             .await
@@ -2737,10 +2667,8 @@ mod tests {
                 Request::builder()
                     .method("GET")
                     .uri("/management-log")
-                    .header("content-type", "application/json")
-                    .body(Body::from(serde_json::to_vec(&serde_json::json!({
-                        "password_hash": "wrongpass"
-                    })).unwrap()))
+                    .header("Authorization", "Bearer wrongpass")
+                    .body(Body::empty())
                     .unwrap(),
             )
             .await
@@ -2779,17 +2707,13 @@ mod tests {
 
         let app = create_router(state);
 
-        let body = serde_json::json!({
-            "password_hash": password
-        });
-
         let response = app
             .oneshot(
                 Request::builder()
                     .method("GET")
                     .uri("/management-log")
-                    .header("content-type", "application/json")
-                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .header("Authorization", format!("Bearer {}", password))
+                    .body(Body::empty())
                     .unwrap(),
             )
             .await
@@ -2829,7 +2753,6 @@ mod tests {
         // Create a token via API (this should emit a management log event)
         let app = create_router(state);
         let body = serde_json::json!({
-            "password_hash": password,
             "name": "audit-test-token"
         });
 
@@ -2839,6 +2762,7 @@ mod tests {
                     .method("POST")
                     .uri("/tokens/create")
                     .header("content-type", "application/json")
+                    .header("Authorization", format!("Bearer {}", password))
                     .body(Body::from(serde_json::to_vec(&body).unwrap()))
                     .unwrap(),
             )
@@ -2879,7 +2803,6 @@ mod tests {
 
         let app = create_router(state);
         let body = serde_json::json!({
-            "password_hash": password,
             "value": "secret_api_key_12345"
         });
 
@@ -2889,6 +2812,7 @@ mod tests {
                     .method("POST")
                     .uri("/credentials/test-plugin/api_key")
                     .header("content-type", "application/json")
+                    .header("Authorization", format!("Bearer {}", password))
                     .body(Body::from(serde_json::to_vec(&body).unwrap()))
                     .unwrap(),
             )
@@ -2933,10 +2857,8 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .uri("/management-log/stream")
-                    .header("content-type", "application/json")
-                    .body(Body::from(serde_json::to_vec(&serde_json::json!({
-                        "password_hash": password
-                    })).unwrap()))
+                    .header("Authorization", format!("Bearer {}", password))
+                    .body(Body::empty())
                     .unwrap(),
             )
             .await
@@ -2961,10 +2883,8 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .uri("/management-log/stream")
-                    .header("content-type", "application/json")
-                    .body(Body::from(serde_json::to_vec(&serde_json::json!({
-                        "password_hash": "wrongpass"
-                    })).unwrap()))
+                    .header("Authorization", "Bearer wrongpass")
+                    .body(Body::empty())
                     .unwrap(),
             )
             .await
@@ -2996,10 +2916,8 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .uri("/management-log/stream")
-                    .header("content-type", "application/json")
-                    .body(Body::from(serde_json::to_vec(&serde_json::json!({
-                        "password_hash": password
-                    })).unwrap()))
+                    .header("Authorization", format!("Bearer {}", password))
+                    .body(Body::empty())
                     .unwrap(),
             )
             .await
