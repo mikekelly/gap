@@ -8,6 +8,7 @@
 //! - Activity monitoring
 
 use gap_lib::{AgentToken, ActivityEntry};
+use gap_lib::types::RequestDetails;
 use gap_lib::database::GapDatabase;
 use gap_lib::types::PluginEntry;
 use argon2::{Argon2, PasswordHash, PasswordVerifier};
@@ -348,6 +349,7 @@ pub fn create_router(state: ApiState) -> Router {
         )
         .route("/activity", get(get_activity).post(get_activity))
         .route("/activity/stream", get(activity_stream).post(activity_stream))
+        .route("/activity/:request_id/details", get(get_activity_details).post(get_activity_details))
         .route("/v1/management-cert", post(rotate_management_cert))
         .with_state(state)
 }
@@ -892,6 +894,23 @@ async fn get_activity(
     let entries = state.db.query_activity(&filter).await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to get activity: {}", e)))?;
     Ok(Json(ActivityResponse { entries }))
+}
+
+/// GET /activity/:request_id/details - Get detailed request/response data (requires auth)
+async fn get_activity_details(
+    State(state): State<ApiState>,
+    Path(request_id): Path<String>,
+    body: Bytes,
+) -> Result<Json<RequestDetails>, (StatusCode, String)> {
+    verify_auth::<serde_json::Value>(&state, &body).await?;
+
+    let details = state.db.get_request_details(&request_id).await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to get request details: {}", e)))?;
+
+    match details {
+        Some(d) => Ok(Json(d)),
+        None => Err((StatusCode::NOT_FOUND, format!("No details found for request {}", request_id))),
+    }
 }
 
 /// POST /v1/management-cert - Rotate management certificate (requires auth)
@@ -2790,5 +2809,88 @@ mod tests {
 
         // No password hash configured — should reject
         assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn test_get_activity_details() {
+        use argon2::password_hash::{rand_core::OsRng, SaltString};
+        use argon2::{Argon2, PasswordHasher};
+
+        let db = create_test_db().await;
+        let state = ApiState::new(9443, 9080, Arc::clone(&db));
+
+        let password = "test-password";
+        let salt = SaltString::generate(&mut OsRng);
+        let argon2 = Argon2::default();
+        let password_hash = argon2.hash_password(password.as_bytes(), &salt).unwrap().to_string();
+        state.set_password_hash(password_hash).await;
+
+        // Save some request details directly via the database
+        let details = gap_lib::types::RequestDetails {
+            request_id: "test-details-001".to_string(),
+            req_headers: Some(r#"{"Host":"api.example.com"}"#.to_string()),
+            req_body: Some(b"request body".to_vec()),
+            transformed_url: Some("https://api.example.com/v2/data".to_string()),
+            transformed_headers: Some(r#"{"Authorization":"Bearer [REDACTED]"}"#.to_string()),
+            transformed_body: None,
+            response_status: Some(200),
+            response_headers: Some(r#"{"Content-Type":"application/json"}"#.to_string()),
+            response_body: Some(b"{\"ok\":true}".to_vec()),
+            body_truncated: false,
+        };
+        db.save_request_details(&details).await.unwrap();
+
+        let app = create_router(state);
+        let body = serde_json::json!({"password_hash": password});
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/activity/test-details-001/details")
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body_bytes = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let result: gap_lib::types::RequestDetails = serde_json::from_slice(&body_bytes).unwrap();
+        assert_eq!(result.request_id, "test-details-001");
+        assert_eq!(result.response_status, Some(200));
+    }
+
+    #[tokio::test]
+    async fn test_get_activity_details_not_found() {
+        use argon2::password_hash::{rand_core::OsRng, SaltString};
+        use argon2::{Argon2, PasswordHasher};
+
+        let db = create_test_db().await;
+        let state = ApiState::new(9443, 9080, Arc::clone(&db));
+
+        let password = "test-password";
+        let salt = SaltString::generate(&mut OsRng);
+        let argon2 = Argon2::default();
+        let password_hash = argon2.hash_password(password.as_bytes(), &salt).unwrap().to_string();
+        state.set_password_hash(password_hash).await;
+
+        let app = create_router(state);
+        let body = serde_json::json!({"password_hash": password});
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/activity/nonexistent-id/details")
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
     }
 }
