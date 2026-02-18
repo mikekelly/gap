@@ -496,6 +496,78 @@ else
     log_warn "Skipping token deletion (no token to delete)"
 fi
 
+# Test 19: Management log has entries
+echo ""
+echo "Test 19: Management log has entries"
+echo "===================================="
+
+MGMT_LOG_RESPONSE=$(curl -ks -X POST "$GAP_SERVER_URL/management-log" \
+    -H "Content-Type: application/json" \
+    -d "{
+        \"password_hash\": \"$(echo -n "$TEST_PASSWORD" | sha512sum | cut -d' ' -f1)\"
+    }")
+
+MGMT_LOG_COUNT=$(echo "$MGMT_LOG_RESPONSE" | jq '.entries | length')
+
+if [ "$MGMT_LOG_COUNT" -gt 0 ]; then
+    log_pass "Management log has $MGMT_LOG_COUNT entries"
+else
+    log_fail "Management log is empty, expected entries from previous operations"
+fi
+
+# Verify entries have required fields
+FIRST_ENTRY=$(echo "$MGMT_LOG_RESPONSE" | jq '.entries[0]')
+HAS_TIMESTAMP=$(echo "$FIRST_ENTRY" | jq 'has("timestamp")')
+HAS_OPERATION=$(echo "$FIRST_ENTRY" | jq 'has("operation")')
+HAS_RESOURCE_TYPE=$(echo "$FIRST_ENTRY" | jq 'has("resource_type")')
+HAS_SUCCESS=$(echo "$FIRST_ENTRY" | jq 'has("success")')
+
+if [ "$HAS_TIMESTAMP" = "true" ] && [ "$HAS_OPERATION" = "true" ] && [ "$HAS_RESOURCE_TYPE" = "true" ] && [ "$HAS_SUCCESS" = "true" ]; then
+    log_pass "Management log entries have correct schema"
+else
+    log_fail "Management log entries missing required fields"
+fi
+
+# Test 20: Management log filter by operation
+echo ""
+echo "Test 20: Management log filter by operation"
+echo "============================================="
+
+TOKEN_CREATE_RESPONSE=$(curl -ks -X POST "$GAP_SERVER_URL/management-log?operation=token_create" \
+    -H "Content-Type: application/json" \
+    -d "{
+        \"password_hash\": \"$(echo -n "$TEST_PASSWORD" | sha512sum | cut -d' ' -f1)\"
+    }")
+
+TOKEN_CREATE_COUNT=$(echo "$TOKEN_CREATE_RESPONSE" | jq '.entries | length')
+ALL_TOKEN_CREATE=$(echo "$TOKEN_CREATE_RESPONSE" | jq '[.entries[] | select(.operation == "token_create")] | length')
+
+if [ "$TOKEN_CREATE_COUNT" -gt 0 ] && [ "$TOKEN_CREATE_COUNT" = "$ALL_TOKEN_CREATE" ]; then
+    log_pass "Filter by operation works: $TOKEN_CREATE_COUNT token_create entries"
+else
+    log_fail "Filter by operation failed: got $TOKEN_CREATE_COUNT entries, $ALL_TOKEN_CREATE matching"
+fi
+
+# Test 21: Management log filter by resource_type
+echo ""
+echo "Test 21: Management log filter by resource_type"
+echo "================================================="
+
+TOKEN_TYPE_RESPONSE=$(curl -ks -X POST "$GAP_SERVER_URL/management-log?resource_type=token" \
+    -H "Content-Type: application/json" \
+    -d "{
+        \"password_hash\": \"$(echo -n "$TEST_PASSWORD" | sha512sum | cut -d' ' -f1)\"
+    }")
+
+TOKEN_TYPE_COUNT=$(echo "$TOKEN_TYPE_RESPONSE" | jq '.entries | length')
+ALL_TOKEN_TYPE=$(echo "$TOKEN_TYPE_RESPONSE" | jq '[.entries[] | select(.resource_type == "token")] | length')
+
+if [ "$TOKEN_TYPE_COUNT" -gt 0 ] && [ "$TOKEN_TYPE_COUNT" = "$ALL_TOKEN_TYPE" ]; then
+    log_pass "Filter by resource_type works: $TOKEN_TYPE_COUNT token entries"
+else
+    log_fail "Filter by resource_type failed: got $TOKEN_TYPE_COUNT entries, $ALL_TOKEN_TYPE matching"
+fi
+
 echo ""
 echo -e "${GREEN}All Docker integration tests passed!${NC}"
 echo ""
