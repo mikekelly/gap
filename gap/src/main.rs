@@ -83,19 +83,6 @@ enum Commands {
         #[arg(long)]
         follow: bool,
     },
-
-    /// Rotate management certificate with new SANs
-    NewManagementCert {
-        /// Comma-separated list of Subject Alternative Names
-        ///
-        /// Each SAN should be prefixed with "DNS:" or "IP:".
-        ///
-        /// Examples:
-        ///   --sans "DNS:localhost,IP:127.0.0.1"
-        ///   --sans "DNS:gap.local,DNS:localhost,IP:192.168.1.100"
-        #[arg(long, value_name = "SANS")]
-        sans: String,
-    },
 }
 
 #[derive(Subcommand)]
@@ -169,7 +156,6 @@ async fn main() {
             TokenCommands::Revoke { id } => commands::tokens::revoke(&cli.server, &id).await,
         },
         Commands::Activity { follow } => commands::activity::run(&cli.server, follow).await,
-        Commands::NewManagementCert { sans } => commands::new_management_cert::run(&cli.server, &sans).await,
     };
 
     if let Err(e) = result {
@@ -315,38 +301,6 @@ mod tests {
                 );
             }
             _ => panic!("Expected Init command"),
-        }
-    }
-
-    #[test]
-    fn test_cli_new_management_cert_parses() {
-        let cli = Cli::parse_from([
-            "gap",
-            "new-management-cert",
-            "--sans",
-            "DNS:localhost,IP:127.0.0.1",
-        ]);
-        match cli.command {
-            Commands::NewManagementCert { sans } => {
-                assert_eq!(sans, "DNS:localhost,IP:127.0.0.1");
-            }
-            _ => panic!("Expected NewManagementCert command"),
-        }
-    }
-
-    #[test]
-    fn test_cli_new_management_cert_multiple_sans() {
-        let cli = Cli::parse_from([
-            "gap",
-            "new-management-cert",
-            "--sans",
-            "DNS:localhost,DNS:example.com,IP:127.0.0.1,IP:192.168.1.1",
-        ]);
-        match cli.command {
-            Commands::NewManagementCert { sans } => {
-                assert_eq!(sans, "DNS:localhost,DNS:example.com,IP:127.0.0.1,IP:192.168.1.1");
-            }
-            _ => panic!("Expected NewManagementCert command"),
         }
     }
 

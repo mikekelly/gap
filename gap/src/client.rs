@@ -226,12 +226,6 @@ pub struct ActivityResponse {
     pub entries: Vec<ActivityEntry>,
 }
 
-#[derive(Debug, Deserialize)]
-pub struct RotateManagementCertResponse {
-    pub sans: Vec<String>,
-    pub rotated: bool,
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
