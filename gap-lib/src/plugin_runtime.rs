@@ -708,6 +708,12 @@ impl PluginRuntime {
         // is in the JS context and will be called directly
         let transform = "function transform(request, credentials) { /* loaded from store */ }".to_string();
 
+        // Read dangerously_permit_http flag from JS plugin object
+        let permit_http = match plugin_obj.get(JsString::from("dangerously_permit_http"), &mut self.context) {
+            Ok(val) => val.to_boolean(),
+            Err(_) => false,
+        };
+
         Ok(GAPPlugin {
             name,
             match_patterns,
@@ -715,6 +721,7 @@ impl PluginRuntime {
             transform,
             commit_sha: None,
             source_hash: None,
+            dangerously_permit_http: permit_http,
         })
     }
 
@@ -1139,6 +1146,7 @@ mod tests {
             hosts: vec!["api.example.com".to_string()],
             credential_schema: vec!["api_key".to_string()],
             commit_sha: None,
+            dangerously_permit_http: false,
         };
         db.add_plugin(&entry, plugin_code).await.unwrap();
 
@@ -1646,5 +1654,58 @@ mod tests {
         let p2 = runtime2.load_plugin_from_code("p2", code2).unwrap();
 
         assert_ne!(p1.source_hash, p2.source_hash);
+    }
+
+    #[test]
+    fn test_dangerously_permit_http_defaults_to_false() {
+        let mut runtime = PluginRuntime::new().unwrap();
+
+        let plugin_code = r#"
+        var plugin = {
+            name: "no-http",
+            matchPatterns: ["api.example.com"],
+            credentialSchema: [],
+            transform: function(request, credentials) { return request; }
+        };
+        "#;
+
+        let plugin = runtime.load_plugin_from_code("no-http", plugin_code).unwrap();
+        assert!(!plugin.dangerously_permit_http, "dangerously_permit_http should default to false");
+    }
+
+    #[test]
+    fn test_dangerously_permit_http_true_when_set() {
+        let mut runtime = PluginRuntime::new().unwrap();
+
+        let plugin_code = r#"
+        var plugin = {
+            name: "yes-http",
+            matchPatterns: ["api.example.com"],
+            dangerously_permit_http: true,
+            credentialSchema: [],
+            transform: function(request, credentials) { return request; }
+        };
+        "#;
+
+        let plugin = runtime.load_plugin_from_code("yes-http", plugin_code).unwrap();
+        assert!(plugin.dangerously_permit_http, "dangerously_permit_http should be true when set in JS");
+    }
+
+    #[test]
+    fn test_dangerously_permit_http_false_when_explicitly_false() {
+        let mut runtime = PluginRuntime::new().unwrap();
+
+        let plugin_code = r#"
+        var plugin = {
+            name: "explicit-false",
+            matchPatterns: ["api.example.com"],
+            dangerously_permit_http: false,
+            credentialSchema: [],
+            transform: function(request, credentials) { return request; }
+        };
+        "#;
+
+        let plugin = runtime.load_plugin_from_code("explicit-false", plugin_code).unwrap();
+        assert!(!plugin.dangerously_permit_http);
     }
 }

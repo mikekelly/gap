@@ -36,6 +36,7 @@ async fn test_parse_and_transform_with_multi_field_credentials() {
         hosts: vec!["api.multicred.com".to_string()],
         credential_schema: vec!["access_key".to_string(), "secret_key".to_string(), "region".to_string()],
         commit_sha: None,
+            dangerously_permit_http: false,
     };
     db.add_plugin(&plugin_entry, plugin_code).await.unwrap();
 
@@ -84,6 +85,7 @@ async fn test_parse_and_transform_with_single_field_credential() {
         hosts: vec!["api.simple.com".to_string()],
         credential_schema: vec!["api_key".to_string()],
         commit_sha: None,
+            dangerously_permit_http: false,
     };
     db.add_plugin(&plugin_entry, plugin_code).await.unwrap();
 
@@ -151,6 +153,7 @@ async fn test_parse_and_transform_rejects_missing_credentials() {
         hosts: vec!["api.nocreds.com".to_string()],
         credential_schema: vec!["api_key".to_string()],
         commit_sha: None,
+            dangerously_permit_http: false,
     };
     db.add_plugin(&plugin_entry, plugin_code).await.unwrap();
 

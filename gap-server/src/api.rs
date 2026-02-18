@@ -346,8 +346,8 @@ pub fn create_router(state: ApiState) -> Router {
             "/credentials/:plugin/:key",
             post(set_credential).delete(delete_credential),
         )
-        .route("/activity", get(get_activity).post(post_activity))
-        .route("/activity/stream", get(activity_stream))
+        .route("/activity", get(get_activity).post(get_activity))
+        .route("/activity/stream", get(activity_stream).post(activity_stream))
         .route("/v1/management-cert", post(rotate_management_cert))
         .with_state(state)
 }
@@ -703,6 +703,7 @@ async fn clone_and_validate_plugin(
         hosts: plugin.match_patterns.clone(),
         credential_schema: plugin.credential_schema.clone(),
         commit_sha: Some(commit_sha.clone()),
+        dangerously_permit_http: plugin.dangerously_permit_http,
     };
     state.db.add_plugin(&plugin_entry, &transformed_code).await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to store plugin: {}", e)))?;
@@ -888,22 +889,6 @@ async fn get_activity(
     verify_auth::<serde_json::Value>(&state, &body).await?;
 
     let filter = query_to_filter(&query);
-    let entries = state.db.query_activity(&filter).await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to get activity: {}", e)))?;
-    Ok(Json(ActivityResponse { entries }))
-}
-
-/// POST /activity - Get recent activity (requires auth, same as GET but without query params)
-async fn post_activity(
-    State(state): State<ApiState>,
-    body: Bytes,
-) -> Result<Json<ActivityResponse>, (StatusCode, String)> {
-    verify_auth::<serde_json::Value>(&state, &body).await?;
-
-    let filter = gap_lib::ActivityFilter {
-        limit: Some(100),
-        ..Default::default()
-    };
     let entries = state.db.query_activity(&filter).await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to get activity: {}", e)))?;
     Ok(Json(ActivityResponse { entries }))

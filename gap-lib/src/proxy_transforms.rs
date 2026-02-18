@@ -109,6 +109,11 @@ fn scrub_headers(request: &GAPRequest, credentials: &HashMap<String, String>) ->
 /// and JS transform execution. Used by both the legacy byte-based pipeline
 /// and the new hyper-based pipeline.
 ///
+/// The `use_tls` flag indicates whether the connection to the upstream server
+/// uses TLS. When false (plain HTTP), plugins must have `dangerously_permit_http: true`
+/// to allow credential injection - otherwise the request is blocked to prevent
+/// credentials from being sent in cleartext.
+///
 /// Returns the transformed request and info about the plugin that handled it.
 ///
 /// CRITICAL: PluginRuntime is not Send - this function scopes the runtime
@@ -117,6 +122,7 @@ pub async fn transform_request(
     request: GAPRequest,
     hostname: &str,
     db: &GapDatabase,
+    use_tls: bool,
 ) -> Result<(GAPRequest, PluginInfo)> {
     // Find matching plugin
     // SECURITY: Only allow connections to hosts with registered plugins
@@ -137,6 +143,21 @@ pub async fn transform_request(
             )));
         }
     };
+
+    // SECURITY: Block plain HTTP requests unless the plugin explicitly opts in.
+    // Sending credentials over unencrypted HTTP risks credential leakage.
+    if !use_tls && !plugin.dangerously_permit_http {
+        warn!(
+            "BLOCKED: Plugin {} does not permit HTTP - credentials would be sent in plaintext. \
+             Set dangerously_permit_http: true in plugin manifest to allow.",
+            plugin.name
+        );
+        return Err(GapError::auth(format!(
+            "Plugin '{}' does not permit credential injection over plain HTTP. \
+             Set dangerously_permit_http: true in the plugin manifest to allow.",
+            plugin.name
+        )));
+    }
 
     // Load credentials for the plugin
     let credentials = load_plugin_credentials(&plugin.name, db).await?;
@@ -197,8 +218,8 @@ pub async fn parse_and_transform(
     let request = parse_http_request(request_bytes)?;
     debug!("Parsed HTTP request: {} {}", request.method, request.url);
 
-    // Apply transforms
-    let (transformed_request, _plugin_info) = transform_request(request, hostname, db).await?;
+    // Apply transforms (parse_and_transform is only used for HTTPS)
+    let (transformed_request, _plugin_info) = transform_request(request, hostname, db, true).await?;
 
     // Serialize back to HTTP
     let transformed_bytes = serialize_http_request(&transformed_request)?;
@@ -252,6 +273,7 @@ mod tests {
             hosts: vec!["api.test.com".to_string()],
             credential_schema: vec!["api_key".to_string()],
             commit_sha: None,
+            dangerously_permit_http: false,
         };
         db.add_plugin(&plugin_entry, plugin_code).await.unwrap();
         db.set_credential("test-api", "api_key", "secret-key-123").await.unwrap();
@@ -265,7 +287,7 @@ mod tests {
         let request = GAPRequest::new("GET", "https://api.test.com/data")
             .with_header("Host", "api.test.com");
 
-        let (result, plugin_info) = transform_request(request, "api.test.com", &db)
+        let (result, plugin_info) = transform_request(request, "api.test.com", &db, true)
             .await
             .expect("transform should succeed");
 
@@ -288,7 +310,7 @@ mod tests {
         let request = GAPRequest::new("GET", "https://evil.com/data")
             .with_header("Host", "evil.com");
 
-        let result = transform_request(request, "evil.com", &db).await;
+        let result = transform_request(request, "evil.com", &db, true).await;
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("not allowed"));
     }
@@ -311,13 +333,14 @@ mod tests {
             hosts: vec!["api.nocreds.com".to_string()],
             credential_schema: vec!["api_key".to_string()],
             commit_sha: None,
+            dangerously_permit_http: false,
         };
         db.add_plugin(&plugin_entry, plugin_code).await.unwrap();
 
         let request = GAPRequest::new("GET", "https://api.nocreds.com/data")
             .with_header("Host", "api.nocreds.com");
 
-        let result = transform_request(request, "api.nocreds.com", &db).await;
+        let result = transform_request(request, "api.nocreds.com", &db, true).await;
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("credentials"));
     }
@@ -464,7 +487,7 @@ mod tests {
         let request = GAPRequest::new("GET", "https://api.test.com/data")
             .with_header("Host", "api.test.com");
 
-        let (_result, plugin_info) = transform_request(request, "api.test.com", &db)
+        let (_result, plugin_info) = transform_request(request, "api.test.com", &db, true)
             .await
             .expect("transform should succeed");
 
@@ -477,5 +500,87 @@ mod tests {
         assert_eq!(parsed["Authorization"], "Bearer [REDACTED]");
         // Non-credential headers preserved
         assert_eq!(parsed["Host"], "api.test.com");
+    }
+
+    #[tokio::test]
+    async fn test_transform_request_blocks_http_without_permit_flag() {
+        let db = GapDatabase::in_memory().await.unwrap();
+        // setup_test_plugin creates a plugin WITHOUT dangerously_permit_http
+        setup_test_plugin(&db).await;
+
+        let request = GAPRequest::new("GET", "http://api.test.com/data")
+            .with_header("Host", "api.test.com");
+
+        // use_tls=false should be blocked because plugin doesn't permit HTTP
+        let result = transform_request(request, "api.test.com", &db, false).await;
+        assert!(result.is_err());
+        let err_msg = result.unwrap_err().to_string();
+        assert!(
+            err_msg.contains("does not permit") || err_msg.contains("plain HTTP"),
+            "Expected HTTP blocking error, got: {}",
+            err_msg
+        );
+    }
+
+    #[tokio::test]
+    async fn test_transform_request_allows_http_with_permit_flag() {
+        let db = GapDatabase::in_memory().await.unwrap();
+
+        // Plugin WITH dangerously_permit_http: true
+        let plugin_code = r#"
+        var plugin = {
+            name: "http-ok",
+            matchPatterns: ["api.httpok.com"],
+            dangerously_permit_http: true,
+            credentialSchema: ["api_key"],
+            transform: function(request, credentials) {
+                request.headers["Authorization"] = "Bearer " + credentials.api_key;
+                return request;
+            }
+        };
+        "#;
+        let plugin_entry = PluginEntry {
+            name: "http-ok".to_string(),
+            hosts: vec!["api.httpok.com".to_string()],
+            credential_schema: vec!["api_key".to_string()],
+            commit_sha: None,
+            dangerously_permit_http: true,
+        };
+        db.add_plugin(&plugin_entry, plugin_code).await.unwrap();
+        db.set_credential("http-ok", "api_key", "http-secret").await.unwrap();
+
+        let request = GAPRequest::new("GET", "http://api.httpok.com/data")
+            .with_header("Host", "api.httpok.com");
+
+        // use_tls=false should be allowed because plugin permits HTTP
+        let (result, plugin_info) = transform_request(request, "api.httpok.com", &db, false)
+            .await
+            .expect("transform should succeed with dangerously_permit_http=true");
+
+        assert_eq!(
+            result.get_header("Authorization"),
+            Some(&"Bearer http-secret".to_string())
+        );
+        assert_eq!(plugin_info.name, "http-ok");
+    }
+
+    #[tokio::test]
+    async fn test_transform_request_allows_https_without_permit_flag() {
+        let db = GapDatabase::in_memory().await.unwrap();
+        // setup_test_plugin creates a plugin WITHOUT dangerously_permit_http
+        setup_test_plugin(&db).await;
+
+        let request = GAPRequest::new("GET", "https://api.test.com/data")
+            .with_header("Host", "api.test.com");
+
+        // use_tls=true should always work regardless of dangerously_permit_http
+        let (result, _) = transform_request(request, "api.test.com", &db, true)
+            .await
+            .expect("HTTPS transform should succeed even without permit flag");
+
+        assert_eq!(
+            result.get_header("Authorization"),
+            Some(&"Bearer secret-key-123".to_string())
+        );
     }
 }

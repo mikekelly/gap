@@ -110,6 +110,11 @@ pub struct GAPPlugin {
     pub commit_sha: Option<String>,
     /// SHA-256 hash of the actual JS source code loaded at runtime
     pub source_hash: Option<String>,
+    /// Whether the plugin explicitly permits credential injection over plain HTTP.
+    /// Default is false (safe). When false, the proxy blocks plain HTTP requests
+    /// to prevent credentials from being sent in cleartext.
+    #[serde(default)]
+    pub dangerously_permit_http: bool,
 }
 
 impl GAPPlugin {
@@ -127,6 +132,7 @@ impl GAPPlugin {
             transform: transform.into(),
             commit_sha: None,
             source_hash: None,
+            dangerously_permit_http: false,
         }
     }
 
@@ -339,6 +345,9 @@ pub struct PluginEntry {
     /// Git commit SHA (short) of the installed version
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub commit_sha: Option<String>,
+    /// Whether the plugin explicitly permits credential injection over plain HTTP.
+    #[serde(default)]
+    pub dangerously_permit_http: bool,
 }
 
 /// Credential metadata entry (plugin + field name, no value)

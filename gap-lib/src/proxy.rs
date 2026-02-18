@@ -604,7 +604,7 @@ where
                 );
 
                 let (gap_req, plugin_info) = crate::proxy_transforms::transform_request(
-                    gap_req, &hostname, &*db
+                    gap_req, &hostname, &*db, use_tls
                 ).instrument(span.clone()).await?;
 
                 let hyper_req = gap_request_to_hyper(&gap_req)?;
@@ -687,7 +687,7 @@ where
                 );
 
                 let (gap_req, plugin_info) = crate::proxy_transforms::transform_request(
-                    gap_req, &hostname, &*db
+                    gap_req, &hostname, &*db, use_tls
                 ).instrument(span.clone()).await?;
 
                 let hyper_req = gap_request_to_hyper(&gap_req)?;
@@ -1057,6 +1057,7 @@ mod tests {
             hosts: vec!["api.test.com".to_string()],
             credential_schema: vec!["api_key".to_string()],
             commit_sha: None,
+            dangerously_permit_http: false,
         };
         db.add_plugin(&plugin_entry, plugin_code).await.unwrap();
         db.set_credential("test-hyper", "api_key", "my-secret-key").await.unwrap();
@@ -1193,6 +1194,7 @@ mod tests {
         var plugin = {
             name: "test-http",
             matchPatterns: ["api.httptest.com"],
+            dangerously_permit_http: true,
             credentialSchema: ["api_key"],
             transform: function(request, credentials) {
                 request.headers["Authorization"] = "Bearer " + credentials.api_key;
@@ -1207,6 +1209,7 @@ mod tests {
             hosts: vec!["api.httptest.com".to_string()],
             credential_schema: vec!["api_key".to_string()],
             commit_sha: None,
+            dangerously_permit_http: true,
         };
         db.add_plugin(&plugin_entry, plugin_code).await.unwrap();
         db.set_credential("test-http", "api_key", "http-secret").await.unwrap();

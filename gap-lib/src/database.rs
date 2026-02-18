@@ -160,6 +160,7 @@ impl GapDatabase {
         let _ = self.conn.execute("ALTER TABLE plugin_versions ADD COLUMN hosts TEXT NOT NULL DEFAULT '[]'", ()).await;
         let _ = self.conn.execute("ALTER TABLE plugin_versions ADD COLUMN credential_schema TEXT NOT NULL DEFAULT '[]'", ()).await;
         let _ = self.conn.execute("ALTER TABLE plugin_versions ADD COLUMN deleted INTEGER NOT NULL DEFAULT 0", ()).await;
+        let _ = self.conn.execute("ALTER TABLE plugin_versions ADD COLUMN dangerously_permit_http INTEGER NOT NULL DEFAULT 0", ()).await;
 
         Ok(())
     }
@@ -262,9 +263,11 @@ impl GapDatabase {
         let source_hash = format!("{:x}", Sha256::digest(source_code.as_bytes()));
         let now = Utc::now().to_rfc3339();
 
+        let permit_http: i64 = if plugin.dangerously_permit_http { 1 } else { 0 };
+
         self.conn
             .execute(
-                "INSERT INTO plugin_versions (plugin_name, hosts, credential_schema, commit_sha, source_hash, source_code, installed_at, deleted) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 0)",
+                "INSERT INTO plugin_versions (plugin_name, hosts, credential_schema, commit_sha, source_hash, source_code, installed_at, deleted, dangerously_permit_http) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 0, ?8)",
                 libsql::params![
                     plugin.name.as_str(),
                     hosts_json,
@@ -272,7 +275,8 @@ impl GapDatabase {
                     plugin.commit_sha.as_deref().unwrap_or(""),
                     source_hash,
                     source_code,
-                    now
+                    now,
+                    permit_http
                 ],
             )
             .await
@@ -287,7 +291,7 @@ impl GapDatabase {
         let mut rows = self
             .conn
             .query(
-                "SELECT plugin_name, hosts, credential_schema, commit_sha, deleted FROM plugin_versions WHERE plugin_name = ?1 ORDER BY id DESC LIMIT 1",
+                "SELECT plugin_name, hosts, credential_schema, commit_sha, deleted, dangerously_permit_http FROM plugin_versions WHERE plugin_name = ?1 ORDER BY id DESC LIMIT 1",
                 libsql::params![name],
             )
             .await
@@ -298,7 +302,7 @@ impl GapDatabase {
             if deleted != 0 {
                 return Ok(None);
             }
-            Ok(Some(self.row_to_plugin_entry(&row)?))
+            Ok(Some(self.row_to_plugin_entry(&row, 5)?))
         } else {
             Ok(None)
         }
@@ -333,7 +337,7 @@ impl GapDatabase {
         let mut rows = self
             .conn
             .query(
-                "SELECT pv.plugin_name, pv.hosts, pv.credential_schema, pv.commit_sha \
+                "SELECT pv.plugin_name, pv.hosts, pv.credential_schema, pv.commit_sha, pv.dangerously_permit_http \
                  FROM plugin_versions pv \
                  INNER JOIN ( \
                      SELECT plugin_name, MAX(id) as max_id \
@@ -347,7 +351,7 @@ impl GapDatabase {
             .map_err(|e| GapError::database(e.to_string()))?;
         let mut result = Vec::new();
         while let Some(row) = rows.next().await.map_err(|e| GapError::database(e.to_string()))? {
-            result.push(self.row_to_plugin_entry(&row)?);
+            result.push(self.row_to_plugin_entry(&row, 4)?);
         }
         Ok(result)
     }
@@ -370,8 +374,11 @@ impl GapDatabase {
         Ok(self.get_plugin(name).await?.is_some())
     }
 
-    /// Parse a `Row` (plugin_name, hosts, credential_schema, commit_sha) into a `PluginEntry`.
-    fn row_to_plugin_entry(&self, row: &libsql::Row) -> Result<PluginEntry> {
+    /// Parse a `Row` into a `PluginEntry`.
+    ///
+    /// Columns expected at positions 0-3: plugin_name, hosts, credential_schema, commit_sha.
+    /// The `dangerously_permit_http` column index varies by query and is passed explicitly.
+    fn row_to_plugin_entry(&self, row: &libsql::Row, permit_http_col: usize) -> Result<PluginEntry> {
         let name: String = row.get(0).map_err(|e| GapError::database(e.to_string()))?;
         let hosts_json: String = row.get(1).map_err(|e| GapError::database(e.to_string()))?;
         let schema_json: String = row.get(2).map_err(|e| GapError::database(e.to_string()))?;
@@ -386,12 +393,14 @@ impl GapDatabase {
         } else {
             Some(commit_sha_raw)
         };
+        let dangerously_permit_http: i64 = row.get(permit_http_col as i32).unwrap_or(0);
 
         Ok(PluginEntry {
             name,
             hosts,
             credential_schema,
             commit_sha,
+            dangerously_permit_http: dangerously_permit_http != 0,
         })
     }
 
@@ -822,6 +831,7 @@ mod tests {
             hosts: vec!["api.example.com".to_string()],
             credential_schema: vec!["api_key".to_string()],
             commit_sha: None,
+            dangerously_permit_http: false,
         }
     }
 
@@ -909,6 +919,7 @@ mod tests {
             hosts: vec!["api.exa.ai".to_string()],
             credential_schema: vec!["api_key".to_string()],
             commit_sha: Some("abc1234".to_string()),
+            dangerously_permit_http: false,
         };
 
         db.add_plugin(&plugin, "src").await.unwrap();
@@ -1548,6 +1559,7 @@ mod tests {
             hosts: vec!["api.example.com".to_string()],
             credential_schema: vec!["api_key".to_string()],
             commit_sha: Some("abc1234".to_string()),
+            dangerously_permit_http: false,
         };
         db.add_plugin(&plugin, source_code).await.unwrap();
 
@@ -1670,6 +1682,7 @@ mod tests {
             hosts: vec!["api.exa.ai".to_string()],
             credential_schema: vec!["api_key".to_string()],
             commit_sha: Some("aaa1111".to_string()),
+            dangerously_permit_http: false,
         };
         db.add_plugin(&plugin_v1, "v1 code").await.unwrap();
 
@@ -1678,6 +1691,7 @@ mod tests {
             hosts: vec!["api.exa.ai".to_string(), "new.exa.ai".to_string()],
             credential_schema: vec!["api_key".to_string(), "secret".to_string()],
             commit_sha: Some("bbb2222".to_string()),
+            dangerously_permit_http: false,
         };
         db.add_plugin(&plugin_v2, "v2 code").await.unwrap();
 
@@ -1694,5 +1708,53 @@ mod tests {
         // list should still show only one entry for "exa"
         let plugins = db.list_plugins().await.unwrap();
         assert_eq!(plugins.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_dangerously_permit_http_stored_and_retrieved() {
+        let db = GapDatabase::in_memory().await.unwrap();
+
+        // Plugin with dangerously_permit_http = true
+        let plugin = PluginEntry {
+            name: "http-plugin".to_string(),
+            hosts: vec!["api.example.com".to_string()],
+            credential_schema: vec!["api_key".to_string()],
+            commit_sha: None,
+            dangerously_permit_http: true,
+        };
+        db.add_plugin(&plugin, "src").await.unwrap();
+
+        let got = db.get_plugin("http-plugin").await.unwrap().unwrap();
+        assert!(got.dangerously_permit_http, "dangerously_permit_http should be true");
+    }
+
+    #[tokio::test]
+    async fn test_dangerously_permit_http_defaults_false() {
+        let db = GapDatabase::in_memory().await.unwrap();
+
+        // Plugin without dangerously_permit_http (default false)
+        let plugin = sample_plugin("safe-plugin");
+        db.add_plugin(&plugin, "src").await.unwrap();
+
+        let got = db.get_plugin("safe-plugin").await.unwrap().unwrap();
+        assert!(!got.dangerously_permit_http, "dangerously_permit_http should default to false");
+    }
+
+    #[tokio::test]
+    async fn test_dangerously_permit_http_in_list_plugins() {
+        let db = GapDatabase::in_memory().await.unwrap();
+
+        let plugin = PluginEntry {
+            name: "http-list-test".to_string(),
+            hosts: vec!["api.example.com".to_string()],
+            credential_schema: vec!["api_key".to_string()],
+            commit_sha: None,
+            dangerously_permit_http: true,
+        };
+        db.add_plugin(&plugin, "src").await.unwrap();
+
+        let plugins = db.list_plugins().await.unwrap();
+        assert_eq!(plugins.len(), 1);
+        assert!(plugins[0].dangerously_permit_http);
     }
 }

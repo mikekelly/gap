@@ -69,6 +69,7 @@ pub async fn find_matching_plugin(
                 let mut runtime = PluginRuntime::new()?;
                 if let Ok(mut plugin) = runtime.load_plugin_from_code(&entry.name, &code) {
                     plugin.commit_sha = entry.commit_sha.clone();
+                    plugin.dangerously_permit_http = entry.dangerously_permit_http;
                     return Ok(Some(plugin));
                 }
             }
@@ -137,6 +138,7 @@ mod tests {
             hosts: vec!["api.example.com".to_string()],
             credential_schema: vec![],
             commit_sha: None,
+            dangerously_permit_http: false,
         };
         db.add_plugin(&entry, plugin_code).await.unwrap();
 
@@ -163,6 +165,7 @@ mod tests {
             hosts: vec!["*.s3.amazonaws.com".to_string()],
             credential_schema: vec![],
             commit_sha: None,
+            dangerously_permit_http: false,
         };
         db.add_plugin(&entry, plugin_code).await.unwrap();
 
@@ -189,6 +192,7 @@ mod tests {
             hosts: vec!["api.example.com".to_string()],
             credential_schema: vec![],
             commit_sha: None,
+            dangerously_permit_http: false,
         };
         db.add_plugin(&entry, plugin_code).await.unwrap();
 
@@ -209,6 +213,7 @@ mod tests {
             hosts: vec!["api.other.com".to_string()],
             credential_schema: vec![],
             commit_sha: None,
+            dangerously_permit_http: false,
         };
         // Store INVALID JavaScript for the non-matching plugins
         let invalid_code = "THIS IS NOT VALID JAVASCRIPT!!! { syntax error }";
@@ -219,6 +224,7 @@ mod tests {
             hosts: vec!["api.another.com".to_string()],
             credential_schema: vec![],
             commit_sha: None,
+            dangerously_permit_http: false,
         };
         db.add_plugin(&entry2, invalid_code).await.unwrap();
 
@@ -236,6 +242,7 @@ mod tests {
             hosts: vec!["api.example.com".to_string()],
             credential_schema: vec![],
             commit_sha: None,
+            dangerously_permit_http: false,
         };
         db.add_plugin(&entry3, valid_code).await.unwrap();
 

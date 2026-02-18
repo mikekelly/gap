@@ -215,6 +215,7 @@ async fn setup_test_db(
         hosts: vec!["localhost".to_string()],
         credential_schema: vec!["test_credential_one".to_string(), "test_credential_two".to_string()],
         commit_sha: None,
+        dangerously_permit_http: false,
     };
     db.add_plugin(&plugin_entry, PLUGIN_CODE).await.expect("store plugin");
 
