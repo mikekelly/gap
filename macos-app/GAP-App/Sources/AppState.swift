@@ -1,3 +1,4 @@
+import Combine
 import SwiftUI
 
 /// Global application state
@@ -32,6 +33,7 @@ class AppState: ObservableObject {
     @Published var selectedRequestDetails: RequestDetails? = nil
 
     private var streamTask: Task<Void, Never>? = nil
+    private var serverManagerCancellable: AnyCancellable?
 
     let client = GAPClient()
 
@@ -49,6 +51,14 @@ class AppState: ObservableObject {
 
     init() {
         self.serverManager = ServerManager()
+
+        // Forward ServerManager's objectWillChange to AppState's objectWillChange.
+        // Computed properties that delegate to ServerManager (serverInstalled, serverRunning,
+        // serverInstalling) don't trigger @Published change notifications on their own —
+        // we must manually propagate so SwiftUI views observing AppState re-render.
+        serverManagerCancellable = serverManager.objectWillChange.sink { [weak self] _ in
+            self?.objectWillChange.send()
+        }
 
         // Auto-install server on app launch
         // This is idempotent - safe to call even if already installed
