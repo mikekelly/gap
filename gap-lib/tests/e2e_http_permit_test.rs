@@ -253,7 +253,7 @@ async fn test_http_blocked_without_dangerously_permit_http() {
     let proxy_ca_cert_pem = proxy_ca.ca_cert_pem();
 
     let proxy_port = portpicker::pick_unused_port().expect("pick proxy port");
-    let proxy = ProxyServer::new(proxy_port, proxy_ca, db).expect("create proxy");
+    let proxy = ProxyServer::new(proxy_port, proxy_ca, db, "127.0.0.1".to_string()).expect("create proxy");
 
     tokio::spawn(async move {
         let _ = proxy.start().await;
@@ -315,7 +315,7 @@ async fn test_http_allowed_with_dangerously_permit_http() {
     let proxy_ca_cert_pem = proxy_ca.ca_cert_pem();
 
     let proxy_port = portpicker::pick_unused_port().expect("pick proxy port");
-    let proxy = ProxyServer::new(proxy_port, proxy_ca, db).expect("create proxy");
+    let proxy = ProxyServer::new(proxy_port, proxy_ca, db, "127.0.0.1".to_string()).expect("create proxy");
 
     tokio::spawn(async move {
         let _ = proxy.start().await;

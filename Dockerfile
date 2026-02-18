@@ -13,6 +13,7 @@ RUN apt-get update && \
     perl \
     make \
     cmake \
+    g++ \
     && rm -rf /var/lib/apt/lists/*
 
 # Set working directory
@@ -89,10 +90,10 @@ EXPOSE 9443 9080
 
 # Health check for the management API
 HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
-    CMD curl -f http://localhost:9080/status || exit 1
+    CMD curl -fk https://localhost:9080/status || exit 1
 
 # Entrypoint validates volume mount before starting
 ENTRYPOINT ["docker-entrypoint.sh"]
 
 # Default command runs the server with data directory set
-CMD ["gap-server", "--data-dir", "/var/lib/gap"]
+CMD ["gap-server", "--data-dir", "/var/lib/gap", "--bind-address", "0.0.0.0"]

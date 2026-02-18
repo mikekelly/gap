@@ -25,6 +25,8 @@ use tracing::{debug, error, info, Instrument};
 pub struct ProxyServer {
     /// Port to listen on
     port: u16,
+    /// Address to bind on (e.g., "127.0.0.1" or "0.0.0.0")
+    bind_address: String,
     /// Certificate Authority for dynamic cert generation
     ca: Arc<CertificateAuthority>,
     /// Database for tokens, plugins, credentials, and activity logging
@@ -47,6 +49,7 @@ impl ProxyServer {
         port: u16,
         ca: CertificateAuthority,
         db: Arc<GapDatabase>,
+        bind_address: String,
     ) -> Result<Self> {
         // Store root certs for building per-connection upstream TLS connectors
         let upstream_root_certs = Arc::new(rustls::RootCertStore {
@@ -80,6 +83,7 @@ impl ProxyServer {
 
         Ok(Self {
             port,
+            bind_address,
             ca: Arc::new(ca),
             db,
             upstream_root_certs,
@@ -99,6 +103,7 @@ impl ProxyServer {
         ca: CertificateAuthority,
         db: Arc<GapDatabase>,
         upstream_root_certs: Arc<rustls::RootCertStore>,
+        bind_address: String,
     ) -> Result<Self> {
         // Generate localhost certificate for the proxy's TLS
         // Use "localhost" as the hostname since the proxy listens on 127.0.0.1
@@ -127,6 +132,7 @@ impl ProxyServer {
 
         Ok(Self {
             port,
+            bind_address,
             ca: Arc::new(ca),
             db,
             upstream_root_certs,
@@ -153,16 +159,16 @@ impl ProxyServer {
                 .expect("add token to db");
         }
 
-        Self::new(port, ca, db)
+        Self::new(port, ca, db, "127.0.0.1".to_string())
     }
 
     /// Start the proxy server
     pub async fn start(&self) -> Result<()> {
-        let listener = TcpListener::bind(format!("127.0.0.1:{}", self.port))
+        let listener = TcpListener::bind(format!("{}:{}", self.bind_address, self.port))
             .await
             .map_err(|e| GapError::network(format!("Failed to bind to port {}: {}", self.port, e)))?;
 
-        info!("Proxy server listening on 127.0.0.1:{}", self.port);
+        info!("Proxy server listening on {}:{}", self.bind_address, self.port);
 
         loop {
             let (stream, addr) = listener

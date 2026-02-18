@@ -38,6 +38,10 @@ struct Args {
     /// Log level
     #[arg(long, default_value = "info", global = true)]
     log_level: String,
+
+    /// Address to bind proxy and API (use 0.0.0.0 for Docker/network access)
+    #[arg(long, default_value = "127.0.0.1", global = true)]
+    bind_address: String,
 }
 
 #[derive(Subcommand)]
@@ -312,6 +316,7 @@ async fn main() -> anyhow::Result<()> {
         config.proxy_port,
         ca,
         Arc::clone(&db),
+        args.bind_address.clone(),
     )?;
     proxy.set_activity_broadcast(activity_tx.clone());
 
@@ -353,9 +358,11 @@ async fn main() -> anyhow::Result<()> {
     let app = api::create_router(api_state);
 
     // Bind address for HTTPS server
-    let addr = std::net::SocketAddr::from(([0, 0, 0, 0], config.api_port));
+    let bind_addr: std::net::IpAddr = args.bind_address.parse()
+        .expect("Invalid bind address");
+    let addr = std::net::SocketAddr::new(bind_addr, config.api_port);
 
-    tracing::info!("Management API listening on https://0.0.0.0:{}", config.api_port);
+    tracing::info!("Management API listening on https://{}:{}", args.bind_address, config.api_port);
 
     // Start HTTPS API server (main task)
     axum_server::bind_rustls(addr, tls_config)
@@ -533,6 +540,18 @@ mod tests {
         with_clean_env(&["GAP_ENCRYPTION_KEY", "GAP_DISABLE_ENCRYPTION"], || {
             assert_eq!(select_db_mode(), DbMode::Keychain);
         });
+    }
+
+    #[test]
+    fn test_args_bind_address_default() {
+        let args = Args::parse_from(["gap-server"]);
+        assert_eq!(args.bind_address, "127.0.0.1");
+    }
+
+    #[test]
+    fn test_args_bind_address_custom() {
+        let args = Args::parse_from(["gap-server", "--bind-address", "0.0.0.0"]);
+        assert_eq!(args.bind_address, "0.0.0.0");
     }
 
     #[test]

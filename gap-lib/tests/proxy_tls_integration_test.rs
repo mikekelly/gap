@@ -49,7 +49,7 @@ async fn create_test_proxy(port: u16, token: AgentToken) -> (ProxyServer, String
         .await
         .expect("store token");
 
-    let proxy = ProxyServer::new(port, ca, db).expect("create proxy");
+    let proxy = ProxyServer::new(port, ca, db, "127.0.0.1".to_string()).expect("create proxy");
 
     (proxy, ca_cert_pem, token_value)
 }

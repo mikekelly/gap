@@ -271,6 +271,7 @@ async fn test_full_e2e_proxy_pipeline() {
         proxy_ca,
         db,
         upstream_root_certs,
+        "127.0.0.1".to_string(),
     )
     .expect("create proxy");
 
@@ -424,6 +425,7 @@ async fn test_e2e_missing_credential() {
         proxy_ca,
         db,
         upstream_root_certs,
+        "127.0.0.1".to_string(),
     )
     .expect("create proxy");
 
@@ -559,6 +561,7 @@ async fn test_e2e_wrong_proxy_ca_rejected() {
         real_proxy_ca,
         db,
         upstream_root_certs,
+        "127.0.0.1".to_string(),
     )
     .expect("create proxy");
 
@@ -726,6 +729,7 @@ async fn test_e2e_h2_proxy_pipeline() {
         proxy_ca,
         db,
         upstream_root_certs,
+        "127.0.0.1".to_string(),
     )
     .expect("create proxy");
 
