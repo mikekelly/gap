@@ -101,6 +101,10 @@ cd macos-app
 - Error 163 on launch: Incorrect entitlements on main app (keep minimal: just `app-sandbox=false`)
 - Exit code 137 (SIGKILL): On modern macOS, Developer ID signed binaries require notarization to run. For local testing, use ad-hoc signing (`codesign --sign -`) instead of Developer ID signing.
 
+## Plain HTTP Security
+
+The proxy blocks credential injection over plain HTTP by default. Plugins must set `dangerously_permit_http: true` in both the JS manifest and the `PluginEntry` struct to allow it. The check lives in `transform_request()` in `proxy_transforms.rs` and uses the `use_tls: bool` parameter threaded from `proxy.rs`. When writing tests that use plain HTTP (`use_tls: false`), the test plugin must include this flag or the transform will return an error.
+
 ## Proxy Architecture (HTTP/1.1 + HTTP/2)
 
 The proxy supports both HTTP/1.1 and HTTP/2 via ALPN negotiation:
