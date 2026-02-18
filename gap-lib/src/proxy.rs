@@ -10,7 +10,8 @@
 use crate::database::GapDatabase;
 use crate::error::{GapError, Result};
 use crate::tls::CertificateAuthority;
-use crate::types::{ActivityEntry, AgentToken};
+use crate::types::{ActivityEntry, AgentToken, RequestDetails};
+use crate::proxy_transforms::{scrub_body, scrub_response_headers, MAX_BODY_SIZE};
 use rustls::pki_types::CertificateDer;
 use rustls::ServerConfig;
 use std::sync::Arc;
@@ -597,15 +598,76 @@ where
                 let method = gap_req.method.clone();
                 let url = gap_req.url.clone();
 
+                // Capture pre-transform request data
+                let pre_headers_json = serde_json::to_string(&gap_req.headers).unwrap_or_default();
+                let (pre_body, mut body_truncated) = crate::proxy_transforms::truncate_body(&gap_req.body);
+                let pre_body = pre_body.to_vec();
+
                 let span = tracing::info_span!("proxy_request",
                     request_id = %request_id_str,
                     method = %method,
                     url = %url,
                 );
 
-                let (gap_req, plugin_info) = crate::proxy_transforms::transform_request(
+                let transform_result = crate::proxy_transforms::transform_request(
                     gap_req, &hostname, &*db, use_tls
-                ).instrument(span.clone()).await?;
+                ).instrument(span.clone()).await;
+
+                let (gap_req, plugin_info) = match transform_result {
+                    Ok(result) => result,
+                    Err(ref e) => {
+                        let err_msg = e.to_string();
+                        let (rejection_stage, rejection_reason) = classify_rejection(&err_msg);
+
+                        let db_log = Arc::clone(&db);
+                        let activity_tx_err = activity_tx.clone();
+                        let request_id_err = request_id_str.clone();
+                        let method_err = method.clone();
+                        let url_err = url.clone();
+                        let agent_name_err = agent_name.clone();
+                        let pre_headers_err = pre_headers_json.clone();
+                        let pre_body_err = pre_body.clone();
+                        tokio::spawn(async move {
+                            let entry = ActivityEntry {
+                                timestamp: chrono::Utc::now(),
+                                request_id: Some(request_id_err.clone()),
+                                method: method_err,
+                                url: url_err,
+                                agent_id: Some(agent_name_err),
+                                status: 0,
+                                plugin_name: None,
+                                plugin_sha: None,
+                                source_hash: None,
+                                request_headers: None,
+                                rejection_stage: Some(rejection_stage),
+                                rejection_reason: Some(rejection_reason),
+                            };
+                            if let Err(e) = db_log.log_activity(&entry).await {
+                                tracing::warn!("Failed to log rejected activity: {}", e);
+                            }
+                            let details = RequestDetails {
+                                request_id: request_id_err,
+                                req_headers: Some(pre_headers_err),
+                                req_body: if pre_body_err.is_empty() { None } else { Some(pre_body_err) },
+                                ..Default::default()
+                            };
+                            if let Err(e) = db_log.save_request_details(&details).await {
+                                tracing::warn!("Failed to save rejected request details: {}", e);
+                            }
+                            if let Some(ref tx) = activity_tx_err {
+                                let _ = tx.send(entry);
+                            }
+                        });
+                        return Err(transform_result.unwrap_err());
+                    }
+                };
+
+                // Capture post-transform data (scrubbed)
+                let (transformed_body_scrubbed, tb_truncated) = scrub_body(
+                    &gap_req.body, &plugin_info.credential_values, MAX_BODY_SIZE
+                );
+                body_truncated = body_truncated || tb_truncated;
+                let transformed_url = gap_req.url.clone();
 
                 let hyper_req = gap_request_to_hyper(&gap_req)?;
 
@@ -617,13 +679,38 @@ where
                 debug!("Response status: {}", status);
                 drop(_enter);
 
-                // Log activity asynchronously (don't block the response)
+                // Capture response headers and body for logging
+                let (resp_parts, resp_body) = resp.into_parts();
+                let resp_body_bytes = resp_body.collect().await
+                    .map_err(|e| GapError::network(e.to_string()))?
+                    .to_bytes();
+
+                // Scrub response data
+                let resp_headers_vec: Vec<(String, String)> = resp_parts.headers.iter()
+                    .filter_map(|(k, v)| v.to_str().ok().map(|v| (k.as_str().to_string(), v.to_string())))
+                    .collect();
+                let resp_headers_json = scrub_response_headers(&resp_headers_vec, &plugin_info.credential_values);
+                let (resp_body_scrubbed, rb_truncated) = scrub_body(
+                    &resp_body_bytes, &plugin_info.credential_values, MAX_BODY_SIZE
+                );
+                body_truncated = body_truncated || rb_truncated;
+
+                // Reconstruct response for the client
+                let resp = hyper::Response::from_parts(
+                    resp_parts,
+                    http_body_util::Full::new(resp_body_bytes),
+                );
+
+                // Log activity and save request details asynchronously
                 let db_log = Arc::clone(&db);
                 let agent_name_log = agent_name.clone();
+                let request_id_log = request_id_str.clone();
+                let pre_headers_log = pre_headers_json;
+                let pre_body_log = pre_body;
                 tokio::spawn(async move {
                     let entry = ActivityEntry {
                         timestamp: chrono::Utc::now(),
-                        request_id: Some(request_id_str),
+                        request_id: Some(request_id_log.clone()),
                         method,
                         url,
                         agent_id: Some(agent_name_log),
@@ -631,20 +718,34 @@ where
                         plugin_name: Some(plugin_info.name),
                         plugin_sha: plugin_info.commit_sha,
                         source_hash: plugin_info.source_hash,
-                        request_headers: plugin_info.scrubbed_headers,
+                        request_headers: plugin_info.scrubbed_headers.clone(),
                         rejection_stage: None,
                         rejection_reason: None,
                     };
                     if let Err(e) = db_log.log_activity(&entry).await {
                         tracing::warn!("Failed to log activity: {}", e);
                     }
-                    // Broadcast to SSE subscribers (ignore errors if no receivers)
+                    let details = RequestDetails {
+                        request_id: request_id_log,
+                        req_headers: Some(pre_headers_log),
+                        req_body: if pre_body_log.is_empty() { None } else { Some(pre_body_log) },
+                        transformed_url: Some(transformed_url),
+                        transformed_headers: plugin_info.scrubbed_headers,
+                        transformed_body: if transformed_body_scrubbed.is_empty() { None } else { Some(transformed_body_scrubbed) },
+                        response_status: Some(status),
+                        response_headers: Some(resp_headers_json),
+                        response_body: if resp_body_scrubbed.is_empty() { None } else { Some(resp_body_scrubbed) },
+                        body_truncated,
+                    };
+                    if let Err(e) = db_log.save_request_details(&details).await {
+                        tracing::warn!("Failed to save request details: {}", e);
+                    }
                     if let Some(ref tx) = activity_tx {
                         let _ = tx.send(entry);
                     }
                 });
 
-                Ok::<_, GapError>(resp)
+                Ok::<hyper::Response<http_body_util::Full<bytes::Bytes>>, GapError>(resp)
             }
         });
 
@@ -682,15 +783,76 @@ where
                 let method = gap_req.method.clone();
                 let url = gap_req.url.clone();
 
+                // Capture pre-transform request data
+                let pre_headers_json = serde_json::to_string(&gap_req.headers).unwrap_or_default();
+                let (pre_body, mut body_truncated) = crate::proxy_transforms::truncate_body(&gap_req.body);
+                let pre_body = pre_body.to_vec();
+
                 let span = tracing::info_span!("proxy_request",
                     request_id = %request_id_str,
                     method = %method,
                     url = %url,
                 );
 
-                let (gap_req, plugin_info) = crate::proxy_transforms::transform_request(
+                let transform_result = crate::proxy_transforms::transform_request(
                     gap_req, &hostname, &*db, use_tls
-                ).instrument(span.clone()).await?;
+                ).instrument(span.clone()).await;
+
+                let (gap_req, plugin_info) = match transform_result {
+                    Ok(result) => result,
+                    Err(ref e) => {
+                        let err_msg = e.to_string();
+                        let (rejection_stage, rejection_reason) = classify_rejection(&err_msg);
+
+                        let db_log = Arc::clone(&db);
+                        let activity_tx_err = activity_tx.clone();
+                        let request_id_err = request_id_str.clone();
+                        let method_err = method.clone();
+                        let url_err = url.clone();
+                        let agent_name_err = agent_name.clone();
+                        let pre_headers_err = pre_headers_json.clone();
+                        let pre_body_err = pre_body.clone();
+                        tokio::spawn(async move {
+                            let entry = ActivityEntry {
+                                timestamp: chrono::Utc::now(),
+                                request_id: Some(request_id_err.clone()),
+                                method: method_err,
+                                url: url_err,
+                                agent_id: Some(agent_name_err),
+                                status: 0,
+                                plugin_name: None,
+                                plugin_sha: None,
+                                source_hash: None,
+                                request_headers: None,
+                                rejection_stage: Some(rejection_stage),
+                                rejection_reason: Some(rejection_reason),
+                            };
+                            if let Err(e) = db_log.log_activity(&entry).await {
+                                tracing::warn!("Failed to log rejected activity: {}", e);
+                            }
+                            let details = RequestDetails {
+                                request_id: request_id_err,
+                                req_headers: Some(pre_headers_err),
+                                req_body: if pre_body_err.is_empty() { None } else { Some(pre_body_err) },
+                                ..Default::default()
+                            };
+                            if let Err(e) = db_log.save_request_details(&details).await {
+                                tracing::warn!("Failed to save rejected request details: {}", e);
+                            }
+                            if let Some(ref tx) = activity_tx_err {
+                                let _ = tx.send(entry);
+                            }
+                        });
+                        return Err(transform_result.unwrap_err());
+                    }
+                };
+
+                // Capture post-transform data (scrubbed)
+                let (transformed_body_scrubbed, tb_truncated) = scrub_body(
+                    &gap_req.body, &plugin_info.credential_values, MAX_BODY_SIZE
+                );
+                body_truncated = body_truncated || tb_truncated;
+                let transformed_url = gap_req.url.clone();
 
                 let hyper_req = gap_request_to_hyper(&gap_req)?;
 
@@ -703,13 +865,38 @@ where
                 debug!("Response status: {}", status);
                 drop(_enter);
 
-                // Log activity asynchronously (don't block the response)
+                // Capture response headers and body for logging
+                let (resp_parts, resp_body) = resp.into_parts();
+                let resp_body_bytes = resp_body.collect().await
+                    .map_err(|e| GapError::network(e.to_string()))?
+                    .to_bytes();
+
+                // Scrub response data
+                let resp_headers_vec: Vec<(String, String)> = resp_parts.headers.iter()
+                    .filter_map(|(k, v)| v.to_str().ok().map(|v| (k.as_str().to_string(), v.to_string())))
+                    .collect();
+                let resp_headers_json = scrub_response_headers(&resp_headers_vec, &plugin_info.credential_values);
+                let (resp_body_scrubbed, rb_truncated) = scrub_body(
+                    &resp_body_bytes, &plugin_info.credential_values, MAX_BODY_SIZE
+                );
+                body_truncated = body_truncated || rb_truncated;
+
+                // Reconstruct response for the client
+                let resp = hyper::Response::from_parts(
+                    resp_parts,
+                    http_body_util::Full::new(resp_body_bytes),
+                );
+
+                // Log activity and save request details asynchronously
                 let db_log = Arc::clone(&db);
                 let agent_name_log = agent_name.clone();
+                let request_id_log = request_id_str.clone();
+                let pre_headers_log = pre_headers_json;
+                let pre_body_log = pre_body;
                 tokio::spawn(async move {
                     let entry = ActivityEntry {
                         timestamp: chrono::Utc::now(),
-                        request_id: Some(request_id_str),
+                        request_id: Some(request_id_log.clone()),
                         method,
                         url,
                         agent_id: Some(agent_name_log),
@@ -717,20 +904,34 @@ where
                         plugin_name: Some(plugin_info.name),
                         plugin_sha: plugin_info.commit_sha,
                         source_hash: plugin_info.source_hash,
-                        request_headers: plugin_info.scrubbed_headers,
+                        request_headers: plugin_info.scrubbed_headers.clone(),
                         rejection_stage: None,
                         rejection_reason: None,
                     };
                     if let Err(e) = db_log.log_activity(&entry).await {
                         tracing::warn!("Failed to log activity: {}", e);
                     }
-                    // Broadcast to SSE subscribers (ignore errors if no receivers)
+                    let details = RequestDetails {
+                        request_id: request_id_log,
+                        req_headers: Some(pre_headers_log),
+                        req_body: if pre_body_log.is_empty() { None } else { Some(pre_body_log) },
+                        transformed_url: Some(transformed_url),
+                        transformed_headers: plugin_info.scrubbed_headers,
+                        transformed_body: if transformed_body_scrubbed.is_empty() { None } else { Some(transformed_body_scrubbed) },
+                        response_status: Some(status),
+                        response_headers: Some(resp_headers_json),
+                        response_body: if resp_body_scrubbed.is_empty() { None } else { Some(resp_body_scrubbed) },
+                        body_truncated,
+                    };
+                    if let Err(e) = db_log.save_request_details(&details).await {
+                        tracing::warn!("Failed to save request details: {}", e);
+                    }
                     if let Some(ref tx) = activity_tx {
                         let _ = tx.send(entry);
                     }
                 });
 
-                Ok::<_, GapError>(resp)
+                Ok::<hyper::Response<http_body_util::Full<bytes::Bytes>>, GapError>(resp)
             }
         });
 
@@ -741,6 +942,20 @@ where
     }
 
     Ok(())
+}
+
+/// Classify a transform_request error into a rejection stage and reason.
+fn classify_rejection(err_msg: &str) -> (String, String) {
+    let stage = if err_msg.contains("no plugin registered") || err_msg.contains("not allowed: no plugin") {
+        "no_matching_plugin"
+    } else if err_msg.contains("no credentials configured") {
+        "missing_credentials"
+    } else if err_msg.contains("does not permit") && err_msg.contains("HTTP") {
+        "http_blocked"
+    } else {
+        "upstream_error"
+    };
+    (stage.to_string(), err_msg.to_string())
 }
 
 /// Convert a hyper Request + collected body bytes to a GAPRequest
@@ -1294,6 +1509,181 @@ mod tests {
         drop(sender);
         let _ = proxy_handle.await;
         let _ = upstream_handle.await;
+    }
+
+    /// Test that proxy_via_hyper captures and stores RequestDetails alongside ActivityEntry.
+    ///
+    /// Verifies that pre-transform, post-transform, and response data are all captured
+    /// and saved to the database with credential values scrubbed.
+    #[tokio::test]
+    async fn test_proxy_via_hyper_saves_request_details() {
+        use crate::database::GapDatabase;
+        use crate::types::PluginEntry;
+        use http_body_util::{BodyExt, Full};
+        use hyper_util::rt::TokioIo;
+
+        let db = Arc::new(GapDatabase::in_memory().await.unwrap());
+
+        // Plugin that injects Authorization header
+        let plugin_code = r#"
+        var plugin = {
+            name: "test-details",
+            matchPatterns: ["api.details.com"],
+            credentialSchema: ["api_key"],
+            transform: function(request, credentials) {
+                request.headers["Authorization"] = "Bearer " + credentials.api_key;
+                return request;
+            }
+        };
+        "#;
+        let plugin_entry = PluginEntry {
+            name: "test-details".to_string(),
+            hosts: vec!["api.details.com".to_string()],
+            credential_schema: vec!["api_key".to_string()],
+            commit_sha: None,
+            dangerously_permit_http: false,
+        };
+        db.add_plugin(&plugin_entry, plugin_code).await.unwrap();
+        db.set_credential("test-details", "api_key", "secret-key-456").await.unwrap();
+
+        let (agent_client, agent_proxy) = tokio::io::duplex(8192);
+        let (upstream_proxy, upstream_server) = tokio::io::duplex(8192);
+
+        // Upstream server echoes the auth header in the response body
+        let upstream_handle = tokio::spawn(async move {
+            let io = TokioIo::new(upstream_server);
+            hyper::server::conn::http1::Builder::new()
+                .serve_connection(
+                    io,
+                    hyper::service::service_fn(|req: hyper::Request<hyper::body::Incoming>| async move {
+                        let auth = req.headers()
+                            .get("authorization")
+                            .map(|v| v.to_str().unwrap_or("").to_string())
+                            .unwrap_or_default();
+                        let body = format!(r#"{{"auth":"{}","data":"hello"}}"#, auth);
+                        Ok::<_, std::convert::Infallible>(
+                            hyper::Response::builder()
+                                .header("content-type", "application/json")
+                                .body(Full::new(bytes::Bytes::from(body)))
+                                .unwrap()
+                        )
+                    }),
+                )
+                .await
+                .expect("upstream server error");
+        });
+
+        let proxy_db = Arc::clone(&db);
+        let proxy_handle = tokio::spawn(async move {
+            proxy_via_hyper(
+                agent_proxy,
+                upstream_proxy,
+                "api.details.com".to_string(),
+                proxy_db,
+                "details-agent".to_string(),
+                false,
+                true,
+                None,
+            )
+            .await
+        });
+
+        let agent_io = TokioIo::new(agent_client);
+        let (mut sender, conn) = hyper::client::conn::http1::handshake(agent_io).await
+            .expect("agent handshake");
+        tokio::spawn(async move { let _ = conn.await; });
+
+        let req = hyper::Request::builder()
+            .method("POST")
+            .uri("/api/submit")
+            .header("Host", "api.details.com")
+            .header("Content-Type", "application/json")
+            .body(Full::new(bytes::Bytes::from(r#"{"query":"test"}"#)))
+            .unwrap();
+
+        let resp = sender.send_request(req).await.expect("send request");
+        assert_eq!(resp.status(), 200);
+
+        let body_bytes = resp.into_body().collect().await.unwrap().to_bytes();
+        let body_str = String::from_utf8(body_bytes.to_vec()).unwrap();
+        // The upstream should have received the injected credential
+        assert!(body_str.contains("secret-key-456"));
+
+        // Clean up
+        drop(sender);
+        let _ = proxy_handle.await;
+        let _ = upstream_handle.await;
+
+        // Wait for async logger to complete
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+        // Verify activity was logged
+        let activity = db.get_activity(None).await.unwrap();
+        assert_eq!(activity.len(), 1);
+        let request_id = activity[0].request_id.as_ref().expect("request_id should be set");
+
+        // Verify request details were saved
+        let details = db.get_request_details(request_id).await.unwrap()
+            .expect("RequestDetails should be saved");
+
+        // Pre-transform headers should be present (as JSON)
+        assert!(details.req_headers.is_some());
+        let pre_headers: serde_json::Value = serde_json::from_str(details.req_headers.as_ref().unwrap()).unwrap();
+        // Pre-transform headers should NOT contain Authorization (not yet injected)
+        assert!(pre_headers.get("Authorization").is_none(),
+            "Pre-transform headers should not have Authorization");
+
+        // Pre-transform body should be present
+        assert!(details.req_body.is_some());
+        assert_eq!(details.req_body.as_ref().unwrap(), br#"{"query":"test"}"#);
+
+        // Post-transform URL
+        assert_eq!(details.transformed_url, Some("https://api.details.com/api/submit".to_string()));
+
+        // Post-transform headers should have Authorization with credential scrubbed
+        assert!(details.transformed_headers.is_some());
+        let post_headers: serde_json::Value = serde_json::from_str(details.transformed_headers.as_ref().unwrap()).unwrap();
+        let auth_val = post_headers.get("Authorization")
+            .or_else(|| post_headers.get("authorization"))
+            .expect("Authorization header should be present");
+        assert!(auth_val.as_str().unwrap().contains("[REDACTED]"),
+            "Credential should be scrubbed in transformed headers, got: {}", auth_val);
+        assert!(!auth_val.as_str().unwrap().contains("secret-key-456"),
+            "Raw credential should not appear in transformed headers");
+
+        // Response status
+        assert_eq!(details.response_status, Some(200));
+
+        // Response headers should be present
+        assert!(details.response_headers.is_some());
+
+        // Response body should have credential scrubbed
+        assert!(details.response_body.is_some());
+        let resp_body_str = String::from_utf8(details.response_body.unwrap()).unwrap();
+        assert!(!resp_body_str.contains("secret-key-456"),
+            "Credential should be scrubbed from response body, got: {}", resp_body_str);
+        assert!(resp_body_str.contains("[REDACTED]"),
+            "Response body should contain [REDACTED], got: {}", resp_body_str);
+
+        // body_truncated should be false for small payloads
+        assert!(!details.body_truncated);
+    }
+
+    /// Test that classify_rejection correctly identifies rejection stages.
+    #[test]
+    fn test_classify_rejection() {
+        let (stage, reason) = super::classify_rejection("Host 'evil.com' is not allowed: no plugin registered for this host");
+        assert_eq!(stage, "no_matching_plugin");
+        assert!(reason.contains("no plugin registered"));
+
+        let (stage, _) = super::classify_rejection("Plugin 'test' has no credentials configured");
+        assert_eq!(stage, "missing_credentials");
+
+        let (stage, _) = super::classify_rejection("Plugin 'test' does not permit credential injection over plain HTTP");
+        assert_eq!(stage, "http_blocked");
+
+        let (stage, _) = super::classify_rejection("Some other upstream error");
+        assert_eq!(stage, "upstream_error");
     }
 
     #[tokio::test]
