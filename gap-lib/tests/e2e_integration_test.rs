@@ -56,6 +56,7 @@ impl TestServer {
 
         let mut process = Command::new(&server_binary)
             .env("HOME", temp_dir.path())
+            .env("GAP_DISABLE_ENCRYPTION", "1")
             .arg("--api-port")
             .arg(api_port.to_string())
             .arg("--proxy-port")
