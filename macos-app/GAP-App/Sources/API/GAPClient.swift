@@ -258,7 +258,7 @@ class GAPClient {
         components.queryItems = filter.queryItems
 
         var request = URLRequest(url: components.url!)
-        request.httpMethod = "GET"
+        request.httpMethod = "POST"
         request.httpBody = try JSONSerialization.data(withJSONObject: ["password_hash": passwordHash])
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
 
@@ -284,7 +284,7 @@ class GAPClient {
                     }
 
                     var request = URLRequest(url: components.url!)
-                    request.httpMethod = "GET"
+                    request.httpMethod = "POST"
                     request.httpBody = try JSONSerialization.data(withJSONObject: ["password_hash": passwordHash])
                     request.setValue("application/json", forHTTPHeaderField: "Content-Type")
 
