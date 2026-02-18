@@ -221,33 +221,9 @@ else
     log_fail "Failed to list plugins: $PLUGINS_RESPONSE"
 fi
 
-# Test 11: Delete token (cleanup test)
+# Test 11: Proxy smoke test (optional — requires internet access and CA cert)
 echo ""
-echo "Test 11: Delete token"
-echo "====================="
-
-if [ -n "$AGENT_TOKEN" ]; then
-    # Extract token ID from TOKEN_RESPONSE
-    TOKEN_ID=$(echo "$TOKEN_RESPONSE" | jq -r '.id')
-
-    DELETE_STATUS=$(curl -ks -o /dev/null -w "%{http_code}" -X DELETE "$GAP_SERVER_URL/tokens/$TOKEN_ID" \
-        -H "Content-Type: application/json" \
-        -d "{
-            \"password_hash\": \"$(echo -n "$TEST_PASSWORD" | sha512sum | cut -d' ' -f1)\"
-        }")
-
-    if [ "$DELETE_STATUS" = "200" ]; then
-        log_pass "Token deleted successfully (HTTP $DELETE_STATUS)"
-    else
-        log_fail "Failed to delete token (HTTP $DELETE_STATUS)"
-    fi
-else
-    log_warn "Skipping token deletion (no token to delete)"
-fi
-
-# Test 12: Proxy smoke test (optional — requires internet access and CA cert)
-echo ""
-echo "Test 12: Proxy smoke test"
+echo "Test 11: Proxy smoke test"
 echo "========================="
 #
 # The GAP proxy listens on port 9443 (HTTPS). Agents route requests through it
@@ -325,9 +301,9 @@ if [ "$PROXY_TEST_SKIPPED" = false ]; then
     fi
 fi
 
-# Test 13: Proxy H2 smoke test — verify HTTP/2 is negotiated via ALPN inside the tunnel
+# Test 12: Proxy H2 smoke test — verify HTTP/2 is negotiated via ALPN inside the tunnel
 echo ""
-echo "Test 13: Proxy H2 smoke test (HTTP/2 via ALPN)"
+echo "Test 12: Proxy H2 smoke test (HTTP/2 via ALPN)"
 echo "================================================"
 #
 # When curl uses --http2 through a CONNECT proxy, the ALPN negotiation happens
@@ -337,10 +313,10 @@ echo "================================================"
 # We assert that value is "2", proving H2 was actually negotiated.
 #
 # This test inherits PROXY_TEST_SKIPPED, CA_TMPFILE, PROXY_URL, and AGENT_TOKEN
-# from the setup done in Test 12.
+# from the setup done in Test 11.
 
 if [ "$PROXY_TEST_SKIPPED" = true ]; then
-    log_warn "Skipping H2 smoke test (preconditions not met — see Test 12)"
+    log_warn "Skipping H2 smoke test (preconditions not met — see Test 11)"
 else
     # Capture only the http_version write-out; discard body to /dev/null
     H2_VERSION=$(curl -s \
@@ -363,12 +339,12 @@ else
     fi
 fi
 
-# Tests 14-18: Activity filtering
-# These tests depend on proxy tests (12, 13) having generated activity entries.
+# Tests 13-17: Activity filtering
+# These tests depend on proxy tests (11, 12) having generated activity entries.
 # If the proxy tests were skipped (no internet or no CA cert), we skip gracefully.
 
 echo ""
-echo "Test 14: Activity endpoint returns entries"
+echo "Test 13: Activity endpoint returns entries"
 echo "==========================================="
 
 PW_HASH="$(echo -n "$TEST_PASSWORD" | sha512sum | cut -d' ' -f1)"
@@ -389,9 +365,9 @@ else
         log_warn "Activity endpoint returned 0 entries (proxy requests may not have been logged yet)"
     fi
 
-    # Test 15: Activity filtering by method
+    # Test 14: Activity filtering by method
     echo ""
-    echo "Test 15: Activity filtering by method"
+    echo "Test 14: Activity filtering by method"
     echo "======================================"
 
     METHOD_RESPONSE=$(curl -ks \
@@ -411,9 +387,9 @@ else
         log_fail "Activity method filter returned non-GET entries (non_get=$NON_GET_COUNT)"
     fi
 
-    # Test 16: Activity filtering by limit
+    # Test 15: Activity filtering by limit
     echo ""
-    echo "Test 16: Activity filtering by limit"
+    echo "Test 15: Activity filtering by limit"
     echo "======================================"
 
     LIMIT_RESPONSE=$(curl -ks \
@@ -431,9 +407,9 @@ else
         log_fail "Activity limit=1 returned $LIMIT_COUNT entries (expected 1)"
     fi
 
-    # Test 17: Activity filtering by domain
+    # Test 16: Activity filtering by domain
     echo ""
-    echo "Test 17: Activity filtering by domain"
+    echo "Test 16: Activity filtering by domain"
     echo "======================================"
 
     DOMAIN_RESPONSE=$(curl -ks \
@@ -449,9 +425,9 @@ else
         log_warn "Activity domain filter returned 0 entries for httpbin.org — proxy requests may not have been logged"
     fi
 
-    # Test 18: Activity entries contain expected audit fields
+    # Test 17: Activity entries contain expected audit fields
     echo ""
-    echo "Test 18: Activity entries contain expected fields"
+    echo "Test 17: Activity entries contain expected fields"
     echo "=================================================="
 
     FIELDS_RESPONSE=$(curl -ks \
@@ -487,6 +463,30 @@ else
     else
         log_warn "No activity entries to inspect fields — skipping field check"
     fi
+fi
+
+# Test 18: Delete token (cleanup test)
+echo ""
+echo "Test 18: Delete token"
+echo "====================="
+
+if [ -n "$AGENT_TOKEN" ]; then
+    # Extract token ID from TOKEN_RESPONSE
+    TOKEN_ID=$(echo "$TOKEN_RESPONSE" | jq -r '.id')
+
+    DELETE_STATUS=$(curl -ks -o /dev/null -w "%{http_code}" -X DELETE "$GAP_SERVER_URL/tokens/$TOKEN_ID" \
+        -H "Content-Type: application/json" \
+        -d "{
+            \"password_hash\": \"$(echo -n "$TEST_PASSWORD" | sha512sum | cut -d' ' -f1)\"
+        }")
+
+    if [ "$DELETE_STATUS" = "200" ]; then
+        log_pass "Token deleted successfully (HTTP $DELETE_STATUS)"
+    else
+        log_fail "Failed to delete token (HTTP $DELETE_STATUS)"
+    fi
+else
+    log_warn "Skipping token deletion (no token to delete)"
 fi
 
 echo ""
