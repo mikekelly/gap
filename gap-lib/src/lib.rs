@@ -32,4 +32,5 @@ pub use tls::{CertificateAuthority, DynamicCertResolver};
 pub use types::{
     GAPCredentials, GAPPlugin, GAPRequest, AgentToken, Config, ActivityEntry,
     ActivityFilter, CredentialEntry, PluginEntry, TokenEntry, TokenMetadata,
+    ManagementLogEntry, ManagementLogFilter,
 };

@@ -341,6 +341,35 @@ pub struct ActivityFilter {
     pub limit: Option<u32>,
 }
 
+/// Management audit log entry for tracking API mutations
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ManagementLogEntry {
+    pub timestamp: DateTime<Utc>,
+    /// Operation name: "token_create", "plugin_install", etc.
+    pub operation: String,
+    /// Resource type: "token", "plugin", "credential", "server"
+    pub resource_type: String,
+    /// Resource identifier (plugin name, token ID, "plugin/key")
+    pub resource_id: Option<String>,
+    /// JSON with operation-specific context (never secrets)
+    pub detail: Option<String>,
+    /// Whether the operation succeeded
+    pub success: bool,
+    /// Error message if the operation failed
+    pub error_message: Option<String>,
+}
+
+/// Filter for querying management audit logs
+#[derive(Debug, Default, Clone)]
+pub struct ManagementLogFilter {
+    pub operation: Option<String>,
+    pub resource_type: Option<String>,
+    pub resource_id: Option<String>,
+    pub success: Option<bool>,
+    pub since: Option<DateTime<Utc>>,
+    pub limit: Option<u32>,
+}
+
 // --- Registry-origin types (migrated from registry.rs) ---
 // These types are used by GapDatabase and the API layer for listing/querying
 // tokens, plugins, and credentials.

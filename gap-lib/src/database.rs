@@ -5,7 +5,7 @@
 
 use crate::error::{GapError, Result};
 use crate::types::{CredentialEntry, PluginEntry, PluginVersion, TokenEntry, TokenMetadata};
-use crate::types::ActivityEntry;
+use crate::types::{ActivityEntry, ManagementLogEntry};
 use chrono::{DateTime, Utc};
 use sha2::{Sha256, Digest};
 use std::collections::HashMap;
@@ -61,6 +61,20 @@ CREATE TABLE IF NOT EXISTS plugin_versions (
 
 CREATE INDEX IF NOT EXISTS idx_plugin_versions_plugin ON plugin_versions(plugin_name);
 CREATE INDEX IF NOT EXISTS idx_plugin_versions_hash ON plugin_versions(source_hash);
+
+CREATE TABLE IF NOT EXISTS management_logs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    timestamp TEXT NOT NULL,
+    operation TEXT NOT NULL,
+    resource_type TEXT NOT NULL,
+    resource_id TEXT NOT NULL DEFAULT '',
+    detail TEXT NOT NULL DEFAULT '',
+    success INTEGER NOT NULL,
+    error_message TEXT NOT NULL DEFAULT ''
+);
+
+CREATE INDEX IF NOT EXISTS idx_management_logs_timestamp ON management_logs(timestamp);
+CREATE INDEX IF NOT EXISTS idx_management_logs_operation ON management_logs(operation);
 
 CREATE TABLE IF NOT EXISTS request_details (
     request_id TEXT PRIMARY KEY,
@@ -832,6 +846,118 @@ impl GapDatabase {
                 request_headers: empty_to_none(request_headers_raw),
                 rejection_stage: empty_to_none(rejection_stage_raw),
                 rejection_reason: empty_to_none(rejection_reason_raw),
+            });
+        }
+        Ok(result)
+    }
+
+    /// Log a management audit event.
+    pub async fn log_management_event(&self, entry: &ManagementLogEntry) -> Result<()> {
+        self.conn
+            .execute(
+                "INSERT INTO management_logs (timestamp, operation, resource_type, resource_id, detail, success, error_message) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                libsql::params![
+                    entry.timestamp.to_rfc3339(),
+                    entry.operation.as_str(),
+                    entry.resource_type.as_str(),
+                    entry.resource_id.as_deref().unwrap_or(""),
+                    entry.detail.as_deref().unwrap_or(""),
+                    entry.success as i64,
+                    entry.error_message.as_deref().unwrap_or("")
+                ],
+            )
+            .await
+            .map_err(|e| GapError::database(format!("Failed to log management event: {}", e)))?;
+        Ok(())
+    }
+
+    /// Query management audit logs with flexible filtering.
+    ///
+    /// All filter fields are optional. When not set, that filter is skipped.
+    /// Results are ordered by id DESC (newest first). Default limit is 100.
+    pub async fn query_management_log(&self, filter: &crate::types::ManagementLogFilter) -> Result<Vec<ManagementLogEntry>> {
+        let select = "SELECT timestamp, operation, resource_type, resource_id, detail, success, error_message FROM management_logs";
+
+        let mut conditions: Vec<String> = Vec::new();
+        let mut params: Vec<libsql::Value> = Vec::new();
+        let mut idx = 1u32;
+
+        if let Some(ref operation) = filter.operation {
+            conditions.push(format!("operation = ?{}", idx));
+            params.push(libsql::Value::Text(operation.clone()));
+            idx += 1;
+        }
+        if let Some(ref resource_type) = filter.resource_type {
+            conditions.push(format!("resource_type = ?{}", idx));
+            params.push(libsql::Value::Text(resource_type.clone()));
+            idx += 1;
+        }
+        if let Some(ref resource_id) = filter.resource_id {
+            conditions.push(format!("resource_id = ?{}", idx));
+            params.push(libsql::Value::Text(resource_id.clone()));
+            idx += 1;
+        }
+        if let Some(success) = filter.success {
+            conditions.push(format!("success = ?{}", idx));
+            params.push(libsql::Value::Integer(success as i64));
+            idx += 1;
+        }
+        if let Some(ref since) = filter.since {
+            conditions.push(format!("timestamp >= ?{}", idx));
+            params.push(libsql::Value::Text(since.to_rfc3339()));
+            idx += 1;
+        }
+
+        let _ = idx; // suppress unused warning
+
+        let where_clause = if conditions.is_empty() {
+            String::new()
+        } else {
+            format!(" WHERE {}", conditions.join(" AND "))
+        };
+
+        let limit = filter.limit.unwrap_or(100);
+        let query = format!("{}{} ORDER BY id DESC LIMIT {}", select, where_clause, limit);
+
+        let mut rows = self
+            .conn
+            .query(&query, params)
+            .await
+            .map_err(|e| GapError::database(e.to_string()))?;
+        self.rows_to_management_log(&mut rows).await
+    }
+
+    /// Helper: convert management_logs rows into `Vec<ManagementLogEntry>`.
+    ///
+    /// Columns expected: timestamp, operation, resource_type, resource_id, detail,
+    ///                   success, error_message
+    async fn rows_to_management_log(&self, rows: &mut libsql::Rows) -> Result<Vec<ManagementLogEntry>> {
+        let mut result = Vec::new();
+        while let Some(row) = rows.next().await.map_err(|e| GapError::database(e.to_string()))? {
+            let ts_str: String = row.get(0).map_err(|e| GapError::database(e.to_string()))?;
+            let operation: String = row.get(1).map_err(|e| GapError::database(e.to_string()))?;
+            let resource_type: String = row.get(2).map_err(|e| GapError::database(e.to_string()))?;
+            let resource_id_raw: String = row.get(3).map_err(|e| GapError::database(e.to_string()))?;
+            let detail_raw: String = row.get(4).map_err(|e| GapError::database(e.to_string()))?;
+            let success_i64: i64 = row.get(5).map_err(|e| GapError::database(e.to_string()))?;
+            let error_message_raw: String = row.get(6).map_err(|e| GapError::database(e.to_string()))?;
+
+            let timestamp = DateTime::parse_from_rfc3339(&ts_str)
+                .map_err(|e| GapError::database(format!("Invalid timestamp: {}", e)))?
+                .with_timezone(&Utc);
+
+            fn empty_to_none(s: String) -> Option<String> {
+                if s.is_empty() { None } else { Some(s) }
+            }
+
+            result.push(ManagementLogEntry {
+                timestamp,
+                operation,
+                resource_type,
+                resource_id: empty_to_none(resource_id_raw),
+                detail: empty_to_none(detail_raw),
+                success: success_i64 != 0,
+                error_message: empty_to_none(error_message_raw),
             });
         }
         Ok(result)
@@ -2062,5 +2188,213 @@ mod tests {
 
         let got = db.get_request_details("truncated-001").await.unwrap().unwrap();
         assert!(got.body_truncated);
+    }
+
+    // ── Management Log ───────────────────────────────────────────────
+
+    fn sample_management_entry(operation: &str, resource_type: &str) -> ManagementLogEntry {
+        ManagementLogEntry {
+            timestamp: Utc::now(),
+            operation: operation.to_string(),
+            resource_type: resource_type.to_string(),
+            resource_id: None,
+            detail: None,
+            success: true,
+            error_message: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn test_management_log_round_trip() {
+        let db = GapDatabase::in_memory().await.unwrap();
+
+        let entry = ManagementLogEntry {
+            timestamp: Utc::now(),
+            operation: "token_create".to_string(),
+            resource_type: "token".to_string(),
+            resource_id: Some("tok_abc123".to_string()),
+            detail: Some(r#"{"name":"my-token"}"#.to_string()),
+            success: true,
+            error_message: None,
+        };
+        db.log_management_event(&entry).await.unwrap();
+
+        let logs = db.query_management_log(&crate::types::ManagementLogFilter::default()).await.unwrap();
+        assert_eq!(logs.len(), 1);
+        let got = &logs[0];
+        assert_eq!(got.operation, "token_create");
+        assert_eq!(got.resource_type, "token");
+        assert_eq!(got.resource_id, Some("tok_abc123".to_string()));
+        assert_eq!(got.detail, Some(r#"{"name":"my-token"}"#.to_string()));
+        assert!(got.success);
+        assert_eq!(got.error_message, None);
+    }
+
+    #[tokio::test]
+    async fn test_management_log_round_trip_failure_entry() {
+        let db = GapDatabase::in_memory().await.unwrap();
+
+        let entry = ManagementLogEntry {
+            timestamp: Utc::now(),
+            operation: "plugin_install".to_string(),
+            resource_type: "plugin".to_string(),
+            resource_id: Some("exa".to_string()),
+            detail: None,
+            success: false,
+            error_message: Some("Repository not found".to_string()),
+        };
+        db.log_management_event(&entry).await.unwrap();
+
+        let logs = db.query_management_log(&crate::types::ManagementLogFilter::default()).await.unwrap();
+        assert_eq!(logs.len(), 1);
+        let got = &logs[0];
+        assert!(!got.success);
+        assert_eq!(got.error_message, Some("Repository not found".to_string()));
+        assert_eq!(got.detail, None);
+    }
+
+    #[tokio::test]
+    async fn test_management_log_filter_by_operation() {
+        let db = GapDatabase::in_memory().await.unwrap();
+
+        db.log_management_event(&sample_management_entry("token_create", "token")).await.unwrap();
+        db.log_management_event(&sample_management_entry("plugin_install", "plugin")).await.unwrap();
+        db.log_management_event(&sample_management_entry("token_create", "token")).await.unwrap();
+
+        let filter = crate::types::ManagementLogFilter {
+            operation: Some("token_create".to_string()),
+            ..Default::default()
+        };
+        let logs = db.query_management_log(&filter).await.unwrap();
+        assert_eq!(logs.len(), 2);
+        assert!(logs.iter().all(|e| e.operation == "token_create"));
+    }
+
+    #[tokio::test]
+    async fn test_management_log_filter_by_resource_type() {
+        let db = GapDatabase::in_memory().await.unwrap();
+
+        db.log_management_event(&sample_management_entry("token_create", "token")).await.unwrap();
+        db.log_management_event(&sample_management_entry("plugin_install", "plugin")).await.unwrap();
+        db.log_management_event(&sample_management_entry("credential_set", "credential")).await.unwrap();
+
+        let filter = crate::types::ManagementLogFilter {
+            resource_type: Some("plugin".to_string()),
+            ..Default::default()
+        };
+        let logs = db.query_management_log(&filter).await.unwrap();
+        assert_eq!(logs.len(), 1);
+        assert_eq!(logs[0].operation, "plugin_install");
+    }
+
+    #[tokio::test]
+    async fn test_management_log_filter_by_success() {
+        let db = GapDatabase::in_memory().await.unwrap();
+
+        let mut success_entry = sample_management_entry("token_create", "token");
+        success_entry.success = true;
+        db.log_management_event(&success_entry).await.unwrap();
+
+        let mut failure_entry = sample_management_entry("plugin_install", "plugin");
+        failure_entry.success = false;
+        failure_entry.error_message = Some("network error".to_string());
+        db.log_management_event(&failure_entry).await.unwrap();
+
+        // Filter for successes only
+        let filter = crate::types::ManagementLogFilter {
+            success: Some(true),
+            ..Default::default()
+        };
+        let logs = db.query_management_log(&filter).await.unwrap();
+        assert_eq!(logs.len(), 1);
+        assert!(logs[0].success);
+        assert_eq!(logs[0].operation, "token_create");
+
+        // Filter for failures only
+        let filter = crate::types::ManagementLogFilter {
+            success: Some(false),
+            ..Default::default()
+        };
+        let logs = db.query_management_log(&filter).await.unwrap();
+        assert_eq!(logs.len(), 1);
+        assert!(!logs[0].success);
+        assert_eq!(logs[0].operation, "plugin_install");
+    }
+
+    #[tokio::test]
+    async fn test_management_log_filter_by_since() {
+        let db = GapDatabase::in_memory().await.unwrap();
+
+        let old_time = Utc::now() - Duration::hours(2);
+        let cutoff = Utc::now() - Duration::minutes(30);
+        let new_time = Utc::now();
+
+        let mut old_entry = sample_management_entry("token_create", "token");
+        old_entry.timestamp = old_time;
+        db.log_management_event(&old_entry).await.unwrap();
+
+        let mut new_entry = sample_management_entry("plugin_install", "plugin");
+        new_entry.timestamp = new_time;
+        db.log_management_event(&new_entry).await.unwrap();
+
+        let filter = crate::types::ManagementLogFilter {
+            since: Some(cutoff),
+            ..Default::default()
+        };
+        let logs = db.query_management_log(&filter).await.unwrap();
+        assert_eq!(logs.len(), 1);
+        assert_eq!(logs[0].operation, "plugin_install");
+    }
+
+    #[tokio::test]
+    async fn test_management_log_limit() {
+        let db = GapDatabase::in_memory().await.unwrap();
+
+        for i in 0..3 {
+            let mut entry = sample_management_entry("token_create", "token");
+            entry.timestamp = Utc::now() + Duration::seconds(i);
+            db.log_management_event(&entry).await.unwrap();
+        }
+
+        let filter = crate::types::ManagementLogFilter {
+            limit: Some(2),
+            ..Default::default()
+        };
+        let logs = db.query_management_log(&filter).await.unwrap();
+        assert_eq!(logs.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn test_management_log_empty_query_returns_all() {
+        let db = GapDatabase::in_memory().await.unwrap();
+
+        db.log_management_event(&sample_management_entry("token_create", "token")).await.unwrap();
+        db.log_management_event(&sample_management_entry("plugin_install", "plugin")).await.unwrap();
+        db.log_management_event(&sample_management_entry("credential_set", "credential")).await.unwrap();
+
+        // Default filter with no constraints
+        let logs = db.query_management_log(&crate::types::ManagementLogFilter::default()).await.unwrap();
+        assert_eq!(logs.len(), 3);
+    }
+
+    #[tokio::test]
+    async fn test_management_log_filter_by_resource_id() {
+        let db = GapDatabase::in_memory().await.unwrap();
+
+        let mut entry_a = sample_management_entry("token_create", "token");
+        entry_a.resource_id = Some("tok_aaa".to_string());
+        db.log_management_event(&entry_a).await.unwrap();
+
+        let mut entry_b = sample_management_entry("token_delete", "token");
+        entry_b.resource_id = Some("tok_bbb".to_string());
+        db.log_management_event(&entry_b).await.unwrap();
+
+        let filter = crate::types::ManagementLogFilter {
+            resource_id: Some("tok_aaa".to_string()),
+            ..Default::default()
+        };
+        let logs = db.query_management_log(&filter).await.unwrap();
+        assert_eq!(logs.len(), 1);
+        assert_eq!(logs[0].resource_id, Some("tok_aaa".to_string()));
     }
 }
