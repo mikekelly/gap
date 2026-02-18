@@ -30,7 +30,7 @@ enum GAPError: Error, LocalizedError {
 
 /// URLSession-based client for the GAP Management API.
 ///
-/// All authenticated endpoints require a password hash in the request body.
+/// All authenticated endpoints require an `Authorization: Bearer <hash>` header.
 /// The client trusts self-signed certificates from localhost to work with
 /// the GAP server's self-signed CA.
 ///
@@ -98,7 +98,7 @@ class GAPClient {
     /// - Returns: PluginsResponse containing array of installed plugins
     /// - Throws: GAPError if the request fails or authentication fails
     func getPlugins(passwordHash: String) async throws -> PluginsResponse {
-        return try await post("/plugins", body: ["password_hash": passwordHash])
+        return try await authenticatedGet("/plugins", passwordHash: passwordHash)
     }
 
     /// Install a plugin from a GitHub repository.
@@ -109,10 +109,7 @@ class GAPClient {
     /// - Returns: PluginInstallResponse with installation status
     /// - Throws: GAPError if the request fails or authentication fails
     func installPlugin(repo: String, passwordHash: String) async throws -> PluginInstallResponse {
-        return try await post("/plugins/install", body: [
-            "name": repo,
-            "password_hash": passwordHash
-        ])
+        return try await authenticatedPost("/plugins/install", body: ["name": repo], passwordHash: passwordHash)
     }
 
     /// Update an installed plugin to the latest version.
@@ -129,7 +126,7 @@ class GAPClient {
         guard let encodedName = name.addingPercentEncoding(withAllowedCharacters: allowed) else {
             throw GAPError.invalidURL
         }
-        return try await post("/plugins/\(encodedName)/update", body: ["password_hash": passwordHash])
+        return try await authenticatedPost("/plugins/\(encodedName)/update", body: nil, passwordHash: passwordHash)
     }
 
     /// Uninstall a plugin.
@@ -146,7 +143,7 @@ class GAPClient {
         guard let encodedName = name.addingPercentEncoding(withAllowedCharacters: allowed) else {
             throw GAPError.invalidURL
         }
-        return try await delete("/plugins/\(encodedName)", body: ["password_hash": passwordHash])
+        return try await authenticatedDelete("/plugins/\(encodedName)", passwordHash: passwordHash)
     }
 
     // MARK: - Token Endpoints (Authenticated)
@@ -157,7 +154,7 @@ class GAPClient {
     /// - Returns: TokensResponse containing array of tokens
     /// - Throws: GAPError if the request fails or authentication fails
     func getTokens(passwordHash: String) async throws -> TokensResponse {
-        return try await post("/tokens", body: ["password_hash": passwordHash])
+        return try await authenticatedGet("/tokens", passwordHash: passwordHash)
     }
 
     /// Create a new agent token.
@@ -168,10 +165,7 @@ class GAPClient {
     /// - Returns: TokenCreateResponse with the full token value (only shown once)
     /// - Throws: GAPError if the request fails or authentication fails
     func createToken(name: String, passwordHash: String) async throws -> TokenCreateResponse {
-        return try await post("/tokens/create", body: [
-            "name": name,
-            "password_hash": passwordHash
-        ])
+        return try await authenticatedPost("/tokens/create", body: ["name": name], passwordHash: passwordHash)
     }
 
     /// Revoke an agent token.
@@ -188,7 +182,7 @@ class GAPClient {
         guard let encodedId = id.addingPercentEncoding(withAllowedCharacters: allowed) else {
             throw GAPError.invalidURL
         }
-        return try await delete("/tokens/\(encodedId)", body: ["password_hash": passwordHash])
+        return try await authenticatedDelete("/tokens/\(encodedId)", passwordHash: passwordHash)
     }
 
     // MARK: - Credential Endpoints (Authenticated)
@@ -210,10 +204,7 @@ class GAPClient {
               let encodedKey = key.addingPercentEncoding(withAllowedCharacters: allowed) else {
             throw GAPError.invalidURL
         }
-        return try await post("/credentials/\(encodedPlugin)/\(encodedKey)", body: [
-            "value": value,
-            "password_hash": passwordHash
-        ])
+        return try await authenticatedPost("/credentials/\(encodedPlugin)/\(encodedKey)", body: ["value": value], passwordHash: passwordHash)
     }
 
     /// Delete a credential for a plugin.
@@ -232,7 +223,7 @@ class GAPClient {
             throw GAPError.invalidURL
         }
         // DELETE returns 204 No Content, so we just verify success without decoding a response
-        let _: EmptyResponse = try await delete("/credentials/\(encodedPlugin)/\(encodedKey)", body: ["password_hash": passwordHash])
+        let _: EmptyResponse = try await authenticatedDelete("/credentials/\(encodedPlugin)/\(encodedKey)", passwordHash: passwordHash)
     }
 
     // MARK: - Activity Endpoints (Authenticated)
@@ -243,7 +234,7 @@ class GAPClient {
     /// - Returns: ActivityResponse containing array of activity entries
     /// - Throws: GAPError if the request fails or authentication fails
     func getActivity(passwordHash: String) async throws -> ActivityResponse {
-        return try await post("/activity", body: ["password_hash": passwordHash])
+        return try await authenticatedGet("/activity", passwordHash: passwordHash)
     }
 
     /// Get filtered activity log entries.
@@ -258,9 +249,8 @@ class GAPClient {
         components.queryItems = filter.queryItems
 
         var request = URLRequest(url: components.url!)
-        request.httpMethod = "POST"
-        request.httpBody = try JSONSerialization.data(withJSONObject: ["password_hash": passwordHash])
-        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.httpMethod = "GET"
+        request.setValue("Bearer \(passwordHash)", forHTTPHeaderField: "Authorization")
 
         return try await performRequest(request)
     }
@@ -273,7 +263,7 @@ class GAPClient {
     /// - Returns: RequestDetails with pre-transform, post-transform, and response data
     /// - Throws: GAPError if the request fails or request not found (404)
     func getRequestDetails(requestId: String, passwordHash: String) async throws -> RequestDetails {
-        return try await post("/activity/\(requestId)/details", body: ["password_hash": passwordHash])
+        return try await authenticatedGet("/activity/\(requestId)/details", passwordHash: passwordHash)
     }
 
     /// Connect to the activity SSE stream.
@@ -295,9 +285,8 @@ class GAPClient {
                     }
 
                     var request = URLRequest(url: components.url!)
-                    request.httpMethod = "POST"
-                    request.httpBody = try JSONSerialization.data(withJSONObject: ["password_hash": passwordHash])
-                    request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+                    request.httpMethod = "GET"
+                    request.setValue("Bearer \(passwordHash)", forHTTPHeaderField: "Authorization")
 
                     let (bytes, _) = try await session.bytes(for: request)
                     for try await line in bytes.lines {
@@ -322,9 +311,37 @@ class GAPClient {
         }
     }
 
+    // MARK: - Management Log Endpoint (Authenticated)
+
+    /// Get management log entries with optional filters.
+    ///
+    /// - Parameters:
+    ///   - passwordHash: SHA512 hash of the password
+    ///   - operation: Filter by operation type (e.g., "create_token")
+    ///   - resourceType: Filter by resource type (e.g., "token", "plugin")
+    ///   - resourceId: Filter by resource ID
+    ///   - limit: Maximum number of entries to return
+    /// - Returns: ManagementLogResponse containing matching log entries
+    /// - Throws: GAPError if the request fails or authentication fails
+    func getManagementLog(passwordHash: String, operation: String? = nil, resourceType: String? = nil, resourceId: String? = nil, limit: Int? = nil) async throws -> ManagementLogResponse {
+        var components = URLComponents(url: baseURL.appendingPathComponent("management-log"), resolvingAgainstBaseURL: false)!
+        var queryItems: [URLQueryItem] = []
+        if let operation = operation { queryItems.append(.init(name: "operation", value: operation)) }
+        if let resourceType = resourceType { queryItems.append(.init(name: "resource_type", value: resourceType)) }
+        if let resourceId = resourceId { queryItems.append(.init(name: "resource_id", value: resourceId)) }
+        if let limit = limit { queryItems.append(.init(name: "limit", value: "\(limit)")) }
+        if !queryItems.isEmpty { components.queryItems = queryItems }
+
+        var request = URLRequest(url: components.url!)
+        request.httpMethod = "GET"
+        request.setValue("Bearer \(passwordHash)", forHTTPHeaderField: "Authorization")
+
+        return try await performRequest(request)
+    }
+
     // MARK: - Private Helper Methods
 
-    /// Perform a GET request.
+    /// Perform an unauthenticated GET request.
     ///
     /// - Parameter path: API path (e.g., "/status")
     /// - Returns: Decoded response of type T
@@ -340,10 +357,12 @@ class GAPClient {
         return try await performRequest(request)
     }
 
-    /// Perform a POST request with JSON body.
+    /// Perform an unauthenticated POST request with JSON body.
+    ///
+    /// Used only for the /init endpoint which sends password_hash in the body.
     ///
     /// - Parameters:
-    ///   - path: API path (e.g., "/plugins")
+    ///   - path: API path (e.g., "/init")
     ///   - body: Dictionary to encode as JSON
     /// - Returns: Decoded response of type T
     /// - Throws: GAPError if the request fails
@@ -365,27 +384,69 @@ class GAPClient {
         return try await performRequest(request)
     }
 
-    /// Perform a DELETE request with JSON body.
+    /// Perform an authenticated GET request with Bearer token header.
+    ///
+    /// - Parameters:
+    ///   - path: API path (e.g., "/plugins")
+    ///   - passwordHash: SHA512 hash of the password for the Authorization header
+    /// - Returns: Decoded response of type T
+    /// - Throws: GAPError if the request fails
+    private func authenticatedGet<T: Decodable>(_ path: String, passwordHash: String) async throws -> T {
+        guard let url = URL(string: path, relativeTo: baseURL) else {
+            throw GAPError.invalidURL
+        }
+
+        var request = URLRequest(url: url)
+        request.httpMethod = "GET"
+        request.setValue("Bearer \(passwordHash)", forHTTPHeaderField: "Authorization")
+
+        return try await performRequest(request)
+    }
+
+    /// Perform an authenticated POST request with Bearer token header and optional JSON body.
+    ///
+    /// - Parameters:
+    ///   - path: API path (e.g., "/plugins/install")
+    ///   - body: Optional dictionary to encode as JSON (request data only, no password_hash)
+    ///   - passwordHash: SHA512 hash of the password for the Authorization header
+    /// - Returns: Decoded response of type T
+    /// - Throws: GAPError if the request fails
+    private func authenticatedPost<T: Decodable>(_ path: String, body: [String: Any]?, passwordHash: String) async throws -> T {
+        guard let url = URL(string: path, relativeTo: baseURL) else {
+            throw GAPError.invalidURL
+        }
+
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.setValue("Bearer \(passwordHash)", forHTTPHeaderField: "Authorization")
+
+        if let body = body {
+            request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+            do {
+                request.httpBody = try JSONSerialization.data(withJSONObject: body)
+            } catch {
+                throw GAPError.networkError(error)
+            }
+        }
+
+        return try await performRequest(request)
+    }
+
+    /// Perform an authenticated DELETE request with Bearer token header.
     ///
     /// - Parameters:
     ///   - path: API path (e.g., "/plugins/name")
-    ///   - body: Dictionary to encode as JSON
+    ///   - passwordHash: SHA512 hash of the password for the Authorization header
     /// - Returns: Decoded response of type T
     /// - Throws: GAPError if the request fails
-    private func delete<T: Decodable>(_ path: String, body: [String: Any]) async throws -> T {
+    private func authenticatedDelete<T: Decodable>(_ path: String, passwordHash: String) async throws -> T {
         guard let url = URL(string: path, relativeTo: baseURL) else {
             throw GAPError.invalidURL
         }
 
         var request = URLRequest(url: url)
         request.httpMethod = "DELETE"
-        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-
-        do {
-            request.httpBody = try JSONSerialization.data(withJSONObject: body)
-        } catch {
-            throw GAPError.networkError(error)
-        }
+        request.setValue("Bearer \(passwordHash)", forHTTPHeaderField: "Authorization")
 
         return try await performRequest(request)
     }

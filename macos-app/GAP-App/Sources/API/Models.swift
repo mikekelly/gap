@@ -121,6 +121,33 @@ struct CredentialSetResponse: Codable {
     let set: Bool
 }
 
+// MARK: - Management Log Models
+
+/// Response from GET /management-log
+struct ManagementLogResponse: Codable {
+    let entries: [ManagementLogEntry]
+}
+
+/// A single management log entry recording an administrative operation
+struct ManagementLogEntry: Codable, Identifiable {
+    var id: String { "\(timestamp)-\(operation)" }
+
+    let timestamp: String
+    let operation: String
+    let resourceType: String
+    let resourceId: String?
+    let detail: String?
+    let success: Bool
+    let errorMessage: String?
+
+    enum CodingKeys: String, CodingKey {
+        case timestamp, operation, success, detail
+        case resourceType = "resource_type"
+        case resourceId = "resource_id"
+        case errorMessage = "error_message"
+    }
+}
+
 // MARK: - Activity Models
 
 /// Response from POST /activity
