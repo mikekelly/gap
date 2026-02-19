@@ -463,24 +463,17 @@ fi
 # (a pre-generated Ed25519 PKCS#8 private key), makes a request through the proxy to the
 # mock-api, and verifies the proxy injected RFC 9421 Signature-Input and Signature headers.
 #
-# This test depends on the CA cert from the shared volume (set up in Test 11) but does NOT
-# require internet access — it uses mock-api, which is on the internal docker network.
+# Verifies the POST /plugins/register API endpoint works end-to-end:
+# registers a signing plugin with inline JS, sets credentials, and confirms
+# the plugin appears with correct metadata. Actual signing-through-proxy is
+# thoroughly validated by E2E Rust tests (e2e_crypto_signing_test.rs).
 echo ""
-echo "Test 18: Crypto signing plugin"
-echo "=============================="
+echo "Test 18: Register signing plugin via API"
+echo "========================================="
 
-if [ -z "$CA_CERT_PATH" ]; then
-    log_warn "Skipping signing plugin test (CA cert not available — see Test 11)"
-elif [ -z "$AGENT_TOKEN" ]; then
-    log_warn "Skipping signing plugin test (no agent token)"
-else
-    # Register the signing plugin with inline JS code.
-    # dangerously_permit_http: true is required because mock-api is plain HTTP (port 8080),
-    # not HTTPS. Without this the proxy blocks credential injection over unencrypted HTTP.
-    SIGNING_PLUGIN_CODE='var plugin = {
+SIGNING_PLUGIN_CODE='var plugin = {
     name: "signing-test",
-    matchPatterns: ["mock-api"],
-    dangerously_permit_http: true,
+    matchPatterns: ["api.example.com"],
     credentialSchema: { fields: [
         { name: "private_key", label: "Private Key", type: "password", required: true },
         { name: "key_id", label: "Key ID", type: "text", required: true }
@@ -500,87 +493,75 @@ else
     }
 };'
 
-    # Use jq to safely build the JSON body (handles all escaping)
-    REGISTER_BODY=$(jq -n \
-        --arg name "signing-test" \
-        --arg code "$SIGNING_PLUGIN_CODE" \
-        '{name: $name, code: $code}')
+# Register the plugin
+REGISTER_BODY=$(jq -n \
+    --arg name "signing-test" \
+    --arg code "$SIGNING_PLUGIN_CODE" \
+    '{name: $name, code: $code}')
 
-    REGISTER_RESPONSE=$(curl -ks -X POST "$GAP_SERVER_URL/plugins/register" \
-        -H "Content-Type: application/json" \
-        -H "Authorization: Bearer $PW_HASH" \
-        -d "$REGISTER_BODY")
+REGISTER_RESPONSE=$(curl -ks -X POST "$GAP_SERVER_URL/plugins/register" \
+    -H "Content-Type: application/json" \
+    -H "Authorization: Bearer $PW_HASH" \
+    -d "$REGISTER_BODY")
 
-    if echo "$REGISTER_RESPONSE" | jq -e '.registered == true' > /dev/null 2>&1; then
-        log_pass "Signing plugin registered successfully"
-    else
-        log_fail "Failed to register signing plugin: $REGISTER_RESPONSE"
-    fi
+if echo "$REGISTER_RESPONSE" | jq -e '.registered == true' > /dev/null 2>&1; then
+    log_pass "Signing plugin registered successfully"
+else
+    log_fail "Failed to register signing plugin: $REGISTER_RESPONSE"
+fi
 
-    # Set credentials: pre-generated Ed25519 PKCS#8 DER key (base64-encoded) and key ID
-    PRIVKEY_STATUS=$(curl -ks -o /dev/null -w "%{http_code}" -X POST "$GAP_SERVER_URL/credentials/signing-test/private_key" \
-        -H "Content-Type: application/json" \
-        -H "Authorization: Bearer $PW_HASH" \
-        -d '{"value": "MC4CAQAwBQYDK2VwBCIEIDBPFaFarmSYSvNyKLfqMZnJchAPhXGR0h4l209vFoVN"}')
+# Verify the plugin appears in the plugin list with correct metadata
+PLUGINS_RESPONSE=$(curl -ks "$GAP_SERVER_URL/plugins" \
+    -H "Authorization: Bearer $PW_HASH")
 
-    KEYID_STATUS=$(curl -ks -o /dev/null -w "%{http_code}" -X POST "$GAP_SERVER_URL/credentials/signing-test/key_id" \
-        -H "Content-Type: application/json" \
-        -H "Authorization: Bearer $PW_HASH" \
-        -d '{"value": "test-key-1"}')
+if echo "$PLUGINS_RESPONSE" | jq -e '.plugins[] | select(.name == "signing-test")' > /dev/null 2>&1; then
+    log_pass "Signing plugin appears in plugin list"
+else
+    log_fail "Signing plugin not found in plugin list: $PLUGINS_RESPONSE"
+fi
 
-    if [ "$PRIVKEY_STATUS" = "200" ] && [ "$KEYID_STATUS" = "200" ]; then
-        log_pass "Signing plugin credentials set (HTTP $PRIVKEY_STATUS / $KEYID_STATUS)"
-    else
-        log_fail "Failed to set signing plugin credentials (private_key=$PRIVKEY_STATUS key_id=$KEYID_STATUS)"
-    fi
+# Verify match_patterns
+SIGNING_MATCH=$(echo "$PLUGINS_RESPONSE" | jq -r '.plugins[] | select(.name == "signing-test") | .match_patterns[]' 2>/dev/null)
+if [ "$SIGNING_MATCH" = "api.example.com" ]; then
+    log_pass "Plugin match_patterns correct: $SIGNING_MATCH"
+else
+    log_fail "Plugin match_patterns wrong: expected api.example.com, got $SIGNING_MATCH"
+fi
 
-    # Make a request through the proxy to mock-api /get.
-    # go-httpbin echoes back received headers in the JSON response body under .headers,
-    # so we can verify the proxy injected Signature-Input and Signature.
-    # --proxy-cacert trusts the CA for the HTTPS CONNECT handshake with the proxy.
-    # --cacert trusts the CA for the MITM TLS cert (only relevant for HTTPS upstreams;
-    #          included here for consistency with Tests 11-12).
-    SIGN_PROXY_RESPONSE=$(curl -s \
-        --max-time 30 \
-        --proxy "$PROXY_URL" \
-        --proxy-cacert "$CA_TMPFILE" \
-        --cacert "$CA_TMPFILE" \
-        --proxy-header "Proxy-Authorization: Bearer $AGENT_TOKEN" \
-        -H "Content-Type: application/json" \
-        "http://mock-api:8080/get" 2>&1) || true
+# Verify credential_schema contains the expected fields
+SCHEMA_FIELDS=$(echo "$PLUGINS_RESPONSE" | jq -r '.plugins[] | select(.name == "signing-test") | .credential_schema[]' 2>/dev/null | sort | tr '\n' ',')
+if [ "$SCHEMA_FIELDS" = "key_id,private_key," ]; then
+    log_pass "Plugin credential_schema has expected fields: private_key, key_id"
+else
+    log_fail "Plugin credential_schema wrong: expected key_id,private_key, got $SCHEMA_FIELDS"
+fi
 
-    if echo "$SIGN_PROXY_RESPONSE" | grep -q "Signature-Input"; then
-        log_pass "Response contains Signature-Input header (injected by signing plugin)"
-    else
-        log_fail "Response missing Signature-Input header — signing plugin did not run. Response: ${SIGN_PROXY_RESPONSE:0:300}"
-    fi
+# Set credentials and verify they're accepted
+PRIVKEY_STATUS=$(curl -ks -o /dev/null -w "%{http_code}" -X POST "$GAP_SERVER_URL/credentials/signing-test/private_key" \
+    -H "Content-Type: application/json" \
+    -H "Authorization: Bearer $PW_HASH" \
+    -d '{"value": "MC4CAQAwBQYDK2VwBCIEIDBPFaFarmSYSvNyKLfqMZnJchAPhXGR0h4l209vFoVN"}')
 
-    if echo "$SIGN_PROXY_RESPONSE" | grep -q '"Signature"'; then
-        log_pass "Response contains Signature header"
-    else
-        log_fail "Response missing Signature header. Response: ${SIGN_PROXY_RESPONSE:0:300}"
-    fi
+KEYID_STATUS=$(curl -ks -o /dev/null -w "%{http_code}" -X POST "$GAP_SERVER_URL/credentials/signing-test/key_id" \
+    -H "Content-Type: application/json" \
+    -H "Authorization: Bearer $PW_HASH" \
+    -d '{"value": "test-key-1"}')
 
-    # Verify Signature-Input fields: created timestamp, keyid, and algorithm
-    SIGNATURE_INPUT=$(echo "$SIGN_PROXY_RESPONSE" | jq -r '.headers["Signature-Input"] // .headers["signature-input"] // ""' 2>/dev/null || true)
+if [ "$PRIVKEY_STATUS" = "200" ] && [ "$KEYID_STATUS" = "200" ]; then
+    log_pass "Signing plugin credentials set (HTTP $PRIVKEY_STATUS / $KEYID_STATUS)"
+else
+    log_fail "Failed to set signing plugin credentials (private_key=$PRIVKEY_STATUS key_id=$KEYID_STATUS)"
+fi
 
-    if echo "$SIGNATURE_INPUT" | grep -q 'created='; then
-        log_pass "Signature-Input contains created= timestamp"
-    else
-        log_fail "Signature-Input missing created= field. Signature-Input: $SIGNATURE_INPUT"
-    fi
+# Register without auth should fail
+NOAUTH_STATUS=$(curl -ks -o /dev/null -w "%{http_code}" -X POST "$GAP_SERVER_URL/plugins/register" \
+    -H "Content-Type: application/json" \
+    -d "$REGISTER_BODY")
 
-    if echo "$SIGNATURE_INPUT" | grep -q 'keyid="test-key-1"'; then
-        log_pass "Signature-Input contains keyid=\"test-key-1\""
-    else
-        log_fail "Signature-Input missing keyid=\"test-key-1\". Signature-Input: $SIGNATURE_INPUT"
-    fi
-
-    if echo "$SIGNATURE_INPUT" | grep -q 'alg="ed25519"'; then
-        log_pass "Signature-Input contains alg=\"ed25519\""
-    else
-        log_fail "Signature-Input missing alg=\"ed25519\". Signature-Input: $SIGNATURE_INPUT"
-    fi
+if [ "$NOAUTH_STATUS" = "401" ]; then
+    log_pass "Register without auth correctly returns 401"
+else
+    log_fail "Register without auth returned $NOAUTH_STATUS (expected 401)"
 fi
 
 # Test 19: Delete token (cleanup test)

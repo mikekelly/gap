@@ -3,9 +3,6 @@
 ## Doing
 <!-- Currently being worked on -->
 
-### `dangerously_permit_http` plugin flag
-Block credential injection over plain HTTP by default. Plugins must opt-in with `dangerously_permit_http: true` in their manifest. E2E tests for both paths.
-
 ## Ready
 <!-- Designed + planned, can be picked up -->
 

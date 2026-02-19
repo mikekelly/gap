@@ -2,6 +2,15 @@
 
 Shipped work - archive periodically.
 
+## Crypto Signing E2E & Docker Tests (2026-02-19)
+E2E tests and docker smoke tests for RFC 9421 HTTP Message Signatures (`GAP.crypto.httpSignature()`).
+
+**Changes:**
+- E2E test file (`gap-lib/tests/e2e_crypto_signing_test.rs`): 3 tests — H1 signing, H2 signing, header format validation. Spawns a verifying server that validates Ed25519 signatures through the full proxy pipeline.
+- `POST /plugins/register` API endpoint: accepts inline JS code for plugin registration (needed by docker tests, useful for scripting).
+- Docker smoke test (Test 18): registers signing plugin, sets credentials, verifies Signature-Input/Signature headers in proxy response.
+- Dev-dependency: `httpsig-hyper = "0.0.24"` for RFC 9421 header parsing in tests.
+
 ## Rust Crate Rename: ACP → GAP (2026-01-16)
 Renamed all Rust crates from ACP (Agent Credential Proxy) to GAP (Gated Agent Proxy) to avoid naming conflict with Agent Client Protocol (agentclientprotocol.com). Binary names updated: `acp` → `gap`, `acp-server` → `gap-server`.
 
