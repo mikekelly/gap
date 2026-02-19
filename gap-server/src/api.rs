@@ -273,6 +273,20 @@ pub struct UninstallResponse {
     pub uninstalled: bool,
 }
 
+/// Register plugin request (inline code)
+#[derive(Debug, Deserialize)]
+pub struct RegisterPluginRequest {
+    pub name: String,
+    pub code: String,
+}
+
+/// Register plugin response
+#[derive(Debug, Serialize, Deserialize)]
+pub struct RegisterResponse {
+    pub name: String,
+    pub registered: bool,
+}
+
 /// Update plugin response
 #[derive(Debug, Serialize, Deserialize)]
 pub struct UpdateResponse {
@@ -301,6 +315,7 @@ pub fn create_router(state: ApiState) -> Router {
         .route("/init", post(init))
         .route("/plugins", get(get_plugins).post(post_plugins))
         .route("/plugins/install", post(install_plugin))
+        .route("/plugins/register", post(register_plugin))
         .route("/plugins/:name/update", post(update_plugin))
         .route("/plugins/:name", delete(uninstall_plugin))
         .route("/tokens", get(list_tokens).post(post_list_tokens))
@@ -480,6 +495,59 @@ async fn install_plugin(
         name: plugin_name,
         installed: true,
         commit_sha: Some(commit_sha),
+    }))
+}
+
+/// POST /plugins/register - Register a plugin with inline code (requires auth)
+#[axum::debug_handler]
+async fn register_plugin(
+    State(state): State<ApiState>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> std::result::Result<Json<RegisterResponse>, (StatusCode, String)> {
+    verify_auth(&state, &headers).await?;
+    let req: RegisterPluginRequest = serde_json::from_slice(&body)
+        .map_err(|e| (StatusCode::BAD_REQUEST, format!("Invalid request body: {}", e)))?;
+
+    // Transform ES6 export syntax to var declaration (same as install flow)
+    let transformed_code = transform_es6_export(&req.code);
+
+    // Validate plugin by loading in a temporary runtime — scoped to drop before .await
+    let plugin = {
+        use gap_lib::plugin_runtime::PluginRuntime;
+        let mut runtime = PluginRuntime::new()
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to create runtime: {}", e)))?;
+        runtime.load_plugin_from_code(&req.name, &transformed_code)
+            .map_err(|e| (StatusCode::BAD_REQUEST, format!("Invalid plugin code: {}", e)))?
+    };
+
+    // Store plugin metadata and source code in database
+    let plugin_entry = PluginEntry {
+        name: plugin.name.clone(),
+        hosts: plugin.match_patterns.clone(),
+        credential_schema: plugin.credential_schema.clone(),
+        commit_sha: None,
+        dangerously_permit_http: plugin.dangerously_permit_http,
+    };
+    state.db.add_plugin(&plugin_entry, &transformed_code).await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to store plugin: {}", e)))?;
+
+    let plugin_name = req.name.clone();
+    tracing::info!("Registered plugin: {} (matches: {:?})", plugin_name, plugin.match_patterns);
+
+    emit_management_log(&state, ManagementLogEntry {
+        timestamp: chrono::Utc::now(),
+        operation: "plugin_register".to_string(),
+        resource_type: "plugin".to_string(),
+        resource_id: Some(plugin_name.clone()),
+        detail: None,
+        success: true,
+        error_message: None,
+    });
+
+    Ok(Json(RegisterResponse {
+        name: plugin_name,
+        registered: true,
     }))
 }
 
@@ -2953,5 +3021,155 @@ mod tests {
         // SSE format: "event: management\ndata: {...}\n\n"
         assert!(text.contains("event: management"), "SSE event should have 'management' type, got: {}", text);
         assert!(text.contains("token_create"), "SSE data should contain the operation, got: {}", text);
+    }
+
+    // Helper to set up auth for tests
+    async fn setup_auth(state: &ApiState) -> String {
+        use argon2::password_hash::{rand_core::OsRng, SaltString};
+        use argon2::{Argon2, PasswordHasher};
+        let password = "testpass123";
+        let salt = SaltString::generate(&mut OsRng);
+        let argon2 = Argon2::default();
+        let password_hash = argon2.hash_password(password.as_bytes(), &salt).unwrap().to_string();
+        state.set_password_hash(password_hash).await;
+        password.to_string()
+    }
+
+    #[tokio::test]
+    async fn test_register_plugin_requires_auth() {
+        let db = create_test_db().await;
+        let state = ApiState::new(9443, 9080, db);
+        let app = create_router(state);
+
+        let body = serde_json::json!({
+            "name": "my-plugin",
+            "code": "var plugin = { name: 'my-plugin', matchPatterns: ['example.com'], credentialSchema: [] };"
+        });
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/plugins/register")
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn test_register_plugin_with_valid_code() {
+        let db = create_test_db().await;
+        let state = ApiState::new(9443, 9080, Arc::clone(&db));
+        let password = setup_auth(&state).await;
+        let app = create_router(state);
+
+        let plugin_code = "var plugin = { name: 'my-plugin', matchPatterns: ['example.com'], credentialSchema: [], transform: function(r) { return r; } };";
+
+        let body = serde_json::json!({
+            "name": "my-plugin",
+            "code": plugin_code
+        });
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/plugins/register")
+                    .header("content-type", "application/json")
+                    .header("Authorization", format!("Bearer {}", password))
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        let status = response.status();
+        let body_bytes = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let body_str = String::from_utf8_lossy(&body_bytes);
+
+        assert_eq!(status, StatusCode::OK, "Expected OK, got {}: {}", status, body_str);
+
+        let register_response: RegisterResponse = serde_json::from_slice(&body_bytes).unwrap();
+        assert_eq!(register_response.name, "my-plugin");
+        assert!(register_response.registered);
+
+        // Verify plugin was stored in the database
+        let plugins = db.list_plugins().await.expect("list plugins");
+        assert!(plugins.iter().any(|p| p.name == "my-plugin"), "plugin should be in database");
+    }
+
+    #[tokio::test]
+    async fn test_register_plugin_with_invalid_code() {
+        let db = create_test_db().await;
+        let state = ApiState::new(9443, 9080, db);
+        let password = setup_auth(&state).await;
+        let app = create_router(state);
+
+        let body = serde_json::json!({
+            "name": "bad-plugin",
+            "code": "this is not valid javascript }{{"
+        });
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/plugins/register")
+                    .header("content-type", "application/json")
+                    .header("Authorization", format!("Bearer {}", password))
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn test_register_plugin_with_es6_export() {
+        let db = create_test_db().await;
+        let state = ApiState::new(9443, 9080, Arc::clone(&db));
+        let password = setup_auth(&state).await;
+        let app = create_router(state);
+
+        // ES6 export syntax — should be transformed before loading
+        let plugin_code = "export default { name: 'es6-plugin', matchPatterns: ['api.example.com'], credentialSchema: [], transform: function(r) { return r; } };";
+
+        let body = serde_json::json!({
+            "name": "es6-plugin",
+            "code": plugin_code
+        });
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/plugins/register")
+                    .header("content-type", "application/json")
+                    .header("Authorization", format!("Bearer {}", password))
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        let status = response.status();
+        let body_bytes = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let body_str = String::from_utf8_lossy(&body_bytes);
+
+        assert_eq!(status, StatusCode::OK, "Expected OK, got {}: {}", status, body_str);
+
+        let register_response: RegisterResponse = serde_json::from_slice(&body_bytes).unwrap();
+        assert!(register_response.registered);
+
+        // Verify plugin was stored in the database
+        let plugins = db.list_plugins().await.expect("list plugins");
+        assert!(plugins.iter().any(|p| p.name == "es6-plugin"), "es6 plugin should be in database");
     }
 }
