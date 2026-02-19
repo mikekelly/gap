@@ -22,6 +22,7 @@ class AppState: ObservableObject {
     @Published var plugins: [Plugin] = []
     @Published var tokens: [Token] = []
     @Published var activity: [ActivityEntry] = []
+    @Published var managementLog: [ManagementLogEntry] = []
 
     // Activity stream state
     @Published var activityFilter = ActivityFilter()
@@ -176,6 +177,20 @@ class AppState: ObservableObject {
         self.activity = response.entries
     }
 
+    /// Refresh the management log from the server with optional filters.
+    ///
+    /// - Parameters:
+    ///   - operation: Filter by operation type (e.g., "token_create")
+    ///   - resourceType: Filter by resource type (e.g., "token", "plugin")
+    ///   - resourceId: Filter by resource ID
+    /// - Throws: GAPError if the request fails
+    func refreshManagementLog(operation: String? = nil, resourceType: String? = nil, resourceId: String? = nil) async throws {
+        guard serverRunning else { return }
+        guard let hash = passwordHash else { return }
+        let response = try await client.getManagementLog(passwordHash: hash, operation: operation, resourceType: resourceType, resourceId: resourceId)
+        self.managementLog = response.entries
+    }
+
     /// Load detailed request/response data for a specific request.
     ///
     /// - Parameter requestId: The request correlation ID
@@ -229,6 +244,7 @@ class AppState: ObservableObject {
         plugins = []
         tokens = []
         activity = []
+        managementLog = []
         streamEntries = []
         activityFilter = ActivityFilter()
         selectedRequestDetails = nil

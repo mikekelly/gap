@@ -6,6 +6,7 @@ import SwiftUI
 /// - Plugins: View and manage installed plugins (including credentials)
 /// - Tokens: Create, view, and revoke agent tokens
 /// - Activity: View recent proxy request activity
+/// - Management Log: View audit log entries for management API operations
 ///
 /// The window uses a NavigationSplitView with a sidebar for tab selection
 /// and a detail view that updates based on the selected tab.
@@ -17,12 +18,14 @@ struct MainWindow: View {
         case plugins = "Plugins"
         case tokens = "Tokens"
         case activity = "Activity"
+        case managementLog = "Management Log"
 
         var icon: String {
             switch self {
             case .plugins: return "puzzlepiece"
             case .tokens: return "key"
             case .activity: return "list.bullet"
+            case .managementLog: return "doc.text.magnifyingglass"
             }
         }
     }
@@ -41,6 +44,8 @@ struct MainWindow: View {
                 TokensView()
             case .activity:
                 ActivityView()
+            case .managementLog:
+                ManagementLogView()
             }
         }
         .frame(minWidth: 600, minHeight: 400)
