@@ -457,9 +457,135 @@ else
     fi
 fi
 
-# Test 18: Delete token (cleanup test)
+# Test 18: Crypto signing plugin smoke test
+#
+# Registers a signing plugin via POST /plugins/register with inline JS, sets credentials
+# (a pre-generated Ed25519 PKCS#8 private key), makes a request through the proxy to the
+# mock-api, and verifies the proxy injected RFC 9421 Signature-Input and Signature headers.
+#
+# This test depends on the CA cert from the shared volume (set up in Test 11) but does NOT
+# require internet access — it uses mock-api, which is on the internal docker network.
 echo ""
-echo "Test 18: Delete token"
+echo "Test 18: Crypto signing plugin"
+echo "=============================="
+
+if [ -z "$CA_CERT_PATH" ]; then
+    log_warn "Skipping signing plugin test (CA cert not available — see Test 11)"
+elif [ -z "$AGENT_TOKEN" ]; then
+    log_warn "Skipping signing plugin test (no agent token)"
+else
+    # Register the signing plugin with inline JS code.
+    # dangerously_permit_http: true is required because mock-api is plain HTTP (port 8080),
+    # not HTTPS. Without this the proxy blocks credential injection over unencrypted HTTP.
+    SIGNING_PLUGIN_CODE='var plugin = {
+    name: "signing-test",
+    matchPatterns: ["mock-api"],
+    dangerously_permit_http: true,
+    credentialSchema: { fields: [
+        { name: "private_key", label: "Private Key", type: "password", required: true },
+        { name: "key_id", label: "Key ID", type: "text", required: true }
+    ]},
+    transform: function(request, credentials) {
+        var keyDer = GAP.util.base64(credentials.private_key, true);
+        var result = GAP.crypto.httpSignature({
+            request: request,
+            components: ["@method", "content-type"],
+            algorithm: "ed25519",
+            keyId: credentials.key_id,
+            keyDer: keyDer
+        });
+        request.headers["Signature-Input"] = result.signatureInput;
+        request.headers["Signature"] = result.signature;
+        return request;
+    }
+};'
+
+    # Use jq to safely build the JSON body (handles all escaping)
+    REGISTER_BODY=$(jq -n \
+        --arg name "signing-test" \
+        --arg code "$SIGNING_PLUGIN_CODE" \
+        '{name: $name, code: $code}')
+
+    REGISTER_RESPONSE=$(curl -ks -X POST "$GAP_SERVER_URL/plugins/register" \
+        -H "Content-Type: application/json" \
+        -H "Authorization: Bearer $PW_HASH" \
+        -d "$REGISTER_BODY")
+
+    if echo "$REGISTER_RESPONSE" | jq -e '.registered == true' > /dev/null 2>&1; then
+        log_pass "Signing plugin registered successfully"
+    else
+        log_fail "Failed to register signing plugin: $REGISTER_RESPONSE"
+    fi
+
+    # Set credentials: pre-generated Ed25519 PKCS#8 DER key (base64-encoded) and key ID
+    PRIVKEY_STATUS=$(curl -ks -o /dev/null -w "%{http_code}" -X POST "$GAP_SERVER_URL/credentials/signing-test/private_key" \
+        -H "Content-Type: application/json" \
+        -H "Authorization: Bearer $PW_HASH" \
+        -d '{"value": "MC4CAQAwBQYDK2VwBCIEIDBPFaFarmSYSvNyKLfqMZnJchAPhXGR0h4l209vFoVN"}')
+
+    KEYID_STATUS=$(curl -ks -o /dev/null -w "%{http_code}" -X POST "$GAP_SERVER_URL/credentials/signing-test/key_id" \
+        -H "Content-Type: application/json" \
+        -H "Authorization: Bearer $PW_HASH" \
+        -d '{"value": "test-key-1"}')
+
+    if [ "$PRIVKEY_STATUS" = "200" ] && [ "$KEYID_STATUS" = "200" ]; then
+        log_pass "Signing plugin credentials set (HTTP $PRIVKEY_STATUS / $KEYID_STATUS)"
+    else
+        log_fail "Failed to set signing plugin credentials (private_key=$PRIVKEY_STATUS key_id=$KEYID_STATUS)"
+    fi
+
+    # Make a request through the proxy to mock-api /get.
+    # go-httpbin echoes back received headers in the JSON response body under .headers,
+    # so we can verify the proxy injected Signature-Input and Signature.
+    # --proxy-cacert trusts the CA for the HTTPS CONNECT handshake with the proxy.
+    # --cacert trusts the CA for the MITM TLS cert (only relevant for HTTPS upstreams;
+    #          included here for consistency with Tests 11-12).
+    SIGN_PROXY_RESPONSE=$(curl -s \
+        --max-time 30 \
+        --proxy "$PROXY_URL" \
+        --proxy-cacert "$CA_TMPFILE" \
+        --cacert "$CA_TMPFILE" \
+        --proxy-header "Proxy-Authorization: Bearer $AGENT_TOKEN" \
+        -H "Content-Type: application/json" \
+        "http://mock-api:8080/get" 2>&1) || true
+
+    if echo "$SIGN_PROXY_RESPONSE" | grep -q "Signature-Input"; then
+        log_pass "Response contains Signature-Input header (injected by signing plugin)"
+    else
+        log_fail "Response missing Signature-Input header — signing plugin did not run. Response: ${SIGN_PROXY_RESPONSE:0:300}"
+    fi
+
+    if echo "$SIGN_PROXY_RESPONSE" | grep -q '"Signature"'; then
+        log_pass "Response contains Signature header"
+    else
+        log_fail "Response missing Signature header. Response: ${SIGN_PROXY_RESPONSE:0:300}"
+    fi
+
+    # Verify Signature-Input fields: created timestamp, keyid, and algorithm
+    SIGNATURE_INPUT=$(echo "$SIGN_PROXY_RESPONSE" | jq -r '.headers["Signature-Input"] // .headers["signature-input"] // ""' 2>/dev/null || true)
+
+    if echo "$SIGNATURE_INPUT" | grep -q 'created='; then
+        log_pass "Signature-Input contains created= timestamp"
+    else
+        log_fail "Signature-Input missing created= field. Signature-Input: $SIGNATURE_INPUT"
+    fi
+
+    if echo "$SIGNATURE_INPUT" | grep -q 'keyid="test-key-1"'; then
+        log_pass "Signature-Input contains keyid=\"test-key-1\""
+    else
+        log_fail "Signature-Input missing keyid=\"test-key-1\". Signature-Input: $SIGNATURE_INPUT"
+    fi
+
+    if echo "$SIGNATURE_INPUT" | grep -q 'alg="ed25519"'; then
+        log_pass "Signature-Input contains alg=\"ed25519\""
+    else
+        log_fail "Signature-Input missing alg=\"ed25519\". Signature-Input: $SIGNATURE_INPUT"
+    fi
+fi
+
+# Test 19: Delete token (cleanup test)
+echo ""
+echo "Test 19: Delete token"
 echo "====================="
 
 if [ -n "$AGENT_TOKEN" ]; then
@@ -478,9 +604,9 @@ else
     log_warn "Skipping token deletion (no token to delete)"
 fi
 
-# Test 19: Management log has entries
+# Test 20: Management log has entries
 echo ""
-echo "Test 19: Management log has entries"
+echo "Test 20: Management log has entries"
 echo "===================================="
 
 MGMT_LOG_RESPONSE=$(curl -ks "$GAP_SERVER_URL/management-log" \
@@ -507,9 +633,9 @@ else
     log_fail "Management log entries missing required fields"
 fi
 
-# Test 20: Management log filter by operation
+# Test 21: Management log filter by operation
 echo ""
-echo "Test 20: Management log filter by operation"
+echo "Test 21: Management log filter by operation"
 echo "============================================="
 
 TOKEN_CREATE_RESPONSE=$(curl -ks "$GAP_SERVER_URL/management-log?operation=token_create" \
@@ -524,9 +650,9 @@ else
     log_fail "Filter by operation failed: got $TOKEN_CREATE_COUNT entries, $ALL_TOKEN_CREATE matching"
 fi
 
-# Test 21: Management log filter by resource_type
+# Test 22: Management log filter by resource_type
 echo ""
-echo "Test 21: Management log filter by resource_type"
+echo "Test 22: Management log filter by resource_type"
 echo "================================================="
 
 TOKEN_TYPE_RESPONSE=$(curl -ks "$GAP_SERVER_URL/management-log?resource_type=token" \
