@@ -15,11 +15,9 @@ echo "=== Building Gap.app with embedded helper ==="
 # Clean previous build
 rm -rf build/${APP_NAME}.app build/*.dmg
 
-# 1. Build gap-server if not already built
-if [ ! -f "../target/release/gap-server" ]; then
-    echo "Building gap-server..."
-    (cd .. && cargo build --release --bin gap-server)
-fi
+# 1. Build gap-server (always rebuild to ensure latest code)
+echo "Building gap-server..."
+(cd .. && cargo build --release --bin gap-server)
 
 # 2. Create main app bundle structure
 echo "Creating app bundle structure..."
