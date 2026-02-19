@@ -84,6 +84,75 @@ impl PluginRuntime {
                 },
                 verify: function(algorithm, publicKeyDer, signature, data) {
                     return __gap_native_verify(algorithm, publicKeyDer, signature, data);
+                },
+                httpSignature: function(options) {
+                    var request = options.request;
+                    var components = options.components;
+                    var algorithm = options.algorithm;
+                    var keyId = options.keyId;
+                    var keyDer = options.keyDer;
+                    var label = options.label || 'sig1';
+                    var created = options.created || Math.floor(GAP.util.now() / 1000);
+
+                    var parsed = new URL(request.url);
+                    var lines = [];
+
+                    for (var i = 0; i < components.length; i++) {
+                        var comp = components[i].toLowerCase();
+                        var value;
+                        if (comp === '@method') {
+                            value = request.method.toUpperCase();
+                        } else if (comp === '@target-uri') {
+                            value = request.url;
+                        } else if (comp === '@authority') {
+                            value = parsed.host;
+                        } else if (comp === '@path') {
+                            value = parsed.pathname || '/';
+                        } else if (comp === '@query') {
+                            value = parsed.search || '?';
+                        } else {
+                            // Header lookup (case-insensitive)
+                            value = null;
+                            for (var key in request.headers) {
+                                if (key.toLowerCase() === comp) {
+                                    value = request.headers[key];
+                                    break;
+                                }
+                            }
+                            if (value === null) {
+                                throw new Error('Component not found in request: ' + comp);
+                            }
+                        }
+                        lines.push('"' + comp + '": ' + value);
+                    }
+
+                    // Algorithm ID mapping for Signature-Input
+                    var algMap = {
+                        'ed25519': 'ed25519',
+                        'ecdsa-p256': 'ecdsa-p256-sha256',
+                        'rsa-pss-sha256': 'rsa-pss-sha256',
+                        'rsa-pkcs1-sha256': 'rsa-v1_5-sha256'
+                    };
+                    var algId = algMap[algorithm] || algorithm;
+
+                    // Build @signature-params
+                    var quotedComponents = '';
+                    for (var j = 0; j < components.length; j++) {
+                        if (j > 0) quotedComponents += ' ';
+                        quotedComponents += '"' + components[j].toLowerCase() + '"';
+                    }
+                    var sigParams = '(' + quotedComponents + ');created=' + created + ';keyid="' + keyId + '";alg="' + algId + '"';
+                    lines.push('"@signature-params": ' + sigParams);
+
+                    // Sign the signature base
+                    var signatureBase = lines.join('\n');
+                    var sig = GAP.crypto.sign(algorithm, keyDer, signatureBase);
+                    var sigBase64 = GAP.util.base64(sig);
+
+                    return {
+                        signatureInput: label + '=' + sigParams,
+                        signature: label + '=:' + sigBase64 + ':'
+                    };
                 }
             },
             util: {
@@ -2040,5 +2109,177 @@ mod tests {
 
         let result = runtime.execute(&code).unwrap();
         assert_eq!(result.to_boolean(), false, "Verify with wrong key should return false, not throw");
+    }
+
+    // Tests for GAP.crypto.httpSignature
+
+    #[test]
+    fn test_gap_crypto_http_signature_basic() {
+        use ring::signature::Ed25519KeyPair;
+        use ring::rand::SystemRandom;
+        use base64::prelude::*;
+
+        let rng = SystemRandom::new();
+        let pkcs8 = Ed25519KeyPair::generate_pkcs8(&rng).unwrap();
+        let pkcs8_b64 = BASE64_STANDARD.encode(pkcs8.as_ref());
+
+        let mut runtime = PluginRuntime::new().unwrap();
+
+        let code = format!(r#"
+            var keyDer = GAP.util.base64('{}', true);
+            var request = {{
+                method: 'POST',
+                url: 'https://example.com/api/data?page=1',
+                headers: {{ 'Content-Type': 'application/json', 'Host': 'example.com' }}
+            }};
+            var result = GAP.crypto.httpSignature({{
+                request: request,
+                components: ['@method', '@target-uri', 'content-type'],
+                algorithm: 'ed25519',
+                keyId: 'test-key-1',
+                keyDer: keyDer,
+                created: 1704067200
+            }});
+            JSON.stringify(result);
+        "#, pkcs8_b64);
+
+        let result = runtime.execute(&code).unwrap();
+        let json_str = result.as_string().unwrap().to_std_string_escaped();
+        assert!(json_str.contains("signatureInput"), "Missing signatureInput: {}", json_str);
+        assert!(json_str.contains("sig1=("), "signatureInput should start with sig1=(: {}", json_str);
+        assert!(json_str.contains("created=1704067200"), "Missing created timestamp: {}", json_str);
+        assert!(json_str.contains(r#"keyid=\"test-key-1\""#), "Missing keyid: {}", json_str);
+        assert!(json_str.contains(r#"alg=\"ed25519\""#), "Missing alg: {}", json_str);
+        // signature should be base64 wrapped in :...:
+        assert!(json_str.contains("sig1=:"), "Missing sig1=: prefix: {}", json_str);
+    }
+
+    #[test]
+    fn test_gap_crypto_http_signature_base_format() {
+        // Verify the signature by reconstructing the signature base in JS and calling verify()
+        use ring::signature::{Ed25519KeyPair, KeyPair};
+        use ring::rand::SystemRandom;
+        use base64::prelude::*;
+
+        let rng = SystemRandom::new();
+        let pkcs8 = Ed25519KeyPair::generate_pkcs8(&rng).unwrap();
+        let key_pair = Ed25519KeyPair::from_pkcs8(pkcs8.as_ref()).unwrap();
+        let pub_key = key_pair.public_key().as_ref();
+        let pkcs8_b64 = BASE64_STANDARD.encode(pkcs8.as_ref());
+        let pub_key_b64 = BASE64_STANDARD.encode(pub_key);
+
+        let mut runtime = PluginRuntime::new().unwrap();
+
+        // Sign a request then verify the signature by reconstructing the base manually
+        let code = format!(r#"
+            var keyDer = GAP.util.base64('{}', true);
+            var pubKey = GAP.util.base64('{}', true);
+            var request = {{
+                method: 'GET',
+                url: 'https://api.example.com/resource',
+                headers: {{ 'Content-Type': 'text/plain' }}
+            }};
+            var created = 1704067200;
+            var result = GAP.crypto.httpSignature({{
+                request: request,
+                components: ['@method', '@path', 'content-type'],
+                algorithm: 'ed25519',
+                keyId: 'my-key',
+                keyDer: keyDer,
+                created: created
+            }});
+
+            // Manually reconstruct the expected signature base
+            var expectedBase = '"@method": GET\n' +
+                               '"@path": /resource\n' +
+                               '"content-type": text/plain\n' +
+                               '"@signature-params": ("@method" "@path" "content-type");created=1704067200;keyid="my-key";alg="ed25519"';
+
+            // Extract the raw base64 signature from result.signature (strip label=: prefix and trailing :)
+            var sigStr = result.signature;
+            var colonStart = sigStr.indexOf(':');
+            var colonEnd = sigStr.lastIndexOf(':');
+            var sigB64 = sigStr.substring(colonStart + 1, colonEnd);
+            var sigBytes = GAP.util.base64(sigB64, true);
+
+            // Verify the signature against the manually reconstructed base
+            GAP.crypto.verify('ed25519', pubKey, sigBytes, expectedBase);
+        "#, pkcs8_b64, pub_key_b64);
+
+        let result = runtime.execute(&code).unwrap();
+        assert_eq!(result.to_boolean(), true, "Signature should verify against manually reconstructed base");
+    }
+
+    #[test]
+    fn test_gap_crypto_http_signature_custom_label() {
+        use ring::signature::Ed25519KeyPair;
+        use ring::rand::SystemRandom;
+        use base64::prelude::*;
+
+        let rng = SystemRandom::new();
+        let pkcs8 = Ed25519KeyPair::generate_pkcs8(&rng).unwrap();
+        let pkcs8_b64 = BASE64_STANDARD.encode(pkcs8.as_ref());
+
+        let mut runtime = PluginRuntime::new().unwrap();
+
+        let code = format!(r#"
+            var keyDer = GAP.util.base64('{}', true);
+            var request = {{
+                method: 'GET',
+                url: 'https://example.com/',
+                headers: {{}}
+            }};
+            var result = GAP.crypto.httpSignature({{
+                request: request,
+                components: ['@method'],
+                algorithm: 'ed25519',
+                keyId: 'key-1',
+                keyDer: keyDer,
+                label: 'mysig',
+                created: 1704067200
+            }});
+            JSON.stringify(result);
+        "#, pkcs8_b64);
+
+        let result = runtime.execute(&code).unwrap();
+        let json_str = result.as_string().unwrap().to_std_string_escaped();
+        assert!(json_str.contains("mysig=("), "signatureInput should use custom label: {}", json_str);
+        assert!(json_str.contains("mysig=:"), "signature should use custom label: {}", json_str);
+        assert!(!json_str.contains("sig1"), "Should not contain default label: {}", json_str);
+    }
+
+    #[test]
+    fn test_gap_crypto_http_signature_fixed_timestamp() {
+        use ring::signature::Ed25519KeyPair;
+        use ring::rand::SystemRandom;
+        use base64::prelude::*;
+
+        let rng = SystemRandom::new();
+        let pkcs8 = Ed25519KeyPair::generate_pkcs8(&rng).unwrap();
+        let pkcs8_b64 = BASE64_STANDARD.encode(pkcs8.as_ref());
+
+        let mut runtime = PluginRuntime::new().unwrap();
+
+        let code = format!(r#"
+            var keyDer = GAP.util.base64('{}', true);
+            var request = {{
+                method: 'DELETE',
+                url: 'https://api.example.com/items/42',
+                headers: {{}}
+            }};
+            var result = GAP.crypto.httpSignature({{
+                request: request,
+                components: ['@method', '@target-uri'],
+                algorithm: 'ed25519',
+                keyId: 'fixed-key',
+                keyDer: keyDer,
+                created: 1704067200
+            }});
+            result.signatureInput;
+        "#, pkcs8_b64);
+
+        let result = runtime.execute(&code).unwrap();
+        let sig_input = result.as_string().unwrap().to_std_string_escaped();
+        assert!(sig_input.contains("created=1704067200"), "Should contain fixed timestamp: {}", sig_input);
     }
 }
