@@ -143,6 +143,15 @@ The proxy supports both HTTP/1.1 and HTTP/2 via ALPN negotiation:
 - `new_with_upstream_tls()` takes `Arc<RootCertStore>`, not `TlsConnector`
 - E2E tests use `create_root_cert_store()` helper for upstream certs
 
+## HTTP Message Signatures (RFC 9421)
+
+GAP's `GAP.crypto.httpSignature()` JS helper signs requests per RFC 9421 using Ed25519. Key gotchas:
+
+- **httpsig-hyper parameter ordering**: GAP outputs `keyid` before `alg` in `@signature-params`; httpsig-hyper (v0.0.24) re-orders to `alg` before `keyid` when reconstructing the signature base for verification. This means signatures created by GAP cannot be verified by httpsig-hyper's `verify_message_signature()`. Use ring directly for verification instead.
+- **`@target-uri` through CONNECT proxy**: On the server side, hyper only has the path (not full URL), so `@target-uri` verification fails. Use `@method` and header components instead.
+- **httpsig-hyper `verify_message_signature` key_id**: The `key_id` parameter filters which signature to verify. `VerifyingKey::key_id(&public_key)` computes a fingerprint, not the user-defined keyid from signing. Pass `None` to verify any signature.
+- **E2E tests**: `e2e_crypto_signing_test.rs` tests the full signing pipeline (plugin signs, proxy forwards, server verifies with ring).
+
 ## Quick Type Reference
 
 Key types you'll use frequently:
