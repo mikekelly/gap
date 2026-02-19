@@ -111,10 +111,10 @@ This script:
 **Notarize the DMG:**
 ```bash
 # If you set NOTARIZE_KEYCHAIN_PROFILE in your shell profile:
-./scripts/macos-notarize.sh build/Gap Installer.dmg
+./scripts/macos-notarize.sh "build/Gap Installer.dmg"
 
 # Or specify the profile explicitly:
-./scripts/macos-notarize.sh build/Gap Installer.dmg --keychain-profile "notarytool-profile"
+./scripts/macos-notarize.sh "build/Gap Installer.dmg" --keychain-profile "notarytool-profile"
 ```
 
 **Notes:**

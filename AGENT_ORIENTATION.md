@@ -91,8 +91,9 @@ For comprehensive details, see:
 **Quick build commands:**
 ```bash
 cd macos-app
-./build-dmg.sh              # Build unsigned app
-./sign-and-package.sh       # Sign (requires manual keychain unlock)
+./build-dmg.sh              # Rebuild gap-server + create app bundle
+./sign-and-package.sh       # Sign + create DMG (requires manual keychain unlock)
+../scripts/macos-notarize.sh "build/Gap Installer.dmg" --keychain-profile notarytool-profile  # Notarize + staple
 ```
 
 **Manual steps (cannot be automated by agents):**
