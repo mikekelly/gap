@@ -299,7 +299,7 @@ pub fn create_router(state: ApiState) -> Router {
     Router::new()
         .route("/status", get(get_status))
         .route("/init", post(init))
-        .route("/plugins", post(post_plugins))
+        .route("/plugins", get(get_plugins).post(post_plugins))
         .route("/plugins/install", post(install_plugin))
         .route("/plugins/:name/update", post(update_plugin))
         .route("/plugins/:name", delete(uninstall_plugin))
@@ -388,7 +388,6 @@ async fn init(
 }
 
 /// GET /plugins - List installed plugins (requires auth)
-#[allow(dead_code)]
 async fn get_plugins(
     State(state): State<ApiState>,
     headers: HeaderMap,
