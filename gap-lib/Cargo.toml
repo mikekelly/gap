@@ -21,6 +21,7 @@ hmac = "0.12"
 base64 = "0.22"
 hex = "0.4"
 chacha20poly1305 = "0.10"
+ring = "0.17"
 rand = "0.8"
 rcgen.workspace = true
 time.workspace = true

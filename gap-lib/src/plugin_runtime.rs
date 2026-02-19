@@ -14,6 +14,11 @@ use base64::Engine;
 use boa_engine::{Context, JsArgs, JsNativeError, JsResult, JsString, JsValue, NativeFunction, Source};
 use chrono::Utc;
 use hmac::{Hmac, Mac};
+use ring::rand::SystemRandom;
+use ring::signature::{
+    self, EcdsaKeyPair, Ed25519KeyPair, UnparsedPublicKey,
+    ECDSA_P256_SHA256_ASN1, ECDSA_P256_SHA256_ASN1_SIGNING,
+};
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::time::Duration;
@@ -73,6 +78,12 @@ impl PluginRuntime {
                 },
                 hmac: function(key, data, encoding) {
                     return __gap_native_hmac(key, data, encoding || 'hex');
+                },
+                sign: function(algorithm, keyDer, data) {
+                    return __gap_native_sign(algorithm, keyDer, data);
+                },
+                verify: function(algorithm, publicKeyDer, signature, data) {
+                    return __gap_native_verify(algorithm, publicKeyDer, signature, data);
                 }
             },
             util: {
@@ -176,6 +187,122 @@ impl PluginRuntime {
             3,
             hmac_fn
         ).map_err(|e| GapError::plugin(format!("Failed to register hmac: {}", e)))?;
+
+        // sign - signs data with a private key, returns signature bytes
+        let sign_fn = NativeFunction::from_fn_ptr(|_, args, context| {
+            let algo = args.get_or_undefined(0);
+            let key = args.get_or_undefined(1);
+            let data = args.get_or_undefined(2);
+
+            let algo_str = if let Some(s) = algo.as_string() {
+                s.to_std_string_escaped()
+            } else {
+                return Err(JsNativeError::typ()
+                    .with_message("Expected string for algorithm")
+                    .into());
+            };
+
+            let key_der = js_value_to_bytes(key, context)?;
+            let data_bytes = js_value_to_bytes(data, context)?;
+
+            let sig_bytes = match algo_str.as_str() {
+                "ed25519" => {
+                    let key_pair = Ed25519KeyPair::from_pkcs8(&key_der)
+                        .map_err(|e| JsNativeError::typ().with_message(format!("Ed25519 key error: {}", e)))?;
+                    let sig = key_pair.sign(&data_bytes);
+                    sig.as_ref().to_vec()
+                }
+                "ecdsa-p256" => {
+                    let rng = SystemRandom::new();
+                    let key_pair = EcdsaKeyPair::from_pkcs8(&ECDSA_P256_SHA256_ASN1_SIGNING, &key_der, &rng)
+                        .map_err(|e| JsNativeError::typ().with_message(format!("ECDSA key error: {}", e)))?;
+                    let sig = key_pair.sign(&rng, &data_bytes)
+                        .map_err(|e| JsNativeError::typ().with_message(format!("ECDSA sign error: {}", e)))?;
+                    sig.as_ref().to_vec()
+                }
+                "rsa-pss-sha256" => {
+                    let key_pair = signature::RsaKeyPair::from_pkcs8(&key_der)
+                        .map_err(|e| JsNativeError::typ().with_message(format!("RSA key error: {}", e)))?;
+                    let rng = SystemRandom::new();
+                    let mut sig_buf = vec![0u8; key_pair.public().modulus_len()];
+                    key_pair.sign(&signature::RSA_PSS_SHA256, &rng, &data_bytes, &mut sig_buf)
+                        .map_err(|e| JsNativeError::typ().with_message(format!("RSA sign error: {}", e)))?;
+                    sig_buf
+                }
+                "rsa-pkcs1-sha256" => {
+                    let key_pair = signature::RsaKeyPair::from_pkcs8(&key_der)
+                        .map_err(|e| JsNativeError::typ().with_message(format!("RSA key error: {}", e)))?;
+                    let rng = SystemRandom::new();
+                    let mut sig_buf = vec![0u8; key_pair.public().modulus_len()];
+                    key_pair.sign(&signature::RSA_PKCS1_SHA256, &rng, &data_bytes, &mut sig_buf)
+                        .map_err(|e| JsNativeError::typ().with_message(format!("RSA sign error: {}", e)))?;
+                    sig_buf
+                }
+                _ => {
+                    return Err(JsNativeError::typ()
+                        .with_message(format!("Unknown algorithm: {}", algo_str))
+                        .into());
+                }
+            };
+
+            bytes_to_js_array(&sig_bytes, context)
+        });
+        context.register_global_builtin_callable(
+            JsString::from("__gap_native_sign"),
+            3,
+            sign_fn
+        ).map_err(|e| GapError::plugin(format!("Failed to register sign: {}", e)))?;
+
+        // verify - verifies a signature against a public key, returns boolean
+        let verify_fn = NativeFunction::from_fn_ptr(|_, args, context| {
+            let algo = args.get_or_undefined(0);
+            let pub_key = args.get_or_undefined(1);
+            let sig = args.get_or_undefined(2);
+            let data = args.get_or_undefined(3);
+
+            let algo_str = if let Some(s) = algo.as_string() {
+                s.to_std_string_escaped()
+            } else {
+                return Err(JsNativeError::typ()
+                    .with_message("Expected string for algorithm")
+                    .into());
+            };
+
+            let pub_key_bytes = js_value_to_bytes(pub_key, context)?;
+            let sig_bytes = js_value_to_bytes(sig, context)?;
+            let data_bytes = js_value_to_bytes(data, context)?;
+
+            let result = match algo_str.as_str() {
+                "ed25519" => {
+                    let public_key = UnparsedPublicKey::new(&signature::ED25519, &pub_key_bytes);
+                    public_key.verify(&data_bytes, &sig_bytes).is_ok()
+                }
+                "ecdsa-p256" => {
+                    let public_key = UnparsedPublicKey::new(&ECDSA_P256_SHA256_ASN1, &pub_key_bytes);
+                    public_key.verify(&data_bytes, &sig_bytes).is_ok()
+                }
+                "rsa-pss-sha256" => {
+                    let public_key = UnparsedPublicKey::new(&signature::RSA_PSS_2048_8192_SHA256, &pub_key_bytes);
+                    public_key.verify(&data_bytes, &sig_bytes).is_ok()
+                }
+                "rsa-pkcs1-sha256" => {
+                    let public_key = UnparsedPublicKey::new(&signature::RSA_PKCS1_2048_8192_SHA256, &pub_key_bytes);
+                    public_key.verify(&data_bytes, &sig_bytes).is_ok()
+                }
+                _ => {
+                    return Err(JsNativeError::typ()
+                        .with_message(format!("Unknown algorithm: {}", algo_str))
+                        .into());
+                }
+            };
+
+            Ok(JsValue::from(result))
+        });
+        context.register_global_builtin_callable(
+            JsString::from("__gap_native_verify"),
+            4,
+            verify_fn
+        ).map_err(|e| GapError::plugin(format!("Failed to register verify: {}", e)))?;
 
         Ok(())
     }
@@ -1707,5 +1834,211 @@ mod tests {
 
         let plugin = runtime.load_plugin_from_code("explicit-false", plugin_code).unwrap();
         assert!(!plugin.dangerously_permit_http);
+    }
+
+    // Tests for GAP.crypto.sign and GAP.crypto.verify
+
+    #[test]
+    fn test_gap_crypto_sign_verify_ed25519() {
+        use ring::signature::{Ed25519KeyPair, KeyPair};
+        use ring::rand::SystemRandom;
+        use base64::prelude::*;
+
+        let rng = SystemRandom::new();
+        let pkcs8 = Ed25519KeyPair::generate_pkcs8(&rng).unwrap();
+        let key_pair = Ed25519KeyPair::from_pkcs8(pkcs8.as_ref()).unwrap();
+        let pub_key = key_pair.public_key().as_ref();
+
+        let pkcs8_b64 = BASE64_STANDARD.encode(pkcs8.as_ref());
+        let pub_key_b64 = BASE64_STANDARD.encode(pub_key);
+
+        let mut runtime = PluginRuntime::new().unwrap();
+
+        // Sign and verify - should return true
+        let code = format!(r#"
+            var keyDer = GAP.util.base64('{}', true);
+            var pubKey = GAP.util.base64('{}', true);
+            var sig = GAP.crypto.sign('ed25519', keyDer, 'hello world');
+            GAP.crypto.verify('ed25519', pubKey, sig, 'hello world');
+        "#, pkcs8_b64, pub_key_b64);
+
+        let result = runtime.execute(&code).unwrap();
+        assert_eq!(result.to_boolean(), true);
+
+        // Verify with wrong data - should return false
+        let code2 = format!(r#"
+            var keyDer = GAP.util.base64('{}', true);
+            var pubKey = GAP.util.base64('{}', true);
+            var sig = GAP.crypto.sign('ed25519', keyDer, 'hello world');
+            GAP.crypto.verify('ed25519', pubKey, sig, 'wrong data');
+        "#, pkcs8_b64, pub_key_b64);
+
+        let result2 = runtime.execute(&code2).unwrap();
+        assert_eq!(result2.to_boolean(), false);
+    }
+
+    #[test]
+    fn test_gap_crypto_sign_verify_ecdsa_p256() {
+        use ring::signature::{EcdsaKeyPair, KeyPair, ECDSA_P256_SHA256_ASN1_SIGNING};
+        use ring::rand::SystemRandom;
+        use base64::prelude::*;
+
+        let rng = SystemRandom::new();
+        let pkcs8 = EcdsaKeyPair::generate_pkcs8(&ECDSA_P256_SHA256_ASN1_SIGNING, &rng).unwrap();
+        let key_pair = EcdsaKeyPair::from_pkcs8(&ECDSA_P256_SHA256_ASN1_SIGNING, pkcs8.as_ref(), &rng).unwrap();
+        let pub_key = key_pair.public_key().as_ref();
+
+        let pkcs8_b64 = BASE64_STANDARD.encode(pkcs8.as_ref());
+        let pub_key_b64 = BASE64_STANDARD.encode(pub_key);
+
+        let mut runtime = PluginRuntime::new().unwrap();
+
+        // Sign and verify - should return true
+        let code = format!(r#"
+            var keyDer = GAP.util.base64('{}', true);
+            var pubKey = GAP.util.base64('{}', true);
+            var sig = GAP.crypto.sign('ecdsa-p256', keyDer, 'hello world');
+            GAP.crypto.verify('ecdsa-p256', pubKey, sig, 'hello world');
+        "#, pkcs8_b64, pub_key_b64);
+
+        let result = runtime.execute(&code).unwrap();
+        assert_eq!(result.to_boolean(), true);
+
+        // Verify with wrong data - should return false
+        let code2 = format!(r#"
+            var keyDer = GAP.util.base64('{}', true);
+            var pubKey = GAP.util.base64('{}', true);
+            var sig = GAP.crypto.sign('ecdsa-p256', keyDer, 'hello world');
+            GAP.crypto.verify('ecdsa-p256', pubKey, sig, 'wrong data');
+        "#, pkcs8_b64, pub_key_b64);
+
+        let result2 = runtime.execute(&code2).unwrap();
+        assert_eq!(result2.to_boolean(), false);
+    }
+
+    // Embedded RSA 2048-bit test key (PKCS#8 DER, base64-encoded)
+    // Generated with: openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:2048 | openssl pkcs8 -topk8 -nocrypt -outform der | base64
+    const RSA_TEST_PRIVATE_KEY_B64: &str = "MIIEvwIBADANBgkqhkiG9w0BAQEFAASCBKkwggSlAgEAAoIBAQCwmBQIzZuewziJcZf5h/F+V+GYtkqriZ8v2XHEJ+R2wwewpWNI6vuim16RJYW0dRQcLkWwxKEYcrK40AbOVlZCzLplSaKNMu5pb5drQcZe8unI2XHOiHXn3FczLmzKkQNSNDqH8WcQFDgNxM5SCD9j6Ff+dnJWx2PTK6Xpx03JUxYbFfeWMy/iOmaHD4xRUUnd3aVKOHwE9GEMT00WvBMkbO0DXAt+spHQ9Zy3OSBhfdg68fznCCbog7fBNFvxDpiq41zWnA1IiOFMc2Qv//Qp7t/WAp4MO1ZIx/iCou2bscFqHzeG1G41sHqfDhlZv6TmlLrbTssroLgusBK/7ZUlAgMBAAECggEAN9vC6o3u3acuqPsPcVS45JfzuhRfRic//SiwvbVIpPBH7G5EG3qIogS3Qv41bsFh3RAd5y4rLsqJEcBrhrT0kCimBQfnrPYhR6SOptSlZL89h9SQFR5A/VhLFNtoeiKohEYVBY8sZH+gw2ovQO9u7bE+tDTPMffb8Z3q2ym5xyZDrldFuaopFaGdFBFWd16TBov9XoxKYVVyexAAoCN88GWggpAii4L7Vh3XvrIH1YlT6HvQMAIOHafnkprr5WzNVOOT961DqKvf582r8yCwSBxRl3ncWmSgEXBITmIbP27lTIgDz4Wq7lEfIMXJs8ZlEDhR5EJTa0W315vr4qGYeQKBgQDri8ruHf95QUFCnWvCWEYUCnsq3hhz+k31/DGeC/nG7KjYjeFt3Z5cRIUGtM/IpRP5K43xzgpmN4qp6wHK2tpYKv7XBcwCN0HpJLeS8rB3OgcXEyxU8vDpVzadzKW+6bAonOttdSY+yd5sGCYOjm0dvP6o7ATO6fGh5q17Gimi1wKBgQC/7ccfGAcGSLeB8Zy+SB2UwL/dQlbmaCkmUhq5Skg5csnSztSHgPO4XO4UrnB5WyLxr2QiRFvaO63uRAaSkHpP8KFOuPahaHf9H6NFI8OtVhm0HZxeofwgJ7ovIm9ePuJ+D2cbzViZbWaNDwiDzC+FFIaoJNUqWVTANx6IWjHEYwKBgQCGhCARGnqSkcymMWaf52+l9FJgqdOHMFQjfbIMU0SC8RaADY7HAoB0qwDZUpszN+sPKmt2wzc3JtL+tOIiKhf1sCA3Re06+rmeXsSjnAthG3d/Gwj/PnqMl6zuMzgYrjZXCz58FSIRS5HFY4kgWQBBsnQwnhEk5X+D+UvreIZ8owKBgQC3vNZnegUfivXCvJ8lurw279+93gh7QzRBr1BOGkLSXIXB/qePoW+xC6YQvn6Gby0g2puuAms8nO2BsDXqkc3GQcLrLj9NfkmAVY1kXzyw8EBjIgXUwpYv4lhnTzv2qZUCwZQgFZHAL++BEuc/5XWInYHb7obzp9luulXMiywhqQKBgQC2JKrpmiwhKYbkI3A2fInoXw8dTmhOWu1DBRnIrWsfoGsFjvMTVgP+P2Pwl26rXFdCqJC/KvZZXdW4/Gd6ndrXHOgBdym5Qi4PwwipCPXFH9Z8xE4DrwxkCvc3ksGsHJCXVR3LzGCTtw+oogYLJvu9BLSwzmyrvaddzOVNgg5YLg==";
+
+    /// Helper: extract RSA public key bytes from PKCS#8 private key DER using ring
+    fn rsa_public_key_from_pkcs8(pkcs8_der: &[u8]) -> Vec<u8> {
+        let key_pair = signature::RsaKeyPair::from_pkcs8(pkcs8_der).unwrap();
+        key_pair.public().as_ref().to_vec()
+    }
+
+    #[test]
+    fn test_gap_crypto_sign_verify_rsa_pss() {
+        use base64::prelude::*;
+
+        let priv_der = BASE64_STANDARD.decode(RSA_TEST_PRIVATE_KEY_B64).unwrap();
+        let pub_key_bytes = rsa_public_key_from_pkcs8(&priv_der);
+        let pub_key_b64 = BASE64_STANDARD.encode(&pub_key_bytes);
+
+        let mut runtime = PluginRuntime::new().unwrap();
+
+        // Sign and verify with RSA-PSS-SHA256
+        let code = format!(r#"
+            var keyDer = GAP.util.base64('{}', true);
+            var pubKey = GAP.util.base64('{}', true);
+            var sig = GAP.crypto.sign('rsa-pss-sha256', keyDer, 'hello world');
+            GAP.crypto.verify('rsa-pss-sha256', pubKey, sig, 'hello world');
+        "#, RSA_TEST_PRIVATE_KEY_B64, pub_key_b64);
+
+        let result = runtime.execute(&code).unwrap();
+        assert_eq!(result.to_boolean(), true);
+
+        // Verify with wrong data - should return false
+        let code2 = format!(r#"
+            var keyDer = GAP.util.base64('{}', true);
+            var pubKey = GAP.util.base64('{}', true);
+            var sig = GAP.crypto.sign('rsa-pss-sha256', keyDer, 'hello world');
+            GAP.crypto.verify('rsa-pss-sha256', pubKey, sig, 'wrong data');
+        "#, RSA_TEST_PRIVATE_KEY_B64, pub_key_b64);
+
+        let result2 = runtime.execute(&code2).unwrap();
+        assert_eq!(result2.to_boolean(), false);
+    }
+
+    #[test]
+    fn test_gap_crypto_sign_verify_rsa_pkcs1() {
+        use base64::prelude::*;
+
+        let priv_der = BASE64_STANDARD.decode(RSA_TEST_PRIVATE_KEY_B64).unwrap();
+        let pub_key_bytes = rsa_public_key_from_pkcs8(&priv_der);
+        let pub_key_b64 = BASE64_STANDARD.encode(&pub_key_bytes);
+
+        let mut runtime = PluginRuntime::new().unwrap();
+
+        // Sign and verify with RSA-PKCS1-SHA256
+        let code = format!(r#"
+            var keyDer = GAP.util.base64('{}', true);
+            var pubKey = GAP.util.base64('{}', true);
+            var sig = GAP.crypto.sign('rsa-pkcs1-sha256', keyDer, 'hello world');
+            GAP.crypto.verify('rsa-pkcs1-sha256', pubKey, sig, 'hello world');
+        "#, RSA_TEST_PRIVATE_KEY_B64, pub_key_b64);
+
+        let result = runtime.execute(&code).unwrap();
+        assert_eq!(result.to_boolean(), true);
+
+        // Verify with wrong data - should return false
+        let code2 = format!(r#"
+            var keyDer = GAP.util.base64('{}', true);
+            var pubKey = GAP.util.base64('{}', true);
+            var sig = GAP.crypto.sign('rsa-pkcs1-sha256', keyDer, 'hello world');
+            GAP.crypto.verify('rsa-pkcs1-sha256', pubKey, sig, 'wrong data');
+        "#, RSA_TEST_PRIVATE_KEY_B64, pub_key_b64);
+
+        let result2 = runtime.execute(&code2).unwrap();
+        assert_eq!(result2.to_boolean(), false);
+    }
+
+    #[test]
+    fn test_gap_crypto_sign_unknown_algorithm() {
+        let mut runtime = PluginRuntime::new().unwrap();
+
+        let code = r#"
+            try {
+                GAP.crypto.sign('unknown-algo', [], 'data');
+                'no error';
+            } catch (e) {
+                'error: ' + e.message;
+            }
+        "#;
+
+        let result = runtime.execute(code).unwrap();
+        let msg = result.as_string().unwrap().to_std_string_escaped();
+        assert!(msg.contains("error:"), "Expected an error, got: {}", msg);
+        assert!(msg.contains("Unknown algorithm"), "Expected unknown algorithm error, got: {}", msg);
+    }
+
+    #[test]
+    fn test_gap_crypto_verify_wrong_key() {
+        use ring::signature::{Ed25519KeyPair, KeyPair};
+        use ring::rand::SystemRandom;
+        use base64::prelude::*;
+
+        let rng = SystemRandom::new();
+
+        // Generate two different key pairs
+        let pkcs8_1 = Ed25519KeyPair::generate_pkcs8(&rng).unwrap();
+        let pkcs8_2 = Ed25519KeyPair::generate_pkcs8(&rng).unwrap();
+        let key_pair_2 = Ed25519KeyPair::from_pkcs8(pkcs8_2.as_ref()).unwrap();
+        let pub_key_2 = key_pair_2.public_key().as_ref();
+
+        let pkcs8_1_b64 = BASE64_STANDARD.encode(pkcs8_1.as_ref());
+        let pub_key_2_b64 = BASE64_STANDARD.encode(pub_key_2);
+
+        let mut runtime = PluginRuntime::new().unwrap();
+
+        // Sign with key 1, verify with key 2's public key - should return false, not error
+        let code = format!(r#"
+            var keyDer = GAP.util.base64('{}', true);
+            var wrongPubKey = GAP.util.base64('{}', true);
+            var sig = GAP.crypto.sign('ed25519', keyDer, 'hello world');
+            GAP.crypto.verify('ed25519', wrongPubKey, sig, 'hello world');
+        "#, pkcs8_1_b64, pub_key_2_b64);
+
+        let result = runtime.execute(&code).unwrap();
+        assert_eq!(result.to_boolean(), false, "Verify with wrong key should return false, not throw");
     }
 }
