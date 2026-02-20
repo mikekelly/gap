@@ -4,7 +4,7 @@
 //! storing tokens, plugins, credentials, config, and activity logs.
 
 use crate::error::{GapError, Result};
-use crate::types::{CredentialEntry, HeaderSet, PluginEntry, PluginVersion, TokenEntry, TokenMetadata};
+use crate::types::{CredentialEntry, HeaderSet, PluginEntry, PluginVersion, TokenEntry, TokenMetadata, TokenScope};
 use crate::types::{ActivityEntry, ManagementLogEntry};
 use chrono::{DateTime, Utc};
 use sha2::{Sha256, Digest};
@@ -19,9 +19,21 @@ CREATE TABLE IF NOT EXISTS config (
 
 CREATE TABLE IF NOT EXISTS tokens (
     token_value TEXT PRIMARY KEY,
-    name TEXT NOT NULL,
-    created_at TEXT NOT NULL
+    name TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL,
+    revoked_at TEXT,
+    has_scopes INTEGER NOT NULL DEFAULT 0
 );
+
+CREATE TABLE IF NOT EXISTS token_scopes (
+    token_value TEXT NOT NULL REFERENCES tokens(token_value),
+    host_pattern TEXT NOT NULL,
+    port INTEGER,
+    path_pattern TEXT NOT NULL DEFAULT '/*',
+    methods TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_token_scopes_token ON token_scopes(token_value);
 
 CREATE TABLE IF NOT EXISTS credentials (
     plugin TEXT NOT NULL,
@@ -255,6 +267,8 @@ impl GapDatabase {
             "ALTER TABLE access_logs ADD COLUMN rejection_stage TEXT",
             "ALTER TABLE access_logs ADD COLUMN rejection_reason TEXT",
             "ALTER TABLE plugin_versions ADD COLUMN weight INTEGER NOT NULL DEFAULT 0",
+            "ALTER TABLE tokens ADD COLUMN revoked_at TEXT",
+            "ALTER TABLE tokens ADD COLUMN has_scopes INTEGER NOT NULL DEFAULT 0",
         ];
 
         for migration in &alter_migrations {
@@ -270,82 +284,204 @@ impl GapDatabase {
     // ── Token CRUD ──────────────────────────────────────────────────
 
     /// Add a token to the database.
+    ///
+    /// `scopes` controls access restrictions:
+    /// - `None` → unrestricted token (can access anything)
+    /// - `Some(&[])` → deny-all token (no access)
+    /// - `Some(&[scope1, scope2])` → restricted to matching scopes
     pub async fn add_token(
         &self,
         token_value: &str,
-        name: &str,
         created_at: DateTime<Utc>,
+        scopes: Option<&[TokenScope]>,
     ) -> Result<()> {
+        let has_scopes: i64 = if scopes.is_some() { 1 } else { 0 };
         self.conn
             .execute(
-                "INSERT OR REPLACE INTO tokens (token_value, name, created_at) VALUES (?1, ?2, ?3)",
-                libsql::params![token_value, name, created_at.to_rfc3339()],
+                "INSERT OR REPLACE INTO tokens (token_value, name, created_at, has_scopes) VALUES (?1, '', ?2, ?3)",
+                libsql::params![token_value, created_at.to_rfc3339(), has_scopes],
             )
             .await
             .map_err(|e| GapError::database(e.to_string()))?;
+
+        if let Some(scope_list) = scopes {
+            for scope in scope_list {
+                let methods_json = scope
+                    .methods
+                    .as_ref()
+                    .map(|m| serde_json::to_string(m).unwrap_or_default());
+                let port = scope.port.map(|p| p as i64);
+                self.conn
+                    .execute(
+                        "INSERT INTO token_scopes (token_value, host_pattern, port, path_pattern, methods) VALUES (?1, ?2, ?3, ?4, ?5)",
+                        libsql::params![
+                            token_value,
+                            scope.host_pattern.as_str(),
+                            port,
+                            scope.path_pattern.as_str(),
+                            methods_json
+                        ],
+                    )
+                    .await
+                    .map_err(|e| GapError::database(e.to_string()))?;
+            }
+        }
+
         Ok(())
     }
 
     /// Get token metadata by token value.
+    ///
+    /// Returns `None` for revoked tokens or tokens that don't exist.
     pub async fn get_token(&self, token_value: &str) -> Result<Option<TokenMetadata>> {
         let mut rows = self
             .conn
             .query(
-                "SELECT name, created_at FROM tokens WHERE token_value = ?1",
+                "SELECT created_at, has_scopes FROM tokens WHERE token_value = ?1 AND revoked_at IS NULL",
                 libsql::params![token_value],
             )
             .await
             .map_err(|e| GapError::database(e.to_string()))?;
 
         if let Some(row) = rows.next().await.map_err(|e| GapError::database(e.to_string()))? {
-            let name: String = row.get(0).map_err(|e| GapError::database(e.to_string()))?;
             let created_at_str: String =
-                row.get(1).map_err(|e| GapError::database(e.to_string()))?;
+                row.get(0).map_err(|e| GapError::database(e.to_string()))?;
             let created_at = DateTime::parse_from_rfc3339(&created_at_str)
                 .map_err(|e| GapError::database(format!("Invalid timestamp: {}", e)))?
                 .with_timezone(&Utc);
-            Ok(Some(TokenMetadata { name, created_at }))
+            let has_scopes: i64 = row.get(1).map_err(|e| GapError::database(e.to_string()))?;
+
+            let scopes = if has_scopes == 1 {
+                Some(self.get_token_scopes(token_value).await?)
+            } else {
+                None
+            };
+
+            Ok(Some(TokenMetadata {
+                created_at,
+                scopes,
+                revoked_at: None,
+            }))
         } else {
             Ok(None)
         }
     }
 
-    /// List all tokens.
-    pub async fn list_tokens(&self) -> Result<Vec<TokenEntry>> {
+    /// Query token_scopes for a given token value.
+    async fn get_token_scopes(&self, token_value: &str) -> Result<Vec<TokenScope>> {
         let mut rows = self
             .conn
-            .query("SELECT token_value, name, created_at FROM tokens", ())
+            .query(
+                "SELECT host_pattern, port, path_pattern, methods FROM token_scopes WHERE token_value = ?1",
+                libsql::params![token_value],
+            )
+            .await
+            .map_err(|e| GapError::database(e.to_string()))?;
+
+        let mut scopes = Vec::new();
+        while let Some(row) = rows.next().await.map_err(|e| GapError::database(e.to_string()))? {
+            let host_pattern: String = row.get(0).map_err(|e| GapError::database(e.to_string()))?;
+            let port: Option<i64> = row.get(1).map_err(|e| GapError::database(e.to_string()))?;
+            let path_pattern: String = row.get(2).map_err(|e| GapError::database(e.to_string()))?;
+            let methods_json: Option<String> = row.get(3).map_err(|e| GapError::database(e.to_string()))?;
+
+            let methods: Option<Vec<String>> = methods_json
+                .and_then(|json| serde_json::from_str(&json).ok());
+
+            scopes.push(TokenScope {
+                host_pattern,
+                port: port.map(|p| p as u16),
+                path_pattern,
+                methods,
+            });
+        }
+        Ok(scopes)
+    }
+
+    /// List tokens.
+    ///
+    /// When `include_revoked` is `false`, only active (non-revoked) tokens are returned.
+    /// When `true`, all tokens are returned including revoked ones.
+    pub async fn list_tokens(&self, include_revoked: bool) -> Result<Vec<TokenEntry>> {
+        let query = if include_revoked {
+            "SELECT token_value, created_at, revoked_at, has_scopes FROM tokens"
+        } else {
+            "SELECT token_value, created_at, revoked_at, has_scopes FROM tokens WHERE revoked_at IS NULL"
+        };
+        let mut rows = self
+            .conn
+            .query(query, ())
             .await
             .map_err(|e| GapError::database(e.to_string()))?;
         let mut result = Vec::new();
         while let Some(row) = rows.next().await.map_err(|e| GapError::database(e.to_string()))? {
             let token_value: String =
                 row.get(0).map_err(|e| GapError::database(e.to_string()))?;
-            let name: String = row.get(1).map_err(|e| GapError::database(e.to_string()))?;
             let created_at_str: String =
-                row.get(2).map_err(|e| GapError::database(e.to_string()))?;
+                row.get(1).map_err(|e| GapError::database(e.to_string()))?;
             let created_at = DateTime::parse_from_rfc3339(&created_at_str)
                 .map_err(|e| GapError::database(format!("Invalid timestamp: {}", e)))?
                 .with_timezone(&Utc);
+            let revoked_at_str: Option<String> =
+                row.get(2).map_err(|e| GapError::database(e.to_string()))?;
+            let revoked_at = revoked_at_str
+                .map(|s| DateTime::parse_from_rfc3339(&s))
+                .transpose()
+                .map_err(|e| GapError::database(format!("Invalid revoked_at timestamp: {}", e)))?
+                .map(|dt| dt.with_timezone(&Utc));
+            let has_scopes: i64 = row.get(3).map_err(|e| GapError::database(e.to_string()))?;
+
+            let scopes = if has_scopes == 1 {
+                Some(self.get_token_scopes(&token_value).await?)
+            } else {
+                None
+            };
+
             result.push(TokenEntry {
                 token_value,
-                name,
                 created_at,
+                scopes,
+                revoked_at,
             });
         }
         Ok(result)
     }
 
-    /// Remove a token by its value.
-    pub async fn remove_token(&self, token_value: &str) -> Result<()> {
+    /// Soft-delete a token by setting its revoked_at timestamp.
+    ///
+    /// Revoked tokens are excluded from `get_token` and `list_tokens(false)`.
+    pub async fn revoke_token(&self, token_value: &str) -> Result<()> {
         self.conn
             .execute(
-                "DELETE FROM tokens WHERE token_value = ?1",
-                libsql::params![token_value],
+                "UPDATE tokens SET revoked_at = ?2 WHERE token_value = ?1 AND revoked_at IS NULL",
+                libsql::params![token_value, Utc::now().to_rfc3339()],
             )
             .await
             .map_err(|e| GapError::database(e.to_string()))?;
         Ok(())
+    }
+
+    /// Find an active token by prefix match.
+    ///
+    /// Returns the full token value if exactly one active token matches.
+    /// Returns `None` if no tokens match.
+    pub async fn get_token_by_prefix(&self, prefix: &str) -> Result<Option<String>> {
+        let pattern = format!("{}%", prefix);
+        let mut rows = self
+            .conn
+            .query(
+                "SELECT token_value FROM tokens WHERE token_value LIKE ?1 AND revoked_at IS NULL",
+                libsql::params![pattern],
+            )
+            .await
+            .map_err(|e| GapError::database(e.to_string()))?;
+
+        if let Some(row) = rows.next().await.map_err(|e| GapError::database(e.to_string()))? {
+            let token_value: String = row.get(0).map_err(|e| GapError::database(e.to_string()))?;
+            Ok(Some(token_value))
+        } else {
+            Ok(None)
+        }
     }
 
     // ── Plugin CRUD ─────────────────────────────────────────────────
@@ -1316,18 +1452,64 @@ mod tests {
         let db = GapDatabase::in_memory().await.unwrap();
         let now = Utc::now();
 
-        db.add_token("gap_abc123", "test-agent", now)
+        // Token without scopes (unrestricted)
+        db.add_token("gap_abc123def456", now, None).await.unwrap();
+
+        let meta = db.get_token("gap_abc123def456").await.unwrap().unwrap();
+        assert!(meta.scopes.is_none());
+        assert!(meta.revoked_at.is_none());
+        // Round-trip via RFC 3339 may lose sub-microsecond precision;
+        // compare to the second.
+        assert_eq!(meta.created_at.timestamp(), now.timestamp());
+    }
+
+    #[tokio::test]
+    async fn test_token_add_with_scopes() {
+        let db = GapDatabase::in_memory().await.unwrap();
+        let now = Utc::now();
+
+        let scopes = vec![
+            TokenScope {
+                host_pattern: "example.com".to_string(),
+                port: None,
+                path_pattern: "/*".to_string(),
+                methods: None,
+            },
+            TokenScope {
+                host_pattern: "api.test.com".to_string(),
+                port: Some(8080),
+                path_pattern: "/v1/*".to_string(),
+                methods: Some(vec!["GET".to_string(), "POST".to_string()]),
+            },
+        ];
+
+        db.add_token("gap_scoped_token1", now, Some(&scopes))
             .await
             .unwrap();
 
-        let meta = db.get_token("gap_abc123").await.unwrap().unwrap();
-        assert_eq!(meta.name, "test-agent");
-        // Round-trip via RFC 3339 may lose sub-microsecond precision;
-        // compare to the second.
+        let meta = db.get_token("gap_scoped_token1").await.unwrap().unwrap();
+        let retrieved_scopes = meta.scopes.unwrap();
+        assert_eq!(retrieved_scopes.len(), 2);
+        assert_eq!(retrieved_scopes[0].host_pattern, "example.com");
+        assert_eq!(retrieved_scopes[1].port, Some(8080));
         assert_eq!(
-            meta.created_at.timestamp(),
-            now.timestamp()
+            retrieved_scopes[1].methods,
+            Some(vec!["GET".to_string(), "POST".to_string()])
         );
+    }
+
+    #[tokio::test]
+    async fn test_token_add_with_empty_scopes() {
+        let db = GapDatabase::in_memory().await.unwrap();
+        let now = Utc::now();
+
+        // Empty scopes = deny all (different from None = unrestricted)
+        db.add_token("gap_empty_scopes1", now, Some(&[]))
+            .await
+            .unwrap();
+
+        let meta = db.get_token("gap_empty_scopes1").await.unwrap().unwrap();
+        assert_eq!(meta.scopes, Some(vec![])); // Some(empty) not None
     }
 
     #[tokio::test]
@@ -1339,34 +1521,56 @@ mod tests {
     #[tokio::test]
     async fn test_token_list() {
         let db = GapDatabase::in_memory().await.unwrap();
-
-        // Empty initially
-        assert_eq!(db.list_tokens().await.unwrap().len(), 0);
+        assert_eq!(db.list_tokens(false).await.unwrap().len(), 0);
 
         let now = Utc::now();
-        db.add_token("gap_t1", "token1", now).await.unwrap();
-        db.add_token("gap_t2", "token2", now).await.unwrap();
+        db.add_token("gap_t1_abcdef01", now, None).await.unwrap();
+        db.add_token("gap_t2_abcdef02", now, None).await.unwrap();
 
-        let tokens = db.list_tokens().await.unwrap();
+        let tokens = db.list_tokens(false).await.unwrap();
         assert_eq!(tokens.len(), 2);
-        let names: Vec<&str> = tokens.iter().map(|t| t.name.as_str()).collect();
-        assert!(names.contains(&"token1"));
-        assert!(names.contains(&"token2"));
     }
 
     #[tokio::test]
-    async fn test_token_remove() {
+    async fn test_token_revoke() {
         let db = GapDatabase::in_memory().await.unwrap();
         let now = Utc::now();
 
-        db.add_token("gap_t1", "token1", now).await.unwrap();
-        db.add_token("gap_t2", "token2", now).await.unwrap();
+        db.add_token("gap_t1_revoke01", now, None).await.unwrap();
+        db.add_token("gap_t2_revoke02", now, None).await.unwrap();
 
-        db.remove_token("gap_t1").await.unwrap();
+        db.revoke_token("gap_t1_revoke01").await.unwrap();
 
-        let tokens = db.list_tokens().await.unwrap();
+        // Not in active list
+        let tokens = db.list_tokens(false).await.unwrap();
         assert_eq!(tokens.len(), 1);
-        assert_eq!(tokens[0].token_value, "gap_t2");
+        assert_eq!(tokens[0].token_value, "gap_t2_revoke02");
+
+        // In full list with revoked_at set
+        let all_tokens = db.list_tokens(true).await.unwrap();
+        assert_eq!(all_tokens.len(), 2);
+        let revoked = all_tokens
+            .iter()
+            .find(|t| t.token_value == "gap_t1_revoke01")
+            .unwrap();
+        assert!(revoked.revoked_at.is_some());
+
+        // get_token returns None for revoked
+        assert!(db.get_token("gap_t1_revoke01").await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn test_token_get_by_prefix() {
+        let db = GapDatabase::in_memory().await.unwrap();
+        let now = Utc::now();
+
+        db.add_token("gap_abc123def456", now, None).await.unwrap();
+
+        let found = db.get_token_by_prefix("gap_abc123de").await.unwrap();
+        assert_eq!(found, Some("gap_abc123def456".to_string()));
+
+        let not_found = db.get_token_by_prefix("gap_zzz").await.unwrap();
+        assert!(not_found.is_none());
     }
 
     // ── Plugin CRUD ─────────────────────────────────────────────────
