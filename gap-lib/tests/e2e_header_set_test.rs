@@ -492,3 +492,270 @@ async fn test_e2e_header_set_path_matching() {
         result
     );
 }
+
+/// Test that a plugin with higher weight beats a header set with lower weight.
+///
+/// Plugin has weight=10 (sets X-Source: plugin), header set has weight=5
+/// (sets X-Source: header-set). Higher weight wins, so the plugin's value
+/// should appear upstream. This is the inverse of `test_e2e_header_set_vs_plugin_weight`.
+#[tokio::test]
+async fn test_e2e_plugin_beats_header_set_by_weight() {
+    let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+
+    let server_ca = load_test_server_ca();
+    let server_ca_cert_pem = server_ca.ca_cert_pem();
+    let echo_port = spawn_echo_server(&server_ca).await;
+
+    let db = Arc::new(GapDatabase::in_memory().await.expect("create in-memory db"));
+
+    // Add plugin with weight=10 (higher priority)
+    let plugin_code = r#"var plugin = {
+    name: "weighted-plugin",
+    matchPatterns: ["localhost"],
+    credentialSchema: ["api_key"],
+    weight: 10,
+    transform: function(request, credentials) {
+        request.headers["X-Source"] = "plugin";
+        return request;
+    }
+};"#;
+    let plugin_entry = PluginEntry {
+        name: "weighted-plugin".to_string(),
+        hosts: vec!["localhost".to_string()],
+        credential_schema: vec!["api_key".to_string()],
+        commit_sha: None,
+        dangerously_permit_http: false,
+        weight: 10,
+        installed_at: None,
+    };
+    db.add_plugin(&plugin_entry, plugin_code)
+        .await
+        .expect("store plugin");
+    db.set_credential("weighted-plugin", "api_key", "dummy-key")
+        .await
+        .expect("set credential");
+
+    // Add header set with weight=5 (lower priority)
+    db.add_header_set("low-weight-hs", &["localhost".to_string()], 5)
+        .await
+        .expect("add header set");
+    db.set_header_set_header("low-weight-hs", "X-Source", "header-set")
+        .await
+        .expect("set X-Source header");
+
+    // Add agent token
+    let token = AgentToken::new("e2e-plugin-wins-agent");
+    let token_value = token.token.clone();
+    db.add_token(&token.token, &token.name, token.created_at)
+        .await
+        .expect("store token");
+
+    let (proxy_port, proxy_ca_cert_pem) = start_proxy(db, &server_ca_cert_pem).await;
+
+    let json = proxy_request(proxy_port, echo_port, &proxy_ca_cert_pem, &token_value, "/test")
+        .await
+        .expect("proxy request should succeed");
+
+    // Plugin (weight=10) should win over header set (weight=5)
+    let x_source = json["headers"]["x-source"]
+        .as_str()
+        .unwrap_or("");
+    assert_eq!(
+        x_source, "plugin",
+        "Expected X-Source to be 'plugin' (weight 10 > 5), got: {:?}\nFull response: {}",
+        x_source, json
+    );
+}
+
+/// Test weight-based priority between two header sets.
+///
+/// Header set A has weight=5, header set B has weight=10. Both match
+/// `localhost` and set the same header. Higher weight wins.
+#[tokio::test]
+async fn test_e2e_header_set_vs_header_set_weight() {
+    let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+
+    let server_ca = load_test_server_ca();
+    let server_ca_cert_pem = server_ca.ca_cert_pem();
+    let echo_port = spawn_echo_server(&server_ca).await;
+
+    let db = Arc::new(GapDatabase::in_memory().await.expect("create in-memory db"));
+
+    // Header set A with weight=5
+    db.add_header_set("hs-a", &["localhost".to_string()], 5)
+        .await
+        .expect("add header set A");
+    db.set_header_set_header("hs-a", "X-Source", "hs-a")
+        .await
+        .expect("set X-Source for hs-a");
+
+    // Header set B with weight=10
+    db.add_header_set("hs-b", &["localhost".to_string()], 10)
+        .await
+        .expect("add header set B");
+    db.set_header_set_header("hs-b", "X-Source", "hs-b")
+        .await
+        .expect("set X-Source for hs-b");
+
+    // Add agent token
+    let token = AgentToken::new("e2e-hs-vs-hs-agent");
+    let token_value = token.token.clone();
+    db.add_token(&token.token, &token.name, token.created_at)
+        .await
+        .expect("store token");
+
+    let (proxy_port, proxy_ca_cert_pem) = start_proxy(db, &server_ca_cert_pem).await;
+
+    let json = proxy_request(proxy_port, echo_port, &proxy_ca_cert_pem, &token_value, "/test")
+        .await
+        .expect("proxy request should succeed");
+
+    // Header set B (weight=10) should win over header set A (weight=5)
+    let x_source = json["headers"]["x-source"]
+        .as_str()
+        .unwrap_or("");
+    assert_eq!(
+        x_source, "hs-b",
+        "Expected X-Source to be 'hs-b' (weight 10 > 5), got: {:?}\nFull response: {}",
+        x_source, json
+    );
+}
+
+/// Test that when two header sets have the same weight, the oldest one wins.
+///
+/// Both header sets have weight=0. Header set A is created first, then after
+/// a brief sleep, header set B is created. The tiebreak rule favors the older
+/// entry, so header set A should win.
+#[tokio::test]
+async fn test_e2e_same_weight_oldest_wins() {
+    let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+
+    let server_ca = load_test_server_ca();
+    let server_ca_cert_pem = server_ca.ca_cert_pem();
+    let echo_port = spawn_echo_server(&server_ca).await;
+
+    let db = Arc::new(GapDatabase::in_memory().await.expect("create in-memory db"));
+
+    // Header set A (created first) with weight=0
+    db.add_header_set("hs-older", &["localhost".to_string()], 0)
+        .await
+        .expect("add older header set");
+    db.set_header_set_header("hs-older", "X-Source", "older")
+        .await
+        .expect("set X-Source for older hs");
+
+    // Sleep to ensure different timestamps
+    tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+
+    // Header set B (created second) with weight=0
+    db.add_header_set("hs-newer", &["localhost".to_string()], 0)
+        .await
+        .expect("add newer header set");
+    db.set_header_set_header("hs-newer", "X-Source", "newer")
+        .await
+        .expect("set X-Source for newer hs");
+
+    // Add agent token
+    let token = AgentToken::new("e2e-oldest-wins-agent");
+    let token_value = token.token.clone();
+    db.add_token(&token.token, &token.name, token.created_at)
+        .await
+        .expect("store token");
+
+    let (proxy_port, proxy_ca_cert_pem) = start_proxy(db, &server_ca_cert_pem).await;
+
+    let json = proxy_request(proxy_port, echo_port, &proxy_ca_cert_pem, &token_value, "/test")
+        .await
+        .expect("proxy request should succeed");
+
+    // Same weight → oldest wins, so "older" should appear
+    let x_source = json["headers"]["x-source"]
+        .as_str()
+        .unwrap_or("");
+    assert_eq!(
+        x_source, "older",
+        "Expected X-Source to be 'older' (same weight, oldest wins), got: {:?}\nFull response: {}",
+        x_source, json
+    );
+}
+
+/// Test path-specific header set wins by weight when both match.
+///
+/// Header set A (weight=10) matches `localhost/api/v1/*`, header set B (weight=5)
+/// matches `localhost` (catch-all). For a request to `/api/v1/data`, both match
+/// and weight decides (A wins). For `/other`, only B matches, so B wins.
+#[tokio::test]
+async fn test_e2e_path_specific_header_set_wins_by_weight() {
+    let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+
+    let server_ca = load_test_server_ca();
+    let server_ca_cert_pem = server_ca.ca_cert_pem();
+    let echo_port = spawn_echo_server(&server_ca).await;
+
+    let db = Arc::new(GapDatabase::in_memory().await.expect("create in-memory db"));
+
+    // Header set A: path-specific with higher weight
+    db.add_header_set("specific-hs", &["localhost/api/v1/*".to_string()], 10)
+        .await
+        .expect("add specific header set");
+    db.set_header_set_header("specific-hs", "X-Source", "specific")
+        .await
+        .expect("set X-Source for specific hs");
+
+    // Header set B: catch-all with lower weight
+    db.add_header_set("catchall-hs", &["localhost".to_string()], 5)
+        .await
+        .expect("add catchall header set");
+    db.set_header_set_header("catchall-hs", "X-Source", "catchall")
+        .await
+        .expect("set X-Source for catchall hs");
+
+    // Add agent token
+    let token = AgentToken::new("e2e-path-weight-agent");
+    let token_value = token.token.clone();
+    db.add_token(&token.token, &token.name, token.created_at)
+        .await
+        .expect("store token");
+
+    let (proxy_port, proxy_ca_cert_pem) = start_proxy(db, &server_ca_cert_pem).await;
+
+    // Request to /api/v1/data — both match, weight decides (specific wins)
+    let json = proxy_request(
+        proxy_port,
+        echo_port,
+        &proxy_ca_cert_pem,
+        &token_value,
+        "/api/v1/data",
+    )
+    .await
+    .expect("proxy request to /api/v1/data should succeed");
+
+    let x_source = json["headers"]["x-source"]
+        .as_str()
+        .unwrap_or("");
+    assert_eq!(
+        x_source, "specific",
+        "Expected X-Source to be 'specific' (weight 10 > 5) for /api/v1/data, got: {:?}\nFull response: {}",
+        x_source, json
+    );
+
+    // Request to /other — only catchall matches
+    let json = proxy_request(
+        proxy_port,
+        echo_port,
+        &proxy_ca_cert_pem,
+        &token_value,
+        "/other",
+    )
+    .await
+    .expect("proxy request to /other should succeed");
+
+    let x_source = json["headers"]["x-source"]
+        .as_str()
+        .unwrap_or("");
+    assert_eq!(
+        x_source, "catchall",
+        "Expected X-Source to be 'catchall' (only matching handler) for /other, got: {:?}\nFull response: {}",
+        x_source, json
+    );
+}
