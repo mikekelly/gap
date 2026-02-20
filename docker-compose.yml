@@ -85,7 +85,7 @@ services:
       - gap-data:/var/lib/gap:ro
     environment:
       - GAP_SERVER_URL=https://gap-server:9080
-      - GAP_CA_CERT=/var/lib/gap/ca.crt
+      - GAP_CA_CERT_CHAIN=/var/lib/gap/ca.crt
       - GAP_MOCK_API_URL=http://mock-api:8080
       - GAP_PROXY_URL=https://gap-server:9443
     networks:
@@ -118,7 +118,7 @@ services:
     environment:
       - RUST_LOG=gap_server=info,gap_lib=info
       - GAP_NO_BOOTSTRAP=true
-      - GAP_CA_CERT=${GAP_CA_CERT}
+      - GAP_CA_CERT_CHAIN=${GAP_CA_CERT_CHAIN}
       - GAP_CA_KEY=${GAP_CA_KEY}
       - GAP_ENCRYPTION_KEY=${GAP_ENCRYPTION_KEY_NOBOOTSTRAP}
     restart: unless-stopped
@@ -159,7 +159,7 @@ services:
     environment:
       - RUST_LOG=gap_server=info,gap_lib=info
       # GAP_NO_BOOTSTRAP defaults to true from Dockerfile
-      # Deliberately NOT setting GAP_CA_CERT, GAP_CA_KEY, GAP_ENCRYPTION_KEY
+      # Deliberately NOT setting GAP_CA_CERT_CHAIN, GAP_CA_KEY, GAP_ENCRYPTION_KEY
     networks:
       - gap-network
     profiles:

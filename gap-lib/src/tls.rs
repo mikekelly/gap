@@ -428,11 +428,9 @@ impl rustls::server::ResolvesServerCert for DynamicCertResolver {
         let key = rustls::pki_types::PrivateKeyDer::try_from(key_der).ok()?;
         let signing_key = rustls::crypto::aws_lc_rs::sign::any_supported_type(&key).ok()?;
 
-        // Include CA cert in chain so clients can verify the full chain
-        let ca_cert_der = self.ca.ca_cert_der();
+        // Per RFC 8446, the trust anchor (root CA) is omitted — the client already has it.
         let cert_chain = vec![
             rustls::pki_types::CertificateDer::from(cert_der),
-            rustls::pki_types::CertificateDer::from(ca_cert_der),
         ];
 
         Some(Arc::new(rustls::sign::CertifiedKey::new(cert_chain, signing_key)))

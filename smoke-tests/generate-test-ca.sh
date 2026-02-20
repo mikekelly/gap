@@ -1,6 +1,6 @@
 #!/bin/bash
 # Generate a test CA cert+key for no-bootstrap mode testing.
-# Outputs base64-encoded DER values suitable for GAP_CA_CERT/GAP_CA_KEY env vars.
+# Outputs base64-encoded DER values suitable for GAP_CA_CERT_CHAIN/GAP_CA_KEY env vars.
 set -e
 
 FIXTURES_DIR="$(dirname "$0")/fixtures"
@@ -25,6 +25,6 @@ openssl rand -hex 32 > "$FIXTURES_DIR/test-encryption.key"
 echo "Test fixtures generated in $FIXTURES_DIR/"
 echo "  test-ca.crt          — CA certificate (PEM)"
 echo "  test-ca.key          — CA private key (PEM)"
-echo "  test-ca-cert.b64     — CA certificate (base64 DER for GAP_CA_CERT)"
+echo "  test-ca-cert.b64     — CA certificate (base64 DER for GAP_CA_CERT_CHAIN)"
 echo "  test-ca-key.b64      — CA private key (base64 DER for GAP_CA_KEY)"
 echo "  test-encryption.key  — Encryption key (hex for GAP_ENCRYPTION_KEY)"

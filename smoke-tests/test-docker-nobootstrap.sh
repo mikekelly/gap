@@ -13,7 +13,7 @@ if [ ! -f "$FIXTURES_DIR/test-ca-cert.b64" ]; then
 fi
 
 # Export env vars for docker-compose
-export GAP_CA_CERT="$(cat "$FIXTURES_DIR/test-ca-cert.b64")"
+export GAP_CA_CERT_CHAIN="$(cat "$FIXTURES_DIR/test-ca-cert.b64")"
 export GAP_CA_KEY="$(cat "$FIXTURES_DIR/test-ca-key.b64")"
 export GAP_ENCRYPTION_KEY_NOBOOTSTRAP="$(cat "$FIXTURES_DIR/test-encryption.key")"
 

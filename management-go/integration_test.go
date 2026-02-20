@@ -30,7 +30,7 @@ func newTestClient(t *testing.T, passcode string) *gap.Client {
 	if passcode != "" {
 		opts = append(opts, gap.WithPasscode(passcode))
 	}
-	caCert := os.Getenv("GAP_CA_CERT")
+	caCert := os.Getenv("GAP_CA_CERT_CHAIN")
 	if caCert != "" {
 		opts = append(opts, gap.WithCACert(caCert))
 	}
@@ -240,7 +240,7 @@ func TestIntegration(t *testing.T) {
 	// httpbin.org), but a successful client.Do() proves CONNECT + MITM TLS
 	// worked. Even a 4xx/5xx response from the proxy counts as success here.
 	//
-	// Preconditions: GAP_PROXY_URL and GAP_CA_CERT must be set, and the token
+	// Preconditions: GAP_PROXY_URL and GAP_CA_CERT_CHAIN must be set, and the token
 	// created in Test05 must be available. Skip gracefully otherwise.
 	proxyTestPassed := false
 
@@ -288,9 +288,9 @@ func TestIntegration(t *testing.T) {
 
 	t.Run("Test11_ProxySmokeTest", func(t *testing.T) {
 		proxyURLStr := os.Getenv("GAP_PROXY_URL")
-		caCertPath := os.Getenv("GAP_CA_CERT")
+		caCertPath := os.Getenv("GAP_CA_CERT_CHAIN")
 		if proxyURLStr == "" || caCertPath == "" {
-			t.Skip("GAP_PROXY_URL or GAP_CA_CERT not set — skipping proxy smoke test")
+			t.Skip("GAP_PROXY_URL or GAP_CA_CERT_CHAIN not set — skipping proxy smoke test")
 		}
 		if createdTokenValue == "" {
 			t.Skip("No agent token available (Test05 must run first)")
@@ -333,7 +333,7 @@ func TestIntegration(t *testing.T) {
 		}
 
 		proxyURLStr := os.Getenv("GAP_PROXY_URL")
-		caCertPath := os.Getenv("GAP_CA_CERT")
+		caCertPath := os.Getenv("GAP_CA_CERT_CHAIN")
 
 		tr := buildProxyTransport(t, proxyURLStr, caCertPath, createdTokenValue, true)
 		client := &http.Client{Transport: tr, Timeout: 30 * time.Second}

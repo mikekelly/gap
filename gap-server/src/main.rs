@@ -439,13 +439,13 @@ fn validate_no_bootstrap() -> anyhow::Result<bool> {
     let no_bootstrap = std::env::var("GAP_NO_BOOTSTRAP").as_deref() == Ok("true");
 
     if no_bootstrap {
-        let has_ca_cert = std::env::var("GAP_CA_CERT").is_ok();
+        let has_ca_cert = std::env::var("GAP_CA_CERT_CHAIN").is_ok();
         let has_ca_key = std::env::var("GAP_CA_KEY").is_ok();
         let has_enc_key = std::env::var("GAP_ENCRYPTION_KEY").is_ok();
 
         if !has_ca_cert || !has_ca_key {
             anyhow::bail!(
-                "GAP_NO_BOOTSTRAP is set but GAP_CA_CERT/GAP_CA_KEY are missing. \
+                "GAP_NO_BOOTSTRAP is set but GAP_CA_CERT_CHAIN/GAP_CA_KEY are missing. \
                  In no-bootstrap mode, a CA certificate and key must be provided via environment variables."
             );
         }
@@ -463,7 +463,7 @@ fn validate_no_bootstrap() -> anyhow::Result<bool> {
 /// Load CA from environment variables, database, or generate a new one.
 ///
 /// Precedence:
-/// 1. `GAP_CA_CERT` + `GAP_CA_KEY` env vars (base64-encoded DER) — for container deployments
+/// 1. `GAP_CA_CERT_CHAIN` + `GAP_CA_KEY` env vars (base64-encoded DER) — for container deployments
 /// 2. Database config (`ca:cert`, `ca:key`) — persisted from previous runs
 /// 3. Generate new CA — first run
 async fn load_or_generate_ca(db: &GapDatabase) -> anyhow::Result<CertificateAuthority> {
@@ -471,30 +471,30 @@ async fn load_or_generate_ca(db: &GapDatabase) -> anyhow::Result<CertificateAuth
     const CA_KEY_KEY: &str = "ca:key";
 
     // 1. Try env var injection first
-    let env_cert = std::env::var("GAP_CA_CERT").ok();
+    let env_cert = std::env::var("GAP_CA_CERT_CHAIN").ok();
     let env_key = std::env::var("GAP_CA_KEY").ok();
 
     let ca = match (env_cert, env_key) {
         (Some(cert_b64), Some(key_b64)) => {
             use base64::Engine;
             let cert_der = base64::engine::general_purpose::STANDARD.decode(&cert_b64)
-                .map_err(|e| anyhow::anyhow!("GAP_CA_CERT: invalid base64: {}", e))?;
+                .map_err(|e| anyhow::anyhow!("GAP_CA_CERT_CHAIN: invalid base64: {}", e))?;
             let key_der = base64::engine::general_purpose::STANDARD.decode(&key_b64)
                 .map_err(|e| anyhow::anyhow!("GAP_CA_KEY: invalid base64: {}", e))?;
 
             // Validate key matches cert
             gap_lib::tls::validate_cert_key_match(&cert_der, &key_der)
-                .map_err(|e| anyhow::anyhow!("GAP_CA_CERT and GAP_CA_KEY do not match: {}", e))?;
+                .map_err(|e| anyhow::anyhow!("GAP_CA_CERT_CHAIN and GAP_CA_KEY do not match: {}", e))?;
 
             let ca = CertificateAuthority::from_der(cert_der, key_der)?;
-            tracing::info!("CA loaded from GAP_CA_CERT/GAP_CA_KEY environment variables");
+            tracing::info!("CA loaded from GAP_CA_CERT_CHAIN/GAP_CA_KEY environment variables");
             ca
         }
         (Some(_), None) => {
-            anyhow::bail!("GAP_CA_CERT is set but GAP_CA_KEY is missing — both must be provided");
+            anyhow::bail!("GAP_CA_CERT_CHAIN is set but GAP_CA_KEY is missing — both must be provided");
         }
         (None, Some(_)) => {
-            anyhow::bail!("GAP_CA_KEY is set but GAP_CA_CERT is missing — both must be provided");
+            anyhow::bail!("GAP_CA_KEY is set but GAP_CA_CERT_CHAIN is missing — both must be provided");
         }
         (None, None) => {
             // 2. Fall through to existing DB load/generate path
@@ -693,7 +693,7 @@ mod tests {
         let temp_home = tempfile::tempdir().unwrap();
         std::env::set_var("HOME", temp_home.path());
         // Ensure env var CA injection is not active
-        std::env::remove_var("GAP_CA_CERT");
+        std::env::remove_var("GAP_CA_CERT_CHAIN");
         std::env::remove_var("GAP_CA_KEY");
 
         // Load or generate CA - this should export the cert to the filesystem
@@ -717,7 +717,7 @@ mod tests {
         let temp_home = tempfile::tempdir().unwrap();
         std::env::set_var("HOME", temp_home.path());
         // Ensure env var CA injection is not active
-        std::env::remove_var("GAP_CA_CERT");
+        std::env::remove_var("GAP_CA_CERT_CHAIN");
         std::env::remove_var("GAP_CA_KEY");
 
         // First call generates and persists
@@ -765,7 +765,7 @@ mod tests {
         let temp_home = tempfile::tempdir().unwrap();
 
         // Save and clear env vars
-        let saved: Vec<_> = ["HOME", "GAP_CA_CERT", "GAP_CA_KEY"]
+        let saved: Vec<_> = ["HOME", "GAP_CA_CERT_CHAIN", "GAP_CA_KEY"]
             .iter()
             .map(|k| (*k, std::env::var(k).ok()))
             .collect();
@@ -779,7 +779,7 @@ mod tests {
         let key_b64 = base64::engine::general_purpose::STANDARD.encode(&ca.ca_key_der());
 
         std::env::set_var("HOME", temp_home.path());
-        std::env::set_var("GAP_CA_CERT", &cert_b64);
+        std::env::set_var("GAP_CA_CERT_CHAIN", &cert_b64);
         std::env::set_var("GAP_CA_KEY", &key_b64);
 
         let result = load_or_generate_ca(&db).await;
@@ -808,7 +808,7 @@ mod tests {
         let db = GapDatabase::in_memory().await.unwrap();
         let temp_home = tempfile::tempdir().unwrap();
 
-        let saved: Vec<_> = ["HOME", "GAP_CA_CERT", "GAP_CA_KEY"]
+        let saved: Vec<_> = ["HOME", "GAP_CA_CERT_CHAIN", "GAP_CA_KEY"]
             .iter()
             .map(|k| (*k, std::env::var(k).ok()))
             .collect();
@@ -820,7 +820,7 @@ mod tests {
         let cert_b64 = base64::engine::general_purpose::STANDARD.encode(&ca.ca_cert_der());
 
         std::env::set_var("HOME", temp_home.path());
-        std::env::set_var("GAP_CA_CERT", &cert_b64);
+        std::env::set_var("GAP_CA_CERT_CHAIN", &cert_b64);
         // GAP_CA_KEY deliberately NOT set
 
         let result = load_or_generate_ca(&db).await;
@@ -832,7 +832,7 @@ mod tests {
             }
         }
 
-        assert!(result.is_err(), "Should error when GAP_CA_CERT is set but GAP_CA_KEY is missing");
+        assert!(result.is_err(), "Should error when GAP_CA_CERT_CHAIN is set but GAP_CA_KEY is missing");
         let err = result.unwrap_err().to_string();
         assert!(
             err.contains("GAP_CA_KEY is missing"),
@@ -849,7 +849,7 @@ mod tests {
         let db = GapDatabase::in_memory().await.unwrap();
         let temp_home = tempfile::tempdir().unwrap();
 
-        let saved: Vec<_> = ["HOME", "GAP_CA_CERT", "GAP_CA_KEY"]
+        let saved: Vec<_> = ["HOME", "GAP_CA_CERT_CHAIN", "GAP_CA_KEY"]
             .iter()
             .map(|k| (*k, std::env::var(k).ok()))
             .collect();
@@ -862,7 +862,7 @@ mod tests {
 
         std::env::set_var("HOME", temp_home.path());
         std::env::set_var("GAP_CA_KEY", &key_b64);
-        // GAP_CA_CERT deliberately NOT set
+        // GAP_CA_CERT_CHAIN deliberately NOT set
 
         let result = load_or_generate_ca(&db).await;
 
@@ -873,11 +873,11 @@ mod tests {
             }
         }
 
-        assert!(result.is_err(), "Should error when GAP_CA_KEY is set but GAP_CA_CERT is missing");
+        assert!(result.is_err(), "Should error when GAP_CA_KEY is set but GAP_CA_CERT_CHAIN is missing");
         let err = result.unwrap_err().to_string();
         assert!(
-            err.contains("GAP_CA_CERT is missing"),
-            "Error should mention missing GAP_CA_CERT: {}",
+            err.contains("GAP_CA_CERT_CHAIN is missing"),
+            "Error should mention missing GAP_CA_CERT_CHAIN: {}",
             err
         );
     }
@@ -890,7 +890,7 @@ mod tests {
         let db = GapDatabase::in_memory().await.unwrap();
         let temp_home = tempfile::tempdir().unwrap();
 
-        let saved: Vec<_> = ["HOME", "GAP_CA_CERT", "GAP_CA_KEY"]
+        let saved: Vec<_> = ["HOME", "GAP_CA_CERT_CHAIN", "GAP_CA_KEY"]
             .iter()
             .map(|k| (*k, std::env::var(k).ok()))
             .collect();
@@ -905,7 +905,7 @@ mod tests {
         let key_b64 = base64::engine::general_purpose::STANDARD.encode(&ca2.ca_key_der());
 
         std::env::set_var("HOME", temp_home.path());
-        std::env::set_var("GAP_CA_CERT", &cert_b64);
+        std::env::set_var("GAP_CA_CERT_CHAIN", &cert_b64);
         std::env::set_var("GAP_CA_KEY", &key_b64);
 
         let result = load_or_generate_ca(&db).await;
@@ -930,7 +930,7 @@ mod tests {
     #[serial]
     fn test_validate_no_bootstrap_not_set() {
         // When GAP_NO_BOOTSTRAP is unset, returns Ok(false) — bootstrap mode.
-        with_clean_env(&["GAP_NO_BOOTSTRAP", "GAP_CA_CERT", "GAP_CA_KEY", "GAP_ENCRYPTION_KEY"], || {
+        with_clean_env(&["GAP_NO_BOOTSTRAP", "GAP_CA_CERT_CHAIN", "GAP_CA_KEY", "GAP_ENCRYPTION_KEY"], || {
             let result = validate_no_bootstrap();
             assert!(result.is_ok());
             assert_eq!(result.unwrap(), false);
@@ -941,7 +941,7 @@ mod tests {
     #[serial]
     fn test_validate_no_bootstrap_false() {
         // When GAP_NO_BOOTSTRAP=false, returns Ok(false) — still bootstrap mode.
-        with_clean_env(&["GAP_NO_BOOTSTRAP", "GAP_CA_CERT", "GAP_CA_KEY", "GAP_ENCRYPTION_KEY"], || {
+        with_clean_env(&["GAP_NO_BOOTSTRAP", "GAP_CA_CERT_CHAIN", "GAP_CA_KEY", "GAP_ENCRYPTION_KEY"], || {
             std::env::set_var("GAP_NO_BOOTSTRAP", "false");
             let result = validate_no_bootstrap();
             assert!(result.is_ok());
@@ -953,15 +953,15 @@ mod tests {
     #[serial]
     fn test_validate_no_bootstrap_missing_ca() {
         // When GAP_NO_BOOTSTRAP=true but CA env vars are absent, returns an error.
-        with_clean_env(&["GAP_NO_BOOTSTRAP", "GAP_CA_CERT", "GAP_CA_KEY", "GAP_ENCRYPTION_KEY"], || {
+        with_clean_env(&["GAP_NO_BOOTSTRAP", "GAP_CA_CERT_CHAIN", "GAP_CA_KEY", "GAP_ENCRYPTION_KEY"], || {
             std::env::set_var("GAP_NO_BOOTSTRAP", "true");
             std::env::set_var("GAP_ENCRYPTION_KEY", "somekey");
-            // GAP_CA_CERT and GAP_CA_KEY deliberately NOT set
+            // GAP_CA_CERT_CHAIN and GAP_CA_KEY deliberately NOT set
             let result = validate_no_bootstrap();
             assert!(result.is_err());
             let msg = result.unwrap_err().to_string();
             assert!(
-                msg.contains("GAP_CA_CERT") && msg.contains("GAP_CA_KEY"),
+                msg.contains("GAP_CA_CERT_CHAIN") && msg.contains("GAP_CA_KEY"),
                 "Error should mention missing CA vars: {}",
                 msg
             );
@@ -972,9 +972,9 @@ mod tests {
     #[serial]
     fn test_validate_no_bootstrap_missing_enc_key() {
         // When GAP_NO_BOOTSTRAP=true with CA vars present but no encryption key, returns an error.
-        with_clean_env(&["GAP_NO_BOOTSTRAP", "GAP_CA_CERT", "GAP_CA_KEY", "GAP_ENCRYPTION_KEY"], || {
+        with_clean_env(&["GAP_NO_BOOTSTRAP", "GAP_CA_CERT_CHAIN", "GAP_CA_KEY", "GAP_ENCRYPTION_KEY"], || {
             std::env::set_var("GAP_NO_BOOTSTRAP", "true");
-            std::env::set_var("GAP_CA_CERT", "cert_placeholder");
+            std::env::set_var("GAP_CA_CERT_CHAIN", "cert_placeholder");
             std::env::set_var("GAP_CA_KEY", "key_placeholder");
             // GAP_ENCRYPTION_KEY deliberately NOT set
             let result = validate_no_bootstrap();
@@ -992,9 +992,9 @@ mod tests {
     #[serial]
     fn test_validate_no_bootstrap_all_present() {
         // When GAP_NO_BOOTSTRAP=true with all required vars set, returns Ok(true).
-        with_clean_env(&["GAP_NO_BOOTSTRAP", "GAP_CA_CERT", "GAP_CA_KEY", "GAP_ENCRYPTION_KEY"], || {
+        with_clean_env(&["GAP_NO_BOOTSTRAP", "GAP_CA_CERT_CHAIN", "GAP_CA_KEY", "GAP_ENCRYPTION_KEY"], || {
             std::env::set_var("GAP_NO_BOOTSTRAP", "true");
-            std::env::set_var("GAP_CA_CERT", "cert_placeholder");
+            std::env::set_var("GAP_CA_CERT_CHAIN", "cert_placeholder");
             std::env::set_var("GAP_CA_KEY", "key_placeholder");
             std::env::set_var("GAP_ENCRYPTION_KEY", "some_key");
             let result = validate_no_bootstrap();
