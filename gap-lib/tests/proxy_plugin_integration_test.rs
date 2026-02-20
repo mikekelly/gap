@@ -109,7 +109,9 @@ async fn test_find_matching_plugin() {
         hosts: vec!["api.exa.ai".to_string()],
         credential_schema: vec!["api_key".to_string()],
         commit_sha: None,
-            dangerously_permit_http: false,
+        dangerously_permit_http: false,
+        weight: 0,
+        installed_at: None,
     };
     db.add_plugin(&entry1, plugin1_code).await.unwrap();
 
@@ -118,7 +120,9 @@ async fn test_find_matching_plugin() {
         hosts: vec!["*.s3.amazonaws.com".to_string()],
         credential_schema: vec!["access_key".to_string(), "secret_key".to_string()],
         commit_sha: None,
-            dangerously_permit_http: false,
+        dangerously_permit_http: false,
+        weight: 0,
+        installed_at: None,
     };
     db.add_plugin(&entry2, plugin2_code).await.unwrap();
 
@@ -160,7 +164,9 @@ async fn test_proxy_plugin_execution_flow() {
         hosts: vec!["api.example.com".to_string()],
         credential_schema: vec!["api_key".to_string()],
         commit_sha: None,
-            dangerously_permit_http: false,
+        dangerously_permit_http: false,
+        weight: 0,
+        installed_at: None,
     };
     db.add_plugin(&plugin_entry, plugin_code).await.unwrap();
 
@@ -226,7 +232,9 @@ async fn test_complete_proxy_transform_pipeline() {
         hosts: vec!["api.test.com".to_string()],
         credential_schema: vec!["secret".to_string()],
         commit_sha: None,
-            dangerously_permit_http: false,
+        dangerously_permit_http: false,
+        weight: 0,
+        installed_at: None,
     };
     db.add_plugin(&plugin_entry, plugin_code).await.unwrap();
 

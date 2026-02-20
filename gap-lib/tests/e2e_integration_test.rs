@@ -245,7 +245,9 @@ async fn test_plugin_installation_flow() {
         hosts: vec!["api.test.com".to_string()],
         credential_schema: vec!["api_key".to_string()],
         commit_sha: None,
-            dangerously_permit_http: false,
+        dangerously_permit_http: false,
+        weight: 0,
+        installed_at: None,
     };
     db.add_plugin(&plugin_entry, plugin_code)
         .await

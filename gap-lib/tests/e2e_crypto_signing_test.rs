@@ -111,6 +111,8 @@ async fn setup_test_db(pkcs8_b64: &str, key_id: &str) -> (Arc<GapDatabase>, Stri
         credential_schema: vec!["private_key".to_string(), "key_id".to_string()],
         commit_sha: None,
         dangerously_permit_http: false,
+        weight: 0,
+        installed_at: None,
     };
     db.add_plugin(&plugin_entry, SIGNING_PLUGIN_CODE)
         .await

@@ -139,6 +139,8 @@ mod tests {
             credential_schema: vec![],
             commit_sha: None,
             dangerously_permit_http: false,
+            weight: 0,
+            installed_at: None,
         };
         db.add_plugin(&entry, plugin_code).await.unwrap();
 
@@ -166,6 +168,8 @@ mod tests {
             credential_schema: vec![],
             commit_sha: None,
             dangerously_permit_http: false,
+            weight: 0,
+            installed_at: None,
         };
         db.add_plugin(&entry, plugin_code).await.unwrap();
 
@@ -193,6 +197,8 @@ mod tests {
             credential_schema: vec![],
             commit_sha: None,
             dangerously_permit_http: false,
+            weight: 0,
+            installed_at: None,
         };
         db.add_plugin(&entry, plugin_code).await.unwrap();
 
@@ -214,6 +220,8 @@ mod tests {
             credential_schema: vec![],
             commit_sha: None,
             dangerously_permit_http: false,
+            weight: 0,
+            installed_at: None,
         };
         // Store INVALID JavaScript for the non-matching plugins
         let invalid_code = "THIS IS NOT VALID JAVASCRIPT!!! { syntax error }";
@@ -225,6 +233,8 @@ mod tests {
             credential_schema: vec![],
             commit_sha: None,
             dangerously_permit_http: false,
+            weight: 0,
+            installed_at: None,
         };
         db.add_plugin(&entry2, invalid_code).await.unwrap();
 
@@ -243,6 +253,8 @@ mod tests {
             credential_schema: vec![],
             commit_sha: None,
             dangerously_permit_http: false,
+            weight: 0,
+            installed_at: None,
         };
         db.add_plugin(&entry3, valid_code).await.unwrap();
 

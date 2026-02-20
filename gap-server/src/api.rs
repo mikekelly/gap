@@ -528,6 +528,8 @@ async fn register_plugin(
         credential_schema: plugin.credential_schema.clone(),
         commit_sha: None,
         dangerously_permit_http: plugin.dangerously_permit_http,
+        weight: 0,
+        installed_at: None,
     };
     state.db.add_plugin(&plugin_entry, &transformed_code).await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to store plugin: {}", e)))?;
@@ -726,6 +728,8 @@ async fn clone_and_validate_plugin(
         credential_schema: plugin.credential_schema.clone(),
         commit_sha: Some(commit_sha.clone()),
         dangerously_permit_http: plugin.dangerously_permit_http,
+        weight: 0,
+        installed_at: None,
     };
     state.db.add_plugin(&plugin_entry, &transformed_code).await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to store plugin: {}", e)))?;

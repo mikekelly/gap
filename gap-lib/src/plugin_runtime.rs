@@ -918,6 +918,7 @@ impl PluginRuntime {
             commit_sha: None,
             source_hash: None,
             dangerously_permit_http: permit_http,
+            weight: 0,
         })
     }
 
@@ -1343,6 +1344,8 @@ mod tests {
             credential_schema: vec!["api_key".to_string()],
             commit_sha: None,
             dangerously_permit_http: false,
+            weight: 0,
+            installed_at: None,
         };
         db.add_plugin(&entry, plugin_code).await.unwrap();
 

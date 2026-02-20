@@ -37,7 +37,9 @@ async fn test_full_plugin_pipeline() {
         hosts: vec!["api.example.com".to_string()],
         credential_schema: vec!["api_key".to_string()],
         commit_sha: None,
-            dangerously_permit_http: false,
+        dangerously_permit_http: false,
+        weight: 0,
+        installed_at: None,
     };
     db.add_plugin(&plugin_entry, &plugin_code).await.unwrap();
 
@@ -116,7 +118,9 @@ async fn test_multiple_plugins() {
         hosts: vec!["service-a.example.com".to_string()],
         credential_schema: vec!["token".to_string()],
         commit_sha: None,
-            dangerously_permit_http: false,
+        dangerously_permit_http: false,
+        weight: 0,
+        installed_at: None,
     };
     db.add_plugin(&entry_a, plugin1_code).await.unwrap();
 
@@ -125,7 +129,9 @@ async fn test_multiple_plugins() {
         hosts: vec!["service-b.example.com".to_string()],
         credential_schema: vec!["api_key".to_string(), "secret".to_string()],
         commit_sha: None,
-            dangerously_permit_http: false,
+        dangerously_permit_http: false,
+        weight: 0,
+        installed_at: None,
     };
     db.add_plugin(&entry_b, plugin2_code).await.unwrap();
 
@@ -194,7 +200,9 @@ async fn test_plugin_with_multiple_credentials() {
             "region".to_string(),
         ],
         commit_sha: None,
-            dangerously_permit_http: false,
+        dangerously_permit_http: false,
+        weight: 0,
+        installed_at: None,
     };
     db.add_plugin(&plugin_entry, plugin_code).await.unwrap();
 

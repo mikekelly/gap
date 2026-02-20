@@ -1262,6 +1262,8 @@ mod tests {
             credential_schema: vec!["api_key".to_string()],
             commit_sha: None,
             dangerously_permit_http: false,
+            weight: 0,
+            installed_at: None,
         };
         db.add_plugin(&plugin_entry, plugin_code).await.unwrap();
         db.set_credential("test-hyper", "api_key", "my-secret-key").await.unwrap();
@@ -1414,6 +1416,8 @@ mod tests {
             credential_schema: vec!["api_key".to_string()],
             commit_sha: None,
             dangerously_permit_http: true,
+            weight: 0,
+            installed_at: None,
         };
         db.add_plugin(&plugin_entry, plugin_code).await.unwrap();
         db.set_credential("test-http", "api_key", "http-secret").await.unwrap();
@@ -1527,6 +1531,8 @@ mod tests {
             credential_schema: vec!["api_key".to_string()],
             commit_sha: None,
             dangerously_permit_http: false,
+            weight: 0,
+            installed_at: None,
         };
         db.add_plugin(&plugin_entry, plugin_code).await.unwrap();
         db.set_credential("test-details", "api_key", "secret-key-456").await.unwrap();

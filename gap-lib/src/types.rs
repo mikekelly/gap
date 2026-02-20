@@ -115,6 +115,9 @@ pub struct GAPPlugin {
     /// to prevent credentials from being sent in cleartext.
     #[serde(default)]
     pub dangerously_permit_http: bool,
+    /// Ordering weight for plugin/header-set priority (higher weight = higher priority).
+    #[serde(default)]
+    pub weight: i32,
 }
 
 impl GAPPlugin {
@@ -133,6 +136,7 @@ impl GAPPlugin {
             commit_sha: None,
             source_hash: None,
             dangerously_permit_http: false,
+            weight: 0,
         }
     }
 
@@ -401,6 +405,12 @@ pub struct PluginEntry {
     /// Whether the plugin explicitly permits credential injection over plain HTTP.
     #[serde(default)]
     pub dangerously_permit_http: bool,
+    /// Ordering weight for plugin/header-set priority (higher weight = higher priority).
+    #[serde(default)]
+    pub weight: i32,
+    /// Timestamp when the plugin was installed (populated from DB reads, None on construction for insertion).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub installed_at: Option<DateTime<Utc>>,
 }
 
 /// Credential metadata entry (plugin + field name, no value)
@@ -408,6 +418,18 @@ pub struct PluginEntry {
 pub struct CredentialEntry {
     pub plugin: String,
     pub field: String,
+}
+
+/// A named set of static headers to inject into matching requests.
+///
+/// HeaderSets provide credential injection without JavaScript plugins —
+/// useful for simple API-key-in-header patterns.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct HeaderSet {
+    pub name: String,
+    pub match_patterns: Vec<String>,
+    pub weight: i32,
+    pub created_at: DateTime<Utc>,
 }
 
 /// Append-only record of every plugin version ever installed
