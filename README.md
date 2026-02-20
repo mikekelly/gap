@@ -291,6 +291,96 @@ export default {
 };
 ```
 
+### Plugin Crypto APIs
+
+The plugin runtime exposes cryptographic helpers under `GAP.crypto` and a base64 utility under `GAP.util`.
+
+#### `GAP.util.base64(input, decode?)`
+
+Encode or decode base64. Pass a string or `Uint8Array` to encode; pass `true` as the second argument to decode a base64 string to a `Uint8Array`.
+
+```javascript
+var encoded = GAP.util.base64("hello");          // "aGVsbG8="
+var decoded = GAP.util.base64("aGVsbG8=", true); // Uint8Array
+```
+
+#### `GAP.crypto.sign(algorithm, keyDer, data)`
+
+Sign a message. `keyDer` must be a `Uint8Array` containing a PKCS#8 DER-encoded private key. Returns the raw signature bytes as a `Uint8Array`.
+
+Supported algorithms: `"ed25519"`, `"ecdsa-p256"`, `"rsa-pss-sha256"`, `"rsa-pkcs1-sha256"`.
+
+```javascript
+var keyDer = GAP.util.base64(credentials.privateKey, true); // decode from base64
+var sig = GAP.crypto.sign("ed25519", keyDer, "message to sign");
+```
+
+#### `GAP.crypto.verify(algorithm, publicKeyDer, signature, data)`
+
+Verify a signature. `publicKeyDer` is a `Uint8Array` of the DER-encoded public key; `signature` is the raw signature bytes as a `Uint8Array`. Returns `true` if the signature is valid, `false` otherwise (never throws on a bad signature).
+
+```javascript
+var valid = GAP.crypto.verify("ed25519", publicKeyDer, sig, "message to sign");
+```
+
+#### `GAP.crypto.httpSignature(options)`
+
+Signs an HTTP request following [RFC 9421 HTTP Message Signatures](https://www.rfc-editor.org/rfc/rfc9421). Returns an object with two header values ready to attach to the request:
+
+- `signatureInput` — the value for the `Signature-Input` header
+- `signature` — the value for the `Signature` header
+
+Options:
+
+| Field | Required | Description |
+|---|---|---|
+| `request` | yes | The `request` object passed to `transform` |
+| `components` | yes | Array of components to sign, e.g. `["@method", "content-type"]`. Derived components: `@method`, `@target-uri`, `@authority`, `@path`, `@query`. Any other string is treated as a header name. |
+| `algorithm` | yes | Signing algorithm: `"ed25519"`, `"ecdsa-p256"`, `"rsa-pss-sha256"`, or `"rsa-pkcs1-sha256"` |
+| `keyId` | yes | Key identifier included in `Signature-Input` for the verifier |
+| `keyDer` | yes | `Uint8Array` of PKCS#8 DER-encoded private key |
+| `label` | no | Signature label (default: `"sig1"`) |
+| `created` | no | Unix timestamp in seconds (default: current time) |
+
+Here is a complete plugin that signs every outgoing request with an Ed25519 key stored as a base64 credential:
+
+```javascript
+export default {
+  name: "my-signed-api",
+  match: ["api.example.com"],
+
+  credentialSchema: {
+    fields: [
+      { name: "privateKey", label: "Private Key (base64 PKCS#8 DER)", type: "password", required: true },
+      { name: "keyId",      label: "Key ID",                           type: "text",     required: true }
+    ]
+  },
+
+  transform(request, credentials) {
+    var keyDer = GAP.util.base64(credentials.privateKey, true);
+
+    var result = GAP.crypto.httpSignature({
+      request:    request,
+      components: ["@method", "@path", "content-type"],
+      algorithm:  "ed25519",
+      keyId:      credentials.keyId,
+      keyDer:     keyDer
+    });
+
+    request.headers["Signature-Input"] = result.signatureInput;
+    request.headers["Signature"]       = result.signature;
+    return request;
+  }
+};
+```
+
+The private key must be PKCS#8 DER format, base64-encoded. Generate one with OpenSSL:
+
+```bash
+# Generate an Ed25519 key and export as base64-encoded PKCS#8 DER
+openssl genpkey -algorithm ed25519 -outform DER | base64
+```
+
 ## Common Questions
 
 **Q: Can a malicious agent steal my credentials?**
