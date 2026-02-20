@@ -8,8 +8,10 @@
 //! - Configuration
 
 use chrono::{DateTime, Utc};
-use serde::{Deserialize, Serialize};
+use serde::de::{self, MapAccess, Visitor};
+use serde::{Deserialize, Deserializer, Serialize};
 use std::collections::HashMap;
+use std::fmt;
 
 /// HTTP request representation for proxying
 ///
@@ -164,39 +166,145 @@ impl GAPPlugin {
     }
 }
 
+/// A scope restriction for a token — defines what hosts/paths/methods are permitted.
+///
+/// Deserializes from two JSON forms:
+/// - String: `"example.com"`, `"example.com:8080"`, `"example.com/v1/*"`, `"*.example.com/api/*"`
+/// - Object: `{"match": "example.com/v1/*", "methods": ["GET", "POST"]}`
+#[derive(Debug, Clone, Serialize, PartialEq)]
+pub struct TokenScope {
+    pub host_pattern: String,
+    pub port: Option<u16>,
+    pub path_pattern: String,
+    pub methods: Option<Vec<String>>,
+}
+
+/// Parse a scope string like "host[:port][/path]" into its components.
+fn parse_scope_string(s: &str) -> Result<(String, Option<u16>, String), String> {
+    let (host_part, path_pattern) = if let Some(slash_pos) = s.find('/') {
+        let host_part = &s[..slash_pos];
+        let path_part = &s[slash_pos..]; // includes the leading /
+        (host_part, path_part.to_string())
+    } else {
+        (s, "/*".to_string())
+    };
+
+    // Parse host:port — split at last ':' but only if host doesn't start with '['
+    // (basic IPv6 guard) and the part after ':' is a valid u16.
+    let (host_pattern, port) = if let Some(colon_pos) = host_part.rfind(':') {
+        let potential_port = &host_part[colon_pos + 1..];
+        if let Ok(p) = potential_port.parse::<u16>() {
+            (host_part[..colon_pos].to_string(), Some(p))
+        } else {
+            (host_part.to_string(), None)
+        }
+    } else {
+        (host_part.to_string(), None)
+    };
+
+    Ok((host_pattern, port, path_pattern))
+}
+
+impl<'de> Deserialize<'de> for TokenScope {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        struct TokenScopeVisitor;
+
+        impl<'de> Visitor<'de> for TokenScopeVisitor {
+            type Value = TokenScope;
+
+            fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
+                formatter.write_str(
+                    "a scope string like \"example.com/path\" or an object with \"match\" field",
+                )
+            }
+
+            fn visit_str<E>(self, value: &str) -> Result<TokenScope, E>
+            where
+                E: de::Error,
+            {
+                let (host_pattern, port, path_pattern) =
+                    parse_scope_string(value).map_err(de::Error::custom)?;
+                Ok(TokenScope {
+                    host_pattern,
+                    port,
+                    path_pattern,
+                    methods: None,
+                })
+            }
+
+            fn visit_map<M>(self, mut map: M) -> Result<TokenScope, M::Error>
+            where
+                M: MapAccess<'de>,
+            {
+                let mut match_str: Option<String> = None;
+                let mut methods: Option<Vec<String>> = None;
+
+                while let Some(key) = map.next_key::<String>()? {
+                    match key.as_str() {
+                        "match" => {
+                            match_str = Some(map.next_value()?);
+                        }
+                        "methods" => {
+                            methods = Some(map.next_value()?);
+                        }
+                        _ => {
+                            // Skip unknown fields
+                            let _ = map.next_value::<serde::de::IgnoredAny>()?;
+                        }
+                    }
+                }
+
+                let match_val =
+                    match_str.ok_or_else(|| de::Error::missing_field("match"))?;
+                let (host_pattern, port, path_pattern) =
+                    parse_scope_string(&match_val).map_err(de::Error::custom)?;
+
+                Ok(TokenScope {
+                    host_pattern,
+                    port,
+                    path_pattern,
+                    methods,
+                })
+            }
+        }
+
+        deserializer.deserialize_any(TokenScopeVisitor)
+    }
+}
+
+/// Lightweight token info carried through the proxy pipeline after authentication.
+#[derive(Debug, Clone)]
+pub struct ValidatedToken {
+    pub prefix: String,
+    pub scopes: Option<Vec<TokenScope>>,
+}
+
 /// Agent authentication token
 ///
 /// Represents a bearer token used by an agent to authenticate proxy requests.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct AgentToken {
-    /// Unique token ID
-    pub id: String,
-    /// Human-readable name for the agent
-    pub name: String,
-    /// Token prefix (first 8 chars) for display
+    /// Token prefix (first 12 chars) for display/identification
     pub prefix: String,
-    /// Full token value (stored securely)
+    /// Full token value
     pub token: String,
     /// Creation timestamp
     pub created_at: DateTime<Utc>,
 }
 
 impl AgentToken {
-    /// Create a new token with generated ID and value
-    pub fn new(name: impl Into<String>) -> Self {
-        use std::time::{SystemTime, UNIX_EPOCH};
-
-        // Generate a simple token (in production, use crypto-random)
-        let timestamp = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_millis();
-        let token = format!("gap_{:x}", timestamp);
-        let prefix = token.chars().take(8).collect();
+    /// Create a new token with a cryptographically random value
+    pub fn new() -> Self {
+        use rand::Rng;
+        let mut rng = rand::thread_rng();
+        let random_bytes: [u8; 16] = rng.gen();
+        let token = format!("gap_{}", hex::encode(random_bytes));
+        let prefix = token[..12].to_string();
 
         Self {
-            id: uuid_v4(),
-            name: name.into(),
             prefix,
             token,
             created_at: Utc::now(),
@@ -261,23 +369,6 @@ impl Config {
         self.data_dir = Some(dir.into());
         self
     }
-}
-
-// Simple UUID v4 generator (for testing; in production use uuid crate)
-fn uuid_v4() -> String {
-    use std::time::{SystemTime, UNIX_EPOCH};
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap()
-        .as_nanos();
-    format!(
-        "{:08x}-{:04x}-4{:03x}-{:04x}-{:012x}",
-        (nanos >> 96) as u32,
-        ((nanos >> 80) & 0xffff) as u16,
-        ((nanos >> 64) & 0xfff) as u16,
-        ((nanos >> 48) & 0xffff) as u16,
-        (nanos & 0xffffffffffff) as u64,
-    )
 }
 
 /// Activity log entry for proxy request tracking
@@ -381,16 +472,18 @@ pub struct ManagementLogFilter {
 /// Token metadata (without the token value, which is used as the hash key)
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct TokenMetadata {
-    pub name: String,
     pub created_at: DateTime<Utc>,
+    pub scopes: Option<Vec<TokenScope>>,
+    pub revoked_at: Option<DateTime<Utc>>,
 }
 
 /// Token entry returned by list operations (includes the token value)
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct TokenEntry {
     pub token_value: String,
-    pub name: String,
     pub created_at: DateTime<Utc>,
+    pub scopes: Option<Vec<TokenScope>>,
+    pub revoked_at: Option<DateTime<Utc>>,
 }
 
 /// Plugin metadata entry (name, hosts, credential schema, optional commit SHA)
@@ -559,17 +652,17 @@ mod tests {
 
     #[test]
     fn test_agent_token_creation() {
-        let token = AgentToken::new("Test Agent");
+        let token = AgentToken::new();
 
-        assert!(!token.id.is_empty());
-        assert_eq!(token.name, "Test Agent");
-        assert_eq!(token.prefix.len(), 8);
+        assert_eq!(token.prefix.len(), 12);
         assert!(token.token.starts_with("gap_"));
+        // gap_ (4 chars) + 32 hex chars = 36 total
+        assert_eq!(token.token.len(), 36);
     }
 
     #[test]
     fn test_agent_token_verification() {
-        let token = AgentToken::new("Test Agent");
+        let token = AgentToken::new();
         let token_value = token.token.clone();
 
         assert!(token.verify(&token_value));
@@ -578,14 +671,100 @@ mod tests {
 
     #[test]
     fn test_agent_token_serialization() {
-        let token = AgentToken::new("Test Agent");
+        let token = AgentToken::new();
         let json = serde_json::to_string(&token).unwrap();
 
         // Token should be in serialized output (needed for storage)
         assert!(json.contains(&token.token));
-        // Other fields should be present too
-        assert!(json.contains(&token.name));
         assert!(json.contains(&token.prefix));
+    }
+
+    // --- TokenScope deserialization tests ---
+
+    #[test]
+    fn test_token_scope_deserialize_host_only() {
+        let scope: TokenScope = serde_json::from_str(r#""example.com""#).unwrap();
+        assert_eq!(scope.host_pattern, "example.com");
+        assert_eq!(scope.port, None);
+        assert_eq!(scope.path_pattern, "/*");
+        assert_eq!(scope.methods, None);
+    }
+
+    #[test]
+    fn test_token_scope_deserialize_host_and_port() {
+        let scope: TokenScope = serde_json::from_str(r#""example.com:8080""#).unwrap();
+        assert_eq!(scope.host_pattern, "example.com");
+        assert_eq!(scope.port, Some(8080));
+        assert_eq!(scope.path_pattern, "/*");
+        assert_eq!(scope.methods, None);
+    }
+
+    #[test]
+    fn test_token_scope_deserialize_host_and_path() {
+        let scope: TokenScope = serde_json::from_str(r#""example.com/v1/*""#).unwrap();
+        assert_eq!(scope.host_pattern, "example.com");
+        assert_eq!(scope.port, None);
+        assert_eq!(scope.path_pattern, "/v1/*");
+        assert_eq!(scope.methods, None);
+    }
+
+    #[test]
+    fn test_token_scope_deserialize_host_port_and_path() {
+        let scope: TokenScope = serde_json::from_str(r#""example.com:443/api/v2/*""#).unwrap();
+        assert_eq!(scope.host_pattern, "example.com");
+        assert_eq!(scope.port, Some(443));
+        assert_eq!(scope.path_pattern, "/api/v2/*");
+        assert_eq!(scope.methods, None);
+    }
+
+    #[test]
+    fn test_token_scope_deserialize_wildcard_host() {
+        let scope: TokenScope = serde_json::from_str(r#""*.example.com""#).unwrap();
+        assert_eq!(scope.host_pattern, "*.example.com");
+        assert_eq!(scope.port, None);
+        assert_eq!(scope.path_pattern, "/*");
+        assert_eq!(scope.methods, None);
+    }
+
+    #[test]
+    fn test_token_scope_deserialize_object_with_methods() {
+        let scope: TokenScope = serde_json::from_str(
+            r#"{"match": "example.com/v1/*", "methods": ["GET", "POST"]}"#,
+        )
+        .unwrap();
+        assert_eq!(scope.host_pattern, "example.com");
+        assert_eq!(scope.port, None);
+        assert_eq!(scope.path_pattern, "/v1/*");
+        assert_eq!(scope.methods, Some(vec!["GET".to_string(), "POST".to_string()]));
+    }
+
+    #[test]
+    fn test_token_scope_deserialize_object_without_methods() {
+        let scope: TokenScope =
+            serde_json::from_str(r#"{"match": "example.com"}"#).unwrap();
+        assert_eq!(scope.host_pattern, "example.com");
+        assert_eq!(scope.port, None);
+        assert_eq!(scope.path_pattern, "/*");
+        assert_eq!(scope.methods, None);
+    }
+
+    #[test]
+    fn test_token_scope_deserialize_mixed_array() {
+        let scopes: Vec<TokenScope> = serde_json::from_str(
+            r#"["example.com", {"match": "api.test.com/v1/*", "methods": ["GET"]}]"#,
+        )
+        .unwrap();
+        assert_eq!(scopes.len(), 2);
+
+        assert_eq!(scopes[0].host_pattern, "example.com");
+        assert_eq!(scopes[0].port, None);
+        assert_eq!(scopes[0].path_pattern, "/*");
+        assert_eq!(scopes[0].methods, None);
+
+        assert_eq!(scopes[1].host_pattern, "api.test.com");
+        assert_eq!(scopes[1].port, None);
+        assert_eq!(scopes[1].path_pattern, "/v1/*");
+        assert_eq!(scopes[1].methods, Some(vec!["GET".to_string()]));
     }
 
     #[test]
