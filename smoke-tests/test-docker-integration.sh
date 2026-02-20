@@ -99,12 +99,10 @@ echo ""
 echo "Test 5: Create agent token"
 echo "=========================="
 
-TOKEN_RESPONSE=$(curl -ks -X POST "$GAP_SERVER_URL/tokens/create" \
+TOKEN_RESPONSE=$(curl -ks -X POST "$GAP_SERVER_URL/tokens" \
     -H "Content-Type: application/json" \
     -H "Authorization: Bearer $PW_HASH" \
-    -d "{
-        \"name\": \"test-agent-$(date +%s)\"
-    }")
+    -d "{}")
 
 if echo "$TOKEN_RESPONSE" | grep -q '"token"'; then
     AGENT_TOKEN=$(echo "$TOKEN_RESPONSE" | jq -r '.token')
@@ -570,10 +568,10 @@ echo "Test 19: Delete token"
 echo "====================="
 
 if [ -n "$AGENT_TOKEN" ]; then
-    # Extract token ID from TOKEN_RESPONSE
-    TOKEN_ID=$(echo "$TOKEN_RESPONSE" | jq -r '.id')
+    # Extract token prefix from TOKEN_RESPONSE (prefix is the identifier in the new API)
+    TOKEN_PREFIX=$(echo "$TOKEN_RESPONSE" | jq -r '.prefix')
 
-    DELETE_STATUS=$(curl -ks -o /dev/null -w "%{http_code}" -X DELETE "$GAP_SERVER_URL/tokens/$TOKEN_ID" \
+    DELETE_STATUS=$(curl -ks -o /dev/null -w "%{http_code}" -X DELETE "$GAP_SERVER_URL/tokens/$TOKEN_PREFIX" \
         -H "Authorization: Bearer $PW_HASH")
 
     if [ "$DELETE_STATUS" = "200" ]; then
