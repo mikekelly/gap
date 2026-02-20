@@ -24,6 +24,7 @@ services:
     environment:
       - RUST_LOG=gap_server=info,gap_lib=info
       - GAP_ENCRYPTION_KEY=${GAP_ENCRYPTION_KEY}
+      - GAP_NO_BOOTSTRAP=false
     restart: unless-stopped
     networks:
       - gap-network
@@ -103,6 +104,67 @@ services:
       - gap-network
     restart: unless-stopped
 
+  # GAP server in no-bootstrap mode (injected CA and encryption key)
+  gap-server-nobootstrap:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: gap-server-nobootstrap
+    ports:
+      - "9543:9443"
+      - "9180:9080"
+    volumes:
+      - gap-data-nobootstrap:/var/lib/gap
+    environment:
+      - RUST_LOG=gap_server=info,gap_lib=info
+      - GAP_NO_BOOTSTRAP=true
+      - GAP_CA_CERT=${GAP_CA_CERT}
+      - GAP_CA_KEY=${GAP_CA_KEY}
+      - GAP_ENCRYPTION_KEY=${GAP_ENCRYPTION_KEY_NOBOOTSTRAP}
+    restart: unless-stopped
+    networks:
+      - gap-network
+    profiles:
+      - nobootstrap
+
+  # Test runner for no-bootstrap mode
+  test-runner-nobootstrap:
+    build:
+      context: .
+      dockerfile: Dockerfile.test-runner
+    container_name: gap-test-runner-nobootstrap
+    depends_on:
+      gap-server-nobootstrap:
+        condition: service_healthy
+      mock-api:
+        condition: service_started
+    volumes:
+      - ./smoke-tests/test-docker-integration.sh:/tests/test-docker-integration.sh:ro
+      - gap-data-nobootstrap:/var/lib/gap:ro
+    environment:
+      - GAP_SERVER_URL=https://gap-server-nobootstrap:9080
+    networks:
+      - gap-network
+    profiles:
+      - test-nobootstrap
+
+  # Test: no-bootstrap mode with missing env vars should fail
+  gap-server-nobootstrap-fail:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: gap-server-nobootstrap-fail
+    volumes:
+      - gap-data-nobootstrap-fail:/var/lib/gap
+    environment:
+      - RUST_LOG=gap_server=info,gap_lib=info
+      # GAP_NO_BOOTSTRAP defaults to true from Dockerfile
+      # Deliberately NOT setting GAP_CA_CERT, GAP_CA_KEY, GAP_ENCRYPTION_KEY
+    networks:
+      - gap-network
+    profiles:
+      - test-nobootstrap-fail
+
   # Example: Agent using HTTPS proxy
   # Uncomment and customize for your agent
   # example-agent:
@@ -126,6 +188,10 @@ volumes:
   # Persistent storage for GAP data
   # Contains: secrets, plugins, tokens, CA key
   gap-data:
+    driver: local
+  gap-data-nobootstrap:
+    driver: local
+  gap-data-nobootstrap-fail:
     driver: local
 
 networks:
