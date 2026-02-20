@@ -2,7 +2,7 @@ package gap
 
 import (
 	"context"
-	"fmt"
+	"net/url"
 )
 
 // ListPlugins returns all installed plugins.
@@ -50,7 +50,7 @@ func (c *Client) RegisterPlugin(ctx context.Context, req *RegisterPluginRequest)
 // UninstallPlugin removes a plugin.
 // DELETE /plugins/:name
 func (c *Client) UninstallPlugin(ctx context.Context, name string) (*UninstallResponse, error) {
-	path := fmt.Sprintf("/plugins/%s", name)
+	path := "/plugins/" + url.PathEscape(name)
 	resp, err := c.doDelete(ctx, path)
 	if err != nil {
 		return nil, err
@@ -65,7 +65,7 @@ func (c *Client) UninstallPlugin(ctx context.Context, name string) (*UninstallRe
 // UpdatePlugin triggers a GitHub-based plugin update.
 // POST /plugins/:name/update
 func (c *Client) UpdatePlugin(ctx context.Context, name string) (*UpdateResponse, error) {
-	path := fmt.Sprintf("/plugins/%s/update", name)
+	path := "/plugins/" + url.PathEscape(name) + "/update"
 	resp, err := c.doPost(ctx, path, nil)
 	if err != nil {
 		return nil, err
@@ -80,7 +80,7 @@ func (c *Client) UpdatePlugin(ctx context.Context, name string) (*UpdateResponse
 // UpdatePluginConfig updates a plugin's weight.
 // PATCH /plugins/:name
 func (c *Client) UpdatePluginConfig(ctx context.Context, name string, req *UpdatePluginRequest) (*UpdatePluginResponse, error) {
-	path := fmt.Sprintf("/plugins/%s", name)
+	path := "/plugins/" + url.PathEscape(name)
 	resp, err := c.doPatch(ctx, path, req)
 	if err != nil {
 		return nil, err

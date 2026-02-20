@@ -31,10 +31,12 @@ type EventStream[T any] struct {
 
 // newEventStream wraps an SSE HTTP response in an EventStream.
 func newEventStream[T any](resp *http.Response) *EventStream[T] {
-	return &EventStream[T]{
+	s := &EventStream[T]{
 		resp:    resp,
 		scanner: bufio.NewScanner(resp.Body),
 	}
+	s.scanner.Buffer(make([]byte, 64*1024), 1024*1024)
+	return s
 }
 
 // Next blocks until the next complete SSE event is received, then deserializes

@@ -2,13 +2,13 @@ package gap
 
 import (
 	"context"
-	"fmt"
+	"net/url"
 )
 
 // SetCredential sets a credential value for a plugin.
 // POST /credentials/:plugin/:key
 func (c *Client) SetCredential(ctx context.Context, plugin, key string, req *SetCredentialRequest) (*SetCredentialResponse, error) {
-	path := fmt.Sprintf("/credentials/%s/%s", plugin, key)
+	path := "/credentials/" + url.PathEscape(plugin) + "/" + url.PathEscape(key)
 	resp, err := c.doPost(ctx, path, req)
 	if err != nil {
 		return nil, err
@@ -23,7 +23,7 @@ func (c *Client) SetCredential(ctx context.Context, plugin, key string, req *Set
 // DeleteCredential removes a credential for a plugin.
 // DELETE /credentials/:plugin/:key — returns 200 with no body
 func (c *Client) DeleteCredential(ctx context.Context, plugin, key string) error {
-	path := fmt.Sprintf("/credentials/%s/%s", plugin, key)
+	path := "/credentials/" + url.PathEscape(plugin) + "/" + url.PathEscape(key)
 	resp, err := c.doDelete(ctx, path)
 	if err != nil {
 		return err
