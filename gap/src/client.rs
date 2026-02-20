@@ -218,10 +218,11 @@ pub struct SetCredentialResponse {
 
 #[derive(Debug, Deserialize)]
 pub struct TokenInfo {
-    pub id: String,
-    pub name: String,
     pub prefix: String,
     pub created_at: String,
+    #[serde(default)]
+    pub permitted: Option<Vec<serde_json::Value>>,
+    pub revoked_at: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -230,15 +231,18 @@ pub struct TokensResponse {
 }
 
 #[derive(Debug, Deserialize)]
+#[allow(dead_code)]
 pub struct CreateTokenResponse {
-    pub id: String,
-    pub name: String,
+    pub prefix: String,
     pub token: String,
+    pub created_at: String,
+    #[serde(default)]
+    pub permitted: Option<Vec<serde_json::Value>>,
 }
 
 #[derive(Debug, Deserialize)]
 pub struct RevokeTokenResponse {
-    pub id: String,
+    pub prefix: String,
     pub revoked: bool,
 }
 

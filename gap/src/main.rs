@@ -107,18 +107,26 @@ enum Commands {
 #[derive(Subcommand)]
 enum TokenCommands {
     /// List all tokens
-    List,
+    List {
+        /// Include revoked tokens
+        #[arg(long)]
+        all: bool,
+    },
 
     /// Create a new token
     Create {
-        /// Token name
-        name: String,
+        /// JSON scope restrictions (inline string)
+        scopes: Option<String>,
+
+        /// Read scope restrictions from file
+        #[arg(short, long)]
+        file: Option<String>,
     },
 
     /// Revoke a token
     Revoke {
-        /// Token ID
-        id: String,
+        /// Token prefix
+        prefix: String,
     },
 }
 
@@ -170,9 +178,9 @@ async fn main() {
         Commands::Update { name } => commands::plugins::update(&cli.server, &name).await,
         Commands::Set { key } => commands::credentials::set(&cli.server, &key).await,
         Commands::Token(token_cmd) => match token_cmd {
-            TokenCommands::List => commands::tokens::list(&cli.server).await,
-            TokenCommands::Create { name } => commands::tokens::create(&cli.server, &name).await,
-            TokenCommands::Revoke { id } => commands::tokens::revoke(&cli.server, &id).await,
+            TokenCommands::List { all } => commands::tokens::list(&cli.server, all).await,
+            TokenCommands::Create { scopes, file } => commands::tokens::create(&cli.server, scopes, file).await,
+            TokenCommands::Revoke { prefix } => commands::tokens::revoke(&cli.server, &prefix).await,
         },
         Commands::Activity { follow } => commands::activity::run(&cli.server, follow).await,
         Commands::ManagementLog { follow, operation, resource_type, resource_id, limit } =>
@@ -250,26 +258,68 @@ mod tests {
 
     #[test]
     fn test_cli_token_list_parses() {
-        let _cli = Cli::parse_from(["gap", "token", "list"]);
+        let cli = Cli::parse_from(["gap", "token", "list"]);
+        match cli.command {
+            Commands::Token(TokenCommands::List { all }) => {
+                assert!(!all);
+            }
+            _ => panic!("Expected Token List command"),
+        }
     }
 
     #[test]
-    fn test_cli_token_create_parses() {
-        let cli = Cli::parse_from(["gap", "token", "create", "test-token"]);
+    fn test_cli_token_list_all_parses() {
+        let cli = Cli::parse_from(["gap", "token", "list", "--all"]);
         match cli.command {
-            Commands::Token(TokenCommands::Create { name }) => {
-                assert_eq!(name, "test-token");
+            Commands::Token(TokenCommands::List { all }) => {
+                assert!(all);
+            }
+            _ => panic!("Expected Token List --all command"),
+        }
+    }
+
+    #[test]
+    fn test_cli_token_create_no_scopes_parses() {
+        let cli = Cli::parse_from(["gap", "token", "create"]);
+        match cli.command {
+            Commands::Token(TokenCommands::Create { scopes, file }) => {
+                assert!(scopes.is_none());
+                assert!(file.is_none());
             }
             _ => panic!("Expected Token Create command"),
         }
     }
 
     #[test]
-    fn test_cli_token_revoke_parses() {
-        let cli = Cli::parse_from(["gap", "token", "revoke", "abc123"]);
+    fn test_cli_token_create_with_scopes_parses() {
+        let cli = Cli::parse_from(["gap", "token", "create", r#"[{"host":"api.example.com"}]"#]);
         match cli.command {
-            Commands::Token(TokenCommands::Revoke { id }) => {
-                assert_eq!(id, "abc123");
+            Commands::Token(TokenCommands::Create { scopes, file }) => {
+                assert_eq!(scopes.as_deref(), Some(r#"[{"host":"api.example.com"}]"#));
+                assert!(file.is_none());
+            }
+            _ => panic!("Expected Token Create command"),
+        }
+    }
+
+    #[test]
+    fn test_cli_token_create_with_file_parses() {
+        let cli = Cli::parse_from(["gap", "token", "create", "--file", "/tmp/scopes.json"]);
+        match cli.command {
+            Commands::Token(TokenCommands::Create { scopes, file }) => {
+                assert!(scopes.is_none());
+                assert_eq!(file.as_deref(), Some("/tmp/scopes.json"));
+            }
+            _ => panic!("Expected Token Create --file command"),
+        }
+    }
+
+    #[test]
+    fn test_cli_token_revoke_parses() {
+        let cli = Cli::parse_from(["gap", "token", "revoke", "gap_19bfb04e"]);
+        match cli.command {
+            Commands::Token(TokenCommands::Revoke { prefix }) => {
+                assert_eq!(prefix, "gap_19bfb04e");
             }
             _ => panic!("Expected Token Revoke command"),
         }
