@@ -17,7 +17,7 @@ openssl req -new -x509 -key "$FIXTURES_DIR/test-ca.key" -out "$FIXTURES_DIR/test
 
 # Convert to DER and base64 encode for env vars
 openssl x509 -in "$FIXTURES_DIR/test-ca.crt" -outform DER | base64 | tr -d '\n' > "$FIXTURES_DIR/test-ca-cert.b64"
-openssl ec -in "$FIXTURES_DIR/test-ca.key" -outform DER 2>/dev/null | base64 | tr -d '\n' > "$FIXTURES_DIR/test-ca-key.b64"
+openssl pkcs8 -topk8 -nocrypt -in "$FIXTURES_DIR/test-ca.key" -outform DER | base64 | tr -d '\n' > "$FIXTURES_DIR/test-ca-key.b64"
 
 # Also generate a random encryption key (32 bytes hex-encoded, matching GAP_ENCRYPTION_KEY format)
 openssl rand -hex 32 > "$FIXTURES_DIR/test-encryption.key"

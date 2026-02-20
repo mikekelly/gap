@@ -20,7 +20,21 @@ export GAP_ENCRYPTION_KEY_NOBOOTSTRAP="$(cat "$FIXTURES_DIR/test-encryption.key"
 echo "=== Testing no-bootstrap mode (should succeed) ==="
 cd "$PROJECT_DIR"
 docker compose --profile nobootstrap --profile test-nobootstrap up --build --abort-on-container-exit --exit-code-from test-runner-nobootstrap
+TEST_EXIT=$?
 
+if [ $TEST_EXIT -ne 0 ]; then
+    echo "FAIL: No-bootstrap mode tests failed with exit code $TEST_EXIT"
+    exit 1
+fi
+
+# Verify the test runner actually ran (not just silently skipped)
+RUNNER_EXIT=$(docker inspect gap-test-runner-nobootstrap --format='{{.State.ExitCode}}' 2>/dev/null || echo "missing")
+if [ "$RUNNER_EXIT" != "0" ]; then
+    echo "FAIL: Test runner did not complete successfully (exit code: $RUNNER_EXIT)"
+    exit 1
+fi
+
+echo "PASS: No-bootstrap mode tests passed"
 echo ""
 echo "=== Testing no-bootstrap mode with missing vars (should fail) ==="
 # The fail service has GAP_NO_BOOTSTRAP=true (Dockerfile default) but no env vars
