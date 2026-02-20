@@ -78,11 +78,15 @@ services:
     depends_on:
       gap-server:
         condition: service_healthy
+      mock-api:
+        condition: service_started
     volumes:
       - gap-data:/var/lib/gap:ro
     environment:
       - GAP_SERVER_URL=https://gap-server:9080
       - GAP_CA_CERT=/var/lib/gap/ca.crt
+      - GAP_MOCK_API_URL=http://mock-api:8080
+      - GAP_PROXY_URL=https://gap-server:9443
     networks:
       - gap-network
     profiles:
