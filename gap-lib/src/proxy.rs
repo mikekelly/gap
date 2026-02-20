@@ -456,13 +456,13 @@ where
         .sign_for_hostname(hostname, None)
         .map_err(|e| GapError::tls(format!("Failed to sign certificate: {}", e)))?;
 
-    // Convert DER bytes to rustls types
-    // For a self-signed CA, we need to include the CA cert in the chain
-    // so the client can verify the signature
-    let certs = vec![
-        CertificateDer::from(cert_der),
-        CertificateDer::from(ca.ca_cert_der()),
-    ];
+    // Build cert chain: leaf + any intermediate chain certs.
+    // For intermediate CAs, chain_certs_der() provides the signing cert
+    // and additional intermediates. For root CAs, it's empty.
+    let mut certs = vec![CertificateDer::from(cert_der)];
+    for chain_cert in ca.chain_certs_der() {
+        certs.push(CertificateDer::from(chain_cert.clone()));
+    }
 
     // Parse private key from DER
     let key_der = rustls::pki_types::PrivateKeyDer::try_from(key_der)

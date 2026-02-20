@@ -18,6 +18,10 @@ pub struct CertificateAuthority {
     ca_cert_pem: String,
     /// The CA key PEM (for export)
     ca_key_pem: String,
+    /// DER-encoded certificates to include in TLS chains after the leaf cert.
+    /// Empty for root CAs (self-signed). For intermediate CAs, contains the
+    /// signing cert and any additional intermediates (but NOT the root).
+    chain_certs: Vec<Vec<u8>>,
     /// Certificate cache
     cache: Arc<RwLock<CertificateCache>>,
 }
@@ -117,6 +121,7 @@ impl CertificateAuthority {
         Ok(Self {
             ca_cert_pem,
             ca_key_pem,
+            chain_certs: vec![],
             cache: Arc::new(RwLock::new(CertificateCache::new())),
         })
     }
@@ -128,6 +133,7 @@ impl CertificateAuthority {
         Ok(Self {
             ca_cert_pem,
             ca_key_pem,
+            chain_certs: vec![],
             cache: Arc::new(RwLock::new(CertificateCache::new())),
         })
     }
@@ -141,6 +147,60 @@ impl CertificateAuthority {
         Ok(Self {
             ca_cert_pem: ca_cert_pem.to_string(),
             ca_key_pem: ca_key_pem.to_string(),
+            chain_certs: vec![],
+            cache: Arc::new(RwLock::new(CertificateCache::new())),
+        })
+    }
+
+    /// Load a Certificate Authority from a PEM chain and PEM key.
+    ///
+    /// The chain PEM may contain one or more certificates:
+    /// - First certificate = the signing CA certificate (used to sign leaf certs)
+    /// - Remaining certificates = intermediates between signing cert and root
+    ///
+    /// Chain logic:
+    /// - If the signing cert is self-signed (root CA): `chain_certs` is empty
+    ///   (per RFC 8446, the root CA is omitted from the TLS chain)
+    /// - If the signing cert is an intermediate: `chain_certs` = `[signing_cert, ...remaining_certs]`
+    ///   (all go in the TLS chain so clients can verify back to root)
+    pub fn from_pem_chain(chain_pem: &str, key_pem: &str) -> Result<Self> {
+        let cert_ders = parse_pem_certs(chain_pem)?;
+        let key_der = pem_to_der(key_pem, "PRIVATE KEY")?;
+
+        let signing_cert_der = &cert_ders[0];
+
+        // Validate that the key matches the signing certificate
+        validate_cert_key_match(signing_cert_der, &key_der)?;
+
+        // Detect if the signing cert is self-signed by comparing subject and issuer
+        let (_, parsed) = x509_parser::parse_x509_certificate(signing_cert_der)
+            .map_err(|e| GapError::tls(format!("Failed to parse signing certificate: {}", e)))?;
+        let is_self_signed = parsed.subject() == parsed.issuer();
+
+        // Build chain_certs: empty for root, [signing + remaining] for intermediate
+        let chain_certs = if is_self_signed {
+            vec![] // Root CA -- omit from TLS chain per RFC 8446
+        } else {
+            // Intermediate CA -- include signing cert + any additional intermediates
+            cert_ders.clone()
+        };
+
+        // Extract just the first cert's PEM for ca_cert_pem (used for signing operations)
+        let first_cert_pem = {
+            let trimmed = chain_pem.trim();
+            let start = trimmed.find("-----BEGIN CERTIFICATE-----")
+                .ok_or_else(|| GapError::tls("No CERTIFICATE block found"))?;
+            let block_start = &trimmed[start..];
+            let end = block_start.find("-----END CERTIFICATE-----")
+                .ok_or_else(|| GapError::tls("Unterminated PEM block"))?
+                + "-----END CERTIFICATE-----".len();
+            block_start[..end].to_string()
+        };
+
+        Ok(Self {
+            ca_cert_pem: first_cert_pem,
+            ca_key_pem: key_pem.to_string(),
+            chain_certs,
             cache: Arc::new(RwLock::new(CertificateCache::new())),
         })
     }
@@ -153,6 +213,11 @@ impl CertificateAuthority {
     /// Export the CA private key as PEM
     pub fn ca_key_pem(&self) -> String {
         self.ca_key_pem.clone()
+    }
+
+    /// Get the DER-encoded chain certificates (intermediates to include in TLS chain)
+    pub fn chain_certs_der(&self) -> &[Vec<u8>] {
+        &self.chain_certs
     }
 
     /// Export the CA certificate as DER
@@ -428,10 +493,12 @@ impl rustls::server::ResolvesServerCert for DynamicCertResolver {
         let key = rustls::pki_types::PrivateKeyDer::try_from(key_der).ok()?;
         let signing_key = rustls::crypto::aws_lc_rs::sign::any_supported_type(&key).ok()?;
 
+        // Build cert chain: leaf + any intermediate chain certs.
         // Per RFC 8446, the trust anchor (root CA) is omitted — the client already has it.
-        let cert_chain = vec![
-            rustls::pki_types::CertificateDer::from(cert_der),
-        ];
+        let mut cert_chain = vec![rustls::pki_types::CertificateDer::from(cert_der)];
+        for chain_cert in self.ca.chain_certs_der() {
+            cert_chain.push(rustls::pki_types::CertificateDer::from(chain_cert.clone()));
+        }
 
         Some(Arc::new(rustls::sign::CertifiedKey::new(cert_chain, signing_key)))
     }
@@ -463,6 +530,32 @@ pub fn validate_cert_key_match(cert_der: &[u8], key_der: &[u8]) -> Result<()> {
     }
 
     Ok(())
+}
+
+/// Parse one or more PEM-encoded certificates from a single string.
+/// Returns a Vec of DER byte vectors, one per certificate in order.
+fn parse_pem_certs(pem: &str) -> Result<Vec<Vec<u8>>> {
+    let mut certs = Vec::new();
+    let mut remaining = pem.trim();
+
+    while let Some(start) = remaining.find("-----BEGIN CERTIFICATE-----") {
+        let block_start = &remaining[start..];
+        let end = block_start.find("-----END CERTIFICATE-----")
+            .ok_or_else(|| GapError::tls("Unterminated PEM CERTIFICATE block"))?;
+        let end_pos = end + "-----END CERTIFICATE-----".len();
+        let block = &block_start[..end_pos];
+
+        let der = pem_to_der(block, "CERTIFICATE")?;
+        certs.push(der);
+
+        remaining = &block_start[end_pos..];
+    }
+
+    if certs.is_empty() {
+        return Err(GapError::tls("No CERTIFICATE blocks found in PEM input"));
+    }
+
+    Ok(certs)
 }
 
 /// Convert PEM to DER format
@@ -954,6 +1047,161 @@ mod tests {
         let ca = CertificateAuthority::generate().unwrap();
         let debug_str = format!("{:?}", ca);
         assert!(debug_str.contains("CertificateAuthority"));
+    }
+
+    #[test]
+    fn test_parse_pem_certs_multiple() {
+        // Generate two CAs to get two distinct certificates
+        let ca1 = CertificateAuthority::generate().unwrap();
+        let ca2 = CertificateAuthority::generate().unwrap();
+
+        let combined = format!("{}\n{}", ca1.ca_cert_pem(), ca2.ca_cert_pem());
+        let certs = parse_pem_certs(&combined).unwrap();
+        assert_eq!(certs.len(), 2, "Should parse two certificates");
+        assert_eq!(certs[0], ca1.ca_cert_der(), "First cert DER should match");
+        assert_eq!(certs[1], ca2.ca_cert_der(), "Second cert DER should match");
+    }
+
+    #[test]
+    fn test_parse_pem_certs_empty_input() {
+        let result = parse_pem_certs("");
+        assert!(result.is_err(), "Empty input should return an error");
+        let err_msg = result.unwrap_err().to_string();
+        assert!(
+            err_msg.contains("No CERTIFICATE blocks"),
+            "Error should mention no blocks found: {}",
+            err_msg
+        );
+    }
+
+    #[test]
+    fn test_from_pem_chain_root_ca() {
+        // A self-signed root CA should have empty chain_certs
+        let root_ca = CertificateAuthority::generate().unwrap();
+        let chain_ca = CertificateAuthority::from_pem_chain(
+            &root_ca.ca_cert_pem(),
+            &root_ca.ca_key_pem(),
+        )
+        .unwrap();
+        assert!(
+            chain_ca.chain_certs_der().is_empty(),
+            "Root CA (self-signed) should have empty chain_certs"
+        );
+    }
+
+    #[test]
+    fn test_from_pem_chain_intermediate_ca() {
+        use rcgen::{CertificateParams, DistinguishedName, DnType, KeyPair};
+        use time::{Duration as TimeDuration, OffsetDateTime};
+
+        // Generate a root CA with rcgen
+        let root_key = KeyPair::generate().unwrap();
+        let mut root_params = CertificateParams::default();
+        let mut root_dn = DistinguishedName::new();
+        root_dn.push(DnType::CommonName, "Test Root CA");
+        root_dn.push(DnType::OrganizationName, "Test Org");
+        root_params.distinguished_name = root_dn;
+        let now = OffsetDateTime::now_utc();
+        root_params.not_before = now - TimeDuration::minutes(5);
+        root_params.not_after = now + TimeDuration::days(3650);
+        root_params.is_ca = rcgen::IsCa::Ca(rcgen::BasicConstraints::Unconstrained);
+        root_params.key_usages = vec![
+            rcgen::KeyUsagePurpose::KeyCertSign,
+            rcgen::KeyUsagePurpose::CrlSign,
+        ];
+        let root_cert = root_params.self_signed(&root_key).unwrap();
+
+        // Generate an intermediate CA signed by the root
+        let intermediate_key = KeyPair::generate().unwrap();
+        let mut intermediate_params = CertificateParams::default();
+        let mut intermediate_dn = DistinguishedName::new();
+        intermediate_dn.push(DnType::CommonName, "Test Intermediate CA");
+        intermediate_dn.push(DnType::OrganizationName, "Test Org");
+        intermediate_params.distinguished_name = intermediate_dn;
+        intermediate_params.not_before = now - TimeDuration::minutes(5);
+        intermediate_params.not_after = now + TimeDuration::days(1825);
+        intermediate_params.is_ca = rcgen::IsCa::Ca(rcgen::BasicConstraints::Unconstrained);
+        intermediate_params.key_usages = vec![
+            rcgen::KeyUsagePurpose::KeyCertSign,
+            rcgen::KeyUsagePurpose::CrlSign,
+        ];
+
+        let intermediate_cert = intermediate_params
+            .signed_by(&intermediate_key, &root_cert, &root_key)
+            .unwrap();
+
+        // Build the chain PEM: intermediate + root
+        let chain_pem = format!("{}\n{}", intermediate_cert.pem(), root_cert.pem());
+        let intermediate_key_pem = intermediate_key.serialize_pem();
+
+        // Load via from_pem_chain
+        let ca = CertificateAuthority::from_pem_chain(&chain_pem, &intermediate_key_pem).unwrap();
+
+        // chain_certs should have 2 entries: intermediate cert + root cert
+        assert_eq!(
+            ca.chain_certs_der().len(),
+            2,
+            "Intermediate CA should have 2 chain certs (intermediate + root)"
+        );
+
+        // Sign a leaf cert and verify it against the root
+        let (leaf_der, _key_der) = ca.sign_for_hostname("example.com", None).unwrap();
+
+        use std::io::Write;
+        let leaf_pem = der_to_pem(&leaf_der, "CERTIFICATE");
+        let root_cert_pem = root_cert.pem();
+
+        let mut ca_file = tempfile::NamedTempFile::new().unwrap();
+        ca_file.write_all(root_cert_pem.as_bytes()).unwrap();
+        ca_file.flush().unwrap();
+
+        // Write the full chain: leaf + intermediate for verification
+        let mut cert_chain_file = tempfile::NamedTempFile::new().unwrap();
+        cert_chain_file.write_all(leaf_pem.as_bytes()).unwrap();
+        cert_chain_file
+            .write_all(intermediate_cert.pem().as_bytes())
+            .unwrap();
+        cert_chain_file.flush().unwrap();
+
+        let output = std::process::Command::new("openssl")
+            .args([
+                "verify",
+                "-CAfile",
+                ca_file.path().to_str().unwrap(),
+                "-untrusted",
+                cert_chain_file.path().to_str().unwrap(),
+                cert_chain_file.path().to_str().unwrap(),
+            ])
+            .output()
+            .expect("Failed to run openssl verify");
+
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            stdout.contains("OK"),
+            "Leaf cert should verify against root via intermediate chain:\nstdout: {}\nstderr: {}",
+            stdout,
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    #[test]
+    fn test_from_pem_chain_validates_key_match() {
+        // Generate two CAs
+        let ca1 = CertificateAuthority::generate().unwrap();
+        let ca2 = CertificateAuthority::generate().unwrap();
+
+        // Try from_pem_chain with cert from CA1 and key from CA2
+        let result = CertificateAuthority::from_pem_chain(
+            &ca1.ca_cert_pem(),
+            &ca2.ca_key_pem(),
+        );
+        assert!(result.is_err(), "Mismatched cert+key should fail");
+        let err_msg = result.unwrap_err().to_string();
+        assert!(
+            err_msg.contains("do not match"),
+            "Error should mention mismatch: {}",
+            err_msg
+        );
     }
 }
 
