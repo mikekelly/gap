@@ -284,18 +284,43 @@ impl CertificateAuthority {
     ///
     /// This is a workaround for rcgen 0.13 not supporting loading certs from PEM/DER.
     /// We reconstruct the CA from its parameters so it can be used for signing.
+    /// The DN is extracted from the stored certificate (not hardcoded) so that
+    /// injected CAs with custom DNs produce leaf certs with correct issuer fields.
     fn reconstruct_ca_for_signing(&self) -> Result<(rcgen::Certificate, rcgen::KeyPair)> {
         use rcgen::{CertificateParams, DistinguishedName, DnType, KeyPair};
+        use x509_parser::oid_registry;
 
-        // Parse the CA key pair from PEM
         let ca_key_pair = KeyPair::from_pem(&self.ca_key_pem)
             .map_err(|e| GapError::tls(format!("Failed to parse CA private key: {}", e)))?;
 
-        // Recreate the CA certificate params
-        let mut ca_params = CertificateParams::default();
+        // Parse the stored cert DER to extract the subject DN
+        let ca_cert_der = self.ca_cert_der();
+        let (_, parsed) = x509_parser::parse_x509_certificate(&ca_cert_der)
+            .map_err(|e| GapError::tls(format!("Failed to parse CA certificate DER: {}", e)))?;
+
         let mut ca_dn = DistinguishedName::new();
-        ca_dn.push(DnType::CommonName, "GAP Certificate Authority");
-        ca_dn.push(DnType::OrganizationName, "GAP");
+        for rdn in parsed.subject().iter() {
+            for attr in rdn.iter() {
+                let value = attr.as_str()
+                    .map_err(|e| GapError::tls(format!("Failed to read DN attribute: {}", e)))?;
+                let oid = attr.attr_type();
+                if *oid == oid_registry::OID_X509_COMMON_NAME {
+                    ca_dn.push(DnType::CommonName, value);
+                } else if *oid == oid_registry::OID_X509_ORGANIZATION_NAME {
+                    ca_dn.push(DnType::OrganizationName, value);
+                } else if *oid == oid_registry::OID_X509_COUNTRY_NAME {
+                    ca_dn.push(DnType::CountryName, value);
+                } else if *oid == oid_registry::OID_X509_LOCALITY_NAME {
+                    ca_dn.push(DnType::LocalityName, value);
+                } else if *oid == oid_registry::OID_X509_STATE_OR_PROVINCE_NAME {
+                    ca_dn.push(DnType::StateOrProvinceName, value);
+                } else if *oid == oid_registry::OID_X509_ORGANIZATIONAL_UNIT {
+                    ca_dn.push(DnType::OrganizationalUnitName, value);
+                }
+            }
+        }
+
+        let mut ca_params = CertificateParams::default();
         ca_params.distinguished_name = ca_dn;
         ca_params.is_ca = rcgen::IsCa::Ca(rcgen::BasicConstraints::Unconstrained);
         ca_params.key_usages = vec![
@@ -412,6 +437,34 @@ impl rustls::server::ResolvesServerCert for DynamicCertResolver {
 
         Some(Arc::new(rustls::sign::CertifiedKey::new(cert_chain, signing_key)))
     }
+}
+
+/// Validate that a certificate's public key matches the private key.
+///
+/// Compares the SubjectPublicKeyInfo (SPKI) DER from both the certificate
+/// and the private key to verify they correspond.
+pub fn validate_cert_key_match(cert_der: &[u8], key_der: &[u8]) -> Result<()> {
+    use rcgen::KeyPair;
+
+    // Parse the private key to get its public key (SPKI DER)
+    let key_pem = der_to_pem(key_der, "PRIVATE KEY");
+    let key_pair = KeyPair::from_pem(&key_pem)
+        .map_err(|e| GapError::tls(format!("Invalid private key: {}", e)))?;
+    let key_public = key_pair.public_key_der();
+
+    // Parse the certificate to get its public key (SPKI DER)
+    let (_, parsed_cert) = x509_parser::parse_x509_certificate(cert_der)
+        .map_err(|e| GapError::tls(format!("Invalid certificate: {}", e)))?;
+    let cert_public = parsed_cert.tbs_certificate.subject_pki.raw;
+
+    // Compare SubjectPublicKeyInfo DER bytes — they must be identical
+    if key_public.as_slice() != cert_public {
+        return Err(GapError::tls(
+            "Certificate and private key do not match — the certificate's public key differs from the private key's public key"
+        ));
+    }
+
+    Ok(())
 }
 
 /// Convert PEM to DER format
@@ -1029,6 +1082,129 @@ mod cert_verify_tests {
             "Certificate verification failed!\nstdout: {}\nstderr: {}",
             stdout,
             stderr
+        );
+    }
+
+    #[test]
+    fn test_custom_dn_ca_leaf_issuer_matches_ca_subject() {
+        // Generate a CA with custom DN (non-default CN and O)
+        // to verify that reconstruct_ca_for_signing() extracts the actual DN
+        // rather than using hardcoded values.
+        //
+        // We create a custom CA using rcgen directly, then load it via from_pem,
+        // sign a leaf cert, and verify the leaf's issuer matches the CA's subject.
+        use rcgen::{CertificateParams, DistinguishedName, DnType, KeyPair};
+        use time::{Duration as TimeDuration, OffsetDateTime};
+
+        let key_pair = KeyPair::generate().unwrap();
+
+        let mut params = CertificateParams::default();
+        let mut dn = DistinguishedName::new();
+        dn.push(DnType::CommonName, "My Custom CA");
+        dn.push(DnType::OrganizationName, "Custom Org");
+        dn.push(DnType::CountryName, "NZ");
+        params.distinguished_name = dn;
+
+        let now = OffsetDateTime::now_utc();
+        params.not_before = now - TimeDuration::minutes(5);
+        params.not_after = now + TimeDuration::days(3650);
+        params.is_ca = rcgen::IsCa::Ca(rcgen::BasicConstraints::Unconstrained);
+        params.key_usages = vec![
+            rcgen::KeyUsagePurpose::KeyCertSign,
+            rcgen::KeyUsagePurpose::CrlSign,
+        ];
+
+        let cert = params.self_signed(&key_pair).unwrap();
+        let ca_cert_pem = cert.pem();
+        let ca_key_pem = key_pair.serialize_pem();
+
+        // Load the custom CA
+        let ca = CertificateAuthority::from_pem(&ca_cert_pem, &ca_key_pem).unwrap();
+
+        // Sign a leaf certificate
+        let (leaf_der, _key_der) = ca.sign_for_hostname("example.com", None).unwrap();
+
+        // Verify the leaf cert's issuer matches the CA's subject using openssl
+        use std::io::Write;
+        let leaf_pem = der_to_pem(&leaf_der, "CERTIFICATE");
+
+        let mut ca_file = tempfile::NamedTempFile::new().unwrap();
+        ca_file.write_all(ca_cert_pem.as_bytes()).unwrap();
+        ca_file.flush().unwrap();
+
+        let mut leaf_file = tempfile::NamedTempFile::new().unwrap();
+        leaf_file.write_all(leaf_pem.as_bytes()).unwrap();
+        leaf_file.flush().unwrap();
+
+        // Get the leaf cert's issuer
+        let leaf_output = std::process::Command::new("openssl")
+            .args(["x509", "-in", leaf_file.path().to_str().unwrap(), "-issuer", "-noout"])
+            .output()
+            .expect("Failed to run openssl");
+        let leaf_issuer = String::from_utf8_lossy(&leaf_output.stdout);
+
+        // Get the CA cert's subject
+        let ca_output = std::process::Command::new("openssl")
+            .args(["x509", "-in", ca_file.path().to_str().unwrap(), "-subject", "-noout"])
+            .output()
+            .expect("Failed to run openssl");
+        let ca_subject = String::from_utf8_lossy(&ca_output.stdout);
+
+        // The issuer of the leaf should contain the same DN components as the CA subject
+        // openssl outputs "issuer=CN = ..., O = ..., C = ..." and "subject=CN = ..., O = ..., C = ..."
+        let issuer_dn = leaf_issuer.trim().strip_prefix("issuer=").unwrap_or(leaf_issuer.trim());
+        let subject_dn = ca_subject.trim().strip_prefix("subject=").unwrap_or(ca_subject.trim());
+
+        assert_eq!(
+            issuer_dn, subject_dn,
+            "Leaf cert issuer DN should match CA subject DN.\nLeaf issuer: {}\nCA subject: {}",
+            issuer_dn, subject_dn
+        );
+
+        // Also verify the leaf cert is valid against the CA
+        let verify_output = std::process::Command::new("openssl")
+            .args([
+                "verify",
+                "-CAfile", ca_file.path().to_str().unwrap(),
+                leaf_file.path().to_str().unwrap(),
+            ])
+            .output()
+            .expect("Failed to run openssl verify");
+        let stdout = String::from_utf8_lossy(&verify_output.stdout);
+        assert!(
+            stdout.contains("OK"),
+            "Leaf cert should verify against the custom CA:\n{}",
+            stdout
+        );
+    }
+
+    #[test]
+    fn test_validate_cert_key_match_success() {
+        // Generate a CA and verify that validation passes for matching cert+key
+        let ca = CertificateAuthority::generate().unwrap();
+        let cert_der = ca.ca_cert_der();
+        let key_der = ca.ca_key_der();
+
+        let result = validate_cert_key_match(&cert_der, &key_der);
+        assert!(result.is_ok(), "Matching cert+key should validate: {:?}", result.err());
+    }
+
+    #[test]
+    fn test_validate_cert_key_match_mismatch() {
+        // Generate two different CAs and cross their cert+key
+        let ca1 = CertificateAuthority::generate().unwrap();
+        let ca2 = CertificateAuthority::generate().unwrap();
+
+        let cert_der = ca1.ca_cert_der();
+        let key_der = ca2.ca_key_der();
+
+        let result = validate_cert_key_match(&cert_der, &key_der);
+        assert!(result.is_err(), "Mismatched cert+key should fail validation");
+        let err_msg = result.unwrap_err().to_string();
+        assert!(
+            err_msg.contains("do not match"),
+            "Error should mention mismatch: {}",
+            err_msg
         );
     }
 }

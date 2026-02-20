@@ -420,34 +420,64 @@ fn select_db_mode() -> DbMode {
     DbMode::Error
 }
 
-/// Load CA from database or generate a new one
+/// Load CA from environment variables, database, or generate a new one.
+///
+/// Precedence:
+/// 1. `GAP_CA_CERT` + `GAP_CA_KEY` env vars (base64-encoded DER) — for container deployments
+/// 2. Database config (`ca:cert`, `ca:key`) — persisted from previous runs
+/// 3. Generate new CA — first run
 async fn load_or_generate_ca(db: &GapDatabase) -> anyhow::Result<CertificateAuthority> {
     const CA_CERT_KEY: &str = "ca:cert";
     const CA_KEY_KEY: &str = "ca:key";
 
-    // Try to load from database
-    let ca = match (db.get_config(CA_CERT_KEY).await?, db.get_config(CA_KEY_KEY).await?) {
-        (Some(cert_pem), Some(key_pem)) => {
-            let cert_pem_str = String::from_utf8(cert_pem)?;
-            let key_pem_str = String::from_utf8(key_pem)?;
-            tracing::info!("Loaded CA from database");
-            CertificateAuthority::from_pem(&cert_pem_str, &key_pem_str)?
-        }
-        _ => {
-            // Generate new CA
-            tracing::info!("Generating new CA certificate");
-            let ca = CertificateAuthority::generate()?;
+    // 1. Try env var injection first
+    let env_cert = std::env::var("GAP_CA_CERT").ok();
+    let env_key = std::env::var("GAP_CA_KEY").ok();
 
-            // Save to database for next time
-            db.set_config(CA_CERT_KEY, ca.ca_cert_pem().as_bytes()).await?;
-            db.set_config(CA_KEY_KEY, ca.ca_key_pem().as_bytes()).await?;
-            tracing::info!("CA certificate saved to database");
+    let ca = match (env_cert, env_key) {
+        (Some(cert_b64), Some(key_b64)) => {
+            use base64::Engine;
+            let cert_der = base64::engine::general_purpose::STANDARD.decode(&cert_b64)
+                .map_err(|e| anyhow::anyhow!("GAP_CA_CERT: invalid base64: {}", e))?;
+            let key_der = base64::engine::general_purpose::STANDARD.decode(&key_b64)
+                .map_err(|e| anyhow::anyhow!("GAP_CA_KEY: invalid base64: {}", e))?;
 
+            // Validate key matches cert
+            gap_lib::tls::validate_cert_key_match(&cert_der, &key_der)
+                .map_err(|e| anyhow::anyhow!("GAP_CA_CERT and GAP_CA_KEY do not match: {}", e))?;
+
+            let ca = CertificateAuthority::from_der(cert_der, key_der)?;
+            tracing::info!("CA loaded from GAP_CA_CERT/GAP_CA_KEY environment variables");
             ca
+        }
+        (Some(_), None) => {
+            anyhow::bail!("GAP_CA_CERT is set but GAP_CA_KEY is missing — both must be provided");
+        }
+        (None, Some(_)) => {
+            anyhow::bail!("GAP_CA_KEY is set but GAP_CA_CERT is missing — both must be provided");
+        }
+        (None, None) => {
+            // 2. Fall through to existing DB load/generate path
+            match (db.get_config(CA_CERT_KEY).await?, db.get_config(CA_KEY_KEY).await?) {
+                (Some(cert_pem), Some(key_pem)) => {
+                    let cert_pem_str = String::from_utf8(cert_pem)?;
+                    let key_pem_str = String::from_utf8(key_pem)?;
+                    tracing::info!("Loaded CA from database");
+                    CertificateAuthority::from_pem(&cert_pem_str, &key_pem_str)?
+                }
+                _ => {
+                    tracing::info!("Generating new CA certificate");
+                    let ca = CertificateAuthority::generate()?;
+                    db.set_config(CA_CERT_KEY, ca.ca_cert_pem().as_bytes()).await?;
+                    db.set_config(CA_KEY_KEY, ca.ca_key_pem().as_bytes()).await?;
+                    tracing::info!("CA certificate saved to database");
+                    ca
+                }
+            }
         }
     };
 
-    // Export CA cert to well-known filesystem location
+    // Export CA cert to well-known filesystem location (always, regardless of source)
     let ca_path = gap_lib::ca_cert_path();
     if let Some(parent) = ca_path.parent() {
         std::fs::create_dir_all(parent)?;
@@ -462,9 +492,10 @@ async fn load_or_generate_ca(db: &GapDatabase) -> anyhow::Result<CertificateAuth
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serial_test::serial;
 
     // Tests for select_db_mode — these manipulate env vars so they must run
-    // serially. Use std::sync::Mutex to serialise them within the test binary.
+    // serially. Use serial_test to serialise them within the test binary.
     fn with_clean_env<F: FnOnce() -> R, R>(vars_to_clear: &[&str], f: F) -> R {
         // Save and clear the specified env vars, run f, then restore.
         let saved: Vec<_> = vars_to_clear
@@ -485,6 +516,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn test_select_db_mode_env_key_takes_priority() {
         // GAP_ENCRYPTION_KEY set → EnvKey, even if GAP_DISABLE_ENCRYPTION also set
         with_clean_env(&["GAP_ENCRYPTION_KEY", "GAP_DISABLE_ENCRYPTION"], || {
@@ -495,6 +527,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn test_select_db_mode_disable_encryption() {
         // GAP_DISABLE_ENCRYPTION=1 (no GAP_ENCRYPTION_KEY) → Unencrypted
         with_clean_env(&["GAP_ENCRYPTION_KEY", "GAP_DISABLE_ENCRYPTION"], || {
@@ -504,6 +537,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn test_select_db_mode_disable_encryption_requires_value_one() {
         // GAP_DISABLE_ENCRYPTION set to something other than "1" is NOT recognised
         with_clean_env(&["GAP_ENCRYPTION_KEY", "GAP_DISABLE_ENCRYPTION"], || {
@@ -515,6 +549,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn test_select_db_mode_data_dir_does_not_affect_encryption() {
         // Setting GAP_DATA_DIR must NOT change the encryption selection.
         // On macOS this will be Keychain; on other platforms Error.
@@ -527,6 +562,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     #[cfg(not(target_os = "macos"))]
     fn test_select_db_mode_no_vars_returns_error_on_non_macos() {
         // On non-macOS with no env vars set → Error
@@ -536,6 +572,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     #[cfg(target_os = "macos")]
     fn test_select_db_mode_no_vars_returns_keychain_on_macos() {
         // On macOS with no env vars set → Keychain
@@ -605,6 +642,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial]
     async fn test_load_or_generate_ca_exports_to_filesystem() {
         use std::fs;
 
@@ -614,6 +652,9 @@ mod tests {
         // Set up a temporary HOME directory for the test
         let temp_home = tempfile::tempdir().unwrap();
         std::env::set_var("HOME", temp_home.path());
+        // Ensure env var CA injection is not active
+        std::env::remove_var("GAP_CA_CERT");
+        std::env::remove_var("GAP_CA_KEY");
 
         // Load or generate CA - this should export the cert to the filesystem
         let ca = load_or_generate_ca(&db).await.unwrap();
@@ -628,12 +669,16 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial]
     async fn test_load_or_generate_ca_persists_to_database() {
         let db = GapDatabase::in_memory().await.unwrap();
 
         // Set up a temporary HOME directory for filesystem export
         let temp_home = tempfile::tempdir().unwrap();
         std::env::set_var("HOME", temp_home.path());
+        // Ensure env var CA injection is not active
+        std::env::remove_var("GAP_CA_CERT");
+        std::env::remove_var("GAP_CA_KEY");
 
         // First call generates and persists
         let ca1 = load_or_generate_ca(&db).await.unwrap();
@@ -671,8 +716,179 @@ mod tests {
         assert_eq!(result.unwrap(), true);
     }
 
+    #[tokio::test]
+    #[serial]
+    async fn test_load_or_generate_ca_from_env_vars() {
+        use base64::Engine;
+
+        let db = GapDatabase::in_memory().await.unwrap();
+        let temp_home = tempfile::tempdir().unwrap();
+
+        // Save and clear env vars
+        let saved: Vec<_> = ["HOME", "GAP_CA_CERT", "GAP_CA_KEY"]
+            .iter()
+            .map(|k| (*k, std::env::var(k).ok()))
+            .collect();
+        for (k, _) in &saved {
+            std::env::remove_var(k);
+        }
+
+        // Generate a test CA and set env vars
+        let ca = CertificateAuthority::generate().unwrap();
+        let cert_b64 = base64::engine::general_purpose::STANDARD.encode(&ca.ca_cert_der());
+        let key_b64 = base64::engine::general_purpose::STANDARD.encode(&ca.ca_key_der());
+
+        std::env::set_var("HOME", temp_home.path());
+        std::env::set_var("GAP_CA_CERT", &cert_b64);
+        std::env::set_var("GAP_CA_KEY", &key_b64);
+
+        let result = load_or_generate_ca(&db).await;
+
+        // Restore env vars before asserting (so cleanup happens even on failure)
+        for (k, v) in saved {
+            match v {
+                Some(val) => std::env::set_var(k, val),
+                None => std::env::remove_var(k),
+            }
+        }
+
+        let loaded_ca = result.unwrap();
+        // Compare DER (not PEM) because PEM encoding may differ in whitespace
+        assert_eq!(
+            loaded_ca.ca_cert_der(), ca.ca_cert_der(),
+            "CA loaded from env vars should match the injected CA (DER comparison)"
+        );
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn test_load_or_generate_ca_env_cert_without_key_errors() {
+        use base64::Engine;
+
+        let db = GapDatabase::in_memory().await.unwrap();
+        let temp_home = tempfile::tempdir().unwrap();
+
+        let saved: Vec<_> = ["HOME", "GAP_CA_CERT", "GAP_CA_KEY"]
+            .iter()
+            .map(|k| (*k, std::env::var(k).ok()))
+            .collect();
+        for (k, _) in &saved {
+            std::env::remove_var(k);
+        }
+
+        let ca = CertificateAuthority::generate().unwrap();
+        let cert_b64 = base64::engine::general_purpose::STANDARD.encode(&ca.ca_cert_der());
+
+        std::env::set_var("HOME", temp_home.path());
+        std::env::set_var("GAP_CA_CERT", &cert_b64);
+        // GAP_CA_KEY deliberately NOT set
+
+        let result = load_or_generate_ca(&db).await;
+
+        for (k, v) in saved {
+            match v {
+                Some(val) => std::env::set_var(k, val),
+                None => std::env::remove_var(k),
+            }
+        }
+
+        assert!(result.is_err(), "Should error when GAP_CA_CERT is set but GAP_CA_KEY is missing");
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("GAP_CA_KEY is missing"),
+            "Error should mention missing GAP_CA_KEY: {}",
+            err
+        );
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn test_load_or_generate_ca_env_key_without_cert_errors() {
+        use base64::Engine;
+
+        let db = GapDatabase::in_memory().await.unwrap();
+        let temp_home = tempfile::tempdir().unwrap();
+
+        let saved: Vec<_> = ["HOME", "GAP_CA_CERT", "GAP_CA_KEY"]
+            .iter()
+            .map(|k| (*k, std::env::var(k).ok()))
+            .collect();
+        for (k, _) in &saved {
+            std::env::remove_var(k);
+        }
+
+        let ca = CertificateAuthority::generate().unwrap();
+        let key_b64 = base64::engine::general_purpose::STANDARD.encode(&ca.ca_key_der());
+
+        std::env::set_var("HOME", temp_home.path());
+        std::env::set_var("GAP_CA_KEY", &key_b64);
+        // GAP_CA_CERT deliberately NOT set
+
+        let result = load_or_generate_ca(&db).await;
+
+        for (k, v) in saved {
+            match v {
+                Some(val) => std::env::set_var(k, val),
+                None => std::env::remove_var(k),
+            }
+        }
+
+        assert!(result.is_err(), "Should error when GAP_CA_KEY is set but GAP_CA_CERT is missing");
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("GAP_CA_CERT is missing"),
+            "Error should mention missing GAP_CA_CERT: {}",
+            err
+        );
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn test_load_or_generate_ca_env_mismatched_cert_key_errors() {
+        use base64::Engine;
+
+        let db = GapDatabase::in_memory().await.unwrap();
+        let temp_home = tempfile::tempdir().unwrap();
+
+        let saved: Vec<_> = ["HOME", "GAP_CA_CERT", "GAP_CA_KEY"]
+            .iter()
+            .map(|k| (*k, std::env::var(k).ok()))
+            .collect();
+        for (k, _) in &saved {
+            std::env::remove_var(k);
+        }
+
+        let ca1 = CertificateAuthority::generate().unwrap();
+        let ca2 = CertificateAuthority::generate().unwrap();
+
+        let cert_b64 = base64::engine::general_purpose::STANDARD.encode(&ca1.ca_cert_der());
+        let key_b64 = base64::engine::general_purpose::STANDARD.encode(&ca2.ca_key_der());
+
+        std::env::set_var("HOME", temp_home.path());
+        std::env::set_var("GAP_CA_CERT", &cert_b64);
+        std::env::set_var("GAP_CA_KEY", &key_b64);
+
+        let result = load_or_generate_ca(&db).await;
+
+        for (k, v) in saved {
+            match v {
+                Some(val) => std::env::set_var(k, val),
+                None => std::env::remove_var(k),
+            }
+        }
+
+        assert!(result.is_err(), "Should error when cert and key don't match");
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("do not match"),
+            "Error should mention mismatch: {}",
+            err
+        );
+    }
+
     #[cfg(target_os = "macos")]
     #[test]
+    #[serial]
     fn test_cleanup_removes_launchagent_plist() {
         use std::fs;
 
