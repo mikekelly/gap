@@ -240,6 +240,15 @@ async fn main() -> anyhow::Result<()> {
     tracing::info!("Proxy port: {}", config.proxy_port);
     tracing::info!("API port: {}", config.api_port);
 
+    // Validate no-bootstrap mode before opening the database.
+    // In containers (GAP_NO_BOOTSTRAP=true) all configuration must be supplied externally.
+    let no_bootstrap = validate_no_bootstrap()?;
+    if no_bootstrap {
+        tracing::info!("Running in no-bootstrap mode (GAP_NO_BOOTSTRAP=true)");
+    } else {
+        tracing::info!("Running in bootstrap mode — CA and encryption key will be auto-generated if not provided");
+    }
+
     // Open database
     let db_path = {
         std::fs::create_dir_all(&data_dir)?;
@@ -418,6 +427,37 @@ fn select_db_mode() -> DbMode {
     }
     #[allow(unreachable_code)]
     DbMode::Error
+}
+
+/// Validate environment when GAP_NO_BOOTSTRAP is set.
+/// Returns true if no-bootstrap mode is active.
+///
+/// In no-bootstrap mode (GAP_NO_BOOTSTRAP=true) the server refuses to start unless
+/// all configuration is supplied externally — no auto-generation of CA or encryption key.
+/// This is the safe default for container deployments.
+fn validate_no_bootstrap() -> anyhow::Result<bool> {
+    let no_bootstrap = std::env::var("GAP_NO_BOOTSTRAP").as_deref() == Ok("true");
+
+    if no_bootstrap {
+        let has_ca_cert = std::env::var("GAP_CA_CERT").is_ok();
+        let has_ca_key = std::env::var("GAP_CA_KEY").is_ok();
+        let has_enc_key = std::env::var("GAP_ENCRYPTION_KEY").is_ok();
+
+        if !has_ca_cert || !has_ca_key {
+            anyhow::bail!(
+                "GAP_NO_BOOTSTRAP is set but GAP_CA_CERT/GAP_CA_KEY are missing. \
+                 In no-bootstrap mode, a CA certificate and key must be provided via environment variables."
+            );
+        }
+        if !has_enc_key {
+            anyhow::bail!(
+                "GAP_NO_BOOTSTRAP is set but GAP_ENCRYPTION_KEY is missing. \
+                 In no-bootstrap mode, an encryption key must be provided via environment variables."
+            );
+        }
+    }
+
+    Ok(no_bootstrap)
 }
 
 /// Load CA from environment variables, database, or generate a new one.
@@ -884,6 +924,83 @@ mod tests {
             "Error should mention mismatch: {}",
             err
         );
+    }
+
+    #[test]
+    #[serial]
+    fn test_validate_no_bootstrap_not_set() {
+        // When GAP_NO_BOOTSTRAP is unset, returns Ok(false) — bootstrap mode.
+        with_clean_env(&["GAP_NO_BOOTSTRAP", "GAP_CA_CERT", "GAP_CA_KEY", "GAP_ENCRYPTION_KEY"], || {
+            let result = validate_no_bootstrap();
+            assert!(result.is_ok());
+            assert_eq!(result.unwrap(), false);
+        });
+    }
+
+    #[test]
+    #[serial]
+    fn test_validate_no_bootstrap_false() {
+        // When GAP_NO_BOOTSTRAP=false, returns Ok(false) — still bootstrap mode.
+        with_clean_env(&["GAP_NO_BOOTSTRAP", "GAP_CA_CERT", "GAP_CA_KEY", "GAP_ENCRYPTION_KEY"], || {
+            std::env::set_var("GAP_NO_BOOTSTRAP", "false");
+            let result = validate_no_bootstrap();
+            assert!(result.is_ok());
+            assert_eq!(result.unwrap(), false);
+        });
+    }
+
+    #[test]
+    #[serial]
+    fn test_validate_no_bootstrap_missing_ca() {
+        // When GAP_NO_BOOTSTRAP=true but CA env vars are absent, returns an error.
+        with_clean_env(&["GAP_NO_BOOTSTRAP", "GAP_CA_CERT", "GAP_CA_KEY", "GAP_ENCRYPTION_KEY"], || {
+            std::env::set_var("GAP_NO_BOOTSTRAP", "true");
+            std::env::set_var("GAP_ENCRYPTION_KEY", "somekey");
+            // GAP_CA_CERT and GAP_CA_KEY deliberately NOT set
+            let result = validate_no_bootstrap();
+            assert!(result.is_err());
+            let msg = result.unwrap_err().to_string();
+            assert!(
+                msg.contains("GAP_CA_CERT") && msg.contains("GAP_CA_KEY"),
+                "Error should mention missing CA vars: {}",
+                msg
+            );
+        });
+    }
+
+    #[test]
+    #[serial]
+    fn test_validate_no_bootstrap_missing_enc_key() {
+        // When GAP_NO_BOOTSTRAP=true with CA vars present but no encryption key, returns an error.
+        with_clean_env(&["GAP_NO_BOOTSTRAP", "GAP_CA_CERT", "GAP_CA_KEY", "GAP_ENCRYPTION_KEY"], || {
+            std::env::set_var("GAP_NO_BOOTSTRAP", "true");
+            std::env::set_var("GAP_CA_CERT", "cert_placeholder");
+            std::env::set_var("GAP_CA_KEY", "key_placeholder");
+            // GAP_ENCRYPTION_KEY deliberately NOT set
+            let result = validate_no_bootstrap();
+            assert!(result.is_err());
+            let msg = result.unwrap_err().to_string();
+            assert!(
+                msg.contains("GAP_ENCRYPTION_KEY"),
+                "Error should mention missing GAP_ENCRYPTION_KEY: {}",
+                msg
+            );
+        });
+    }
+
+    #[test]
+    #[serial]
+    fn test_validate_no_bootstrap_all_present() {
+        // When GAP_NO_BOOTSTRAP=true with all required vars set, returns Ok(true).
+        with_clean_env(&["GAP_NO_BOOTSTRAP", "GAP_CA_CERT", "GAP_CA_KEY", "GAP_ENCRYPTION_KEY"], || {
+            std::env::set_var("GAP_NO_BOOTSTRAP", "true");
+            std::env::set_var("GAP_CA_CERT", "cert_placeholder");
+            std::env::set_var("GAP_CA_KEY", "key_placeholder");
+            std::env::set_var("GAP_ENCRYPTION_KEY", "some_key");
+            let result = validate_no_bootstrap();
+            assert!(result.is_ok());
+            assert_eq!(result.unwrap(), true);
+        });
     }
 
     #[cfg(target_os = "macos")]

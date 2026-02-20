@@ -83,6 +83,11 @@ RUN chmod +x /usr/local/bin/gap /usr/local/bin/gap-server /usr/local/bin/docker-
 
 # Switch to non-root user
 USER gap
+
+# Default to no-bootstrap mode in containers — require explicit configuration.
+# Override with -e GAP_NO_BOOTSTRAP=false for bootstrap behavior.
+ENV GAP_NO_BOOTSTRAP=true
+
 WORKDIR /var/lib/gap
 
 # Expose proxy port (9443) and management API port (9080)
