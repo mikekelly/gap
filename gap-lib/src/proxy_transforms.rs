@@ -5,7 +5,7 @@
 use crate::database::GapDatabase;
 use crate::error::{GapError, Result};
 use crate::http_utils::{parse_http_request, serialize_http_request};
-use crate::plugin_matcher::find_matching_plugin;
+use crate::plugin_matcher::{find_matching_handler, MatchResult};
 use crate::plugin_runtime::PluginRuntime;
 use crate::types::{GAPCredentials, GAPRequest};
 use base64::Engine;
@@ -203,106 +203,158 @@ pub fn scrub_response_headers(headers: &[(String, String)], credentials: &HashMa
     serde_json::to_string(&header_map).unwrap_or_default()
 }
 
-/// Apply plugin transforms to a GAPRequest
+/// Apply plugin or header-set transforms to a GAPRequest.
 ///
-/// This is the core transformation logic: plugin lookup, credential loading,
-/// and JS transform execution. Used by both the legacy byte-based pipeline
-/// and the new hyper-based pipeline.
+/// This is the core transformation logic: handler lookup, credential/header
+/// loading, and transform execution. Used by both the legacy byte-based
+/// pipeline and the new hyper-based pipeline.
 ///
 /// The `use_tls` flag indicates whether the connection to the upstream server
 /// uses TLS. When false (plain HTTP), plugins must have `dangerously_permit_http: true`
-/// to allow credential injection - otherwise the request is blocked to prevent
-/// credentials from being sent in cleartext.
+/// to allow credential injection — header sets always require TLS.
 ///
-/// Returns the transformed request and info about the plugin that handled it.
+/// Returns the transformed request and info about the handler that processed it.
 ///
-/// CRITICAL: PluginRuntime is not Send - this function scopes the runtime
+/// CRITICAL: PluginRuntime is not Send — this function scopes the runtime
 /// in a sync block to ensure it is dropped before any `.await` points.
 pub async fn transform_request(
     request: GAPRequest,
     hostname: &str,
+    port: Option<u16>,
+    path: &str,
     db: &GapDatabase,
     use_tls: bool,
 ) -> Result<(GAPRequest, PluginInfo)> {
-    // Find matching plugin
-    // SECURITY: Only allow connections to hosts with registered plugins
-    let plugin = match find_matching_plugin(hostname, db).await? {
-        Some(p) => {
-            debug!(
-                "Found matching plugin: {} (sha: {})",
-                p.name,
-                p.commit_sha.as_deref().unwrap_or("unknown")
-            );
-            p
-        }
+    // Find matching handler (plugin or header set)
+    // SECURITY: Only allow connections to hosts with registered handlers
+    let handler = match find_matching_handler(hostname, port, path, db).await? {
+        Some(h) => h,
         None => {
-            warn!("BLOCKED: Host {} has no matching plugin - not allowed", hostname);
+            warn!("BLOCKED: Host {} has no matching plugin or header set - not allowed", hostname);
             return Err(GapError::auth(format!(
-                "Host '{}' is not allowed: no plugin registered for this host",
+                "Host '{}' is not allowed: no matching plugin or header set",
                 hostname
             )));
         }
     };
 
-    // SECURITY: Block plain HTTP requests unless the plugin explicitly opts in.
-    // Sending credentials over unencrypted HTTP risks credential leakage.
-    if !use_tls && !plugin.dangerously_permit_http {
-        warn!(
-            "BLOCKED: Plugin {} does not permit HTTP - credentials would be sent in plaintext. \
-             Set dangerously_permit_http: true in plugin manifest to allow.",
-            plugin.name
-        );
-        return Err(GapError::auth(format!(
-            "Plugin '{}' does not permit credential injection over plain HTTP. \
-             Set dangerously_permit_http: true in the plugin manifest to allow.",
-            plugin.name
-        )));
+    match handler {
+        MatchResult::Plugin(plugin) => {
+            debug!(
+                "Found matching plugin: {} (sha: {})",
+                plugin.name,
+                plugin.commit_sha.as_deref().unwrap_or("unknown")
+            );
+
+            // SECURITY: Block plain HTTP requests unless the plugin explicitly opts in.
+            if !use_tls && !plugin.dangerously_permit_http {
+                warn!(
+                    "BLOCKED: Plugin {} does not permit HTTP - credentials would be sent in plaintext. \
+                     Set dangerously_permit_http: true in plugin manifest to allow.",
+                    plugin.name
+                );
+                return Err(GapError::auth(format!(
+                    "Plugin '{}' does not permit credential injection over plain HTTP. \
+                     Set dangerously_permit_http: true in the plugin manifest to allow.",
+                    plugin.name
+                )));
+            }
+
+            // Load credentials for the plugin
+            let credentials = load_plugin_credentials(&plugin.name, db).await?;
+
+            // SECURITY: Only allow connections when credentials are configured
+            if credentials.credentials.is_empty() {
+                warn!(
+                    "BLOCKED: Plugin {} has no credentials configured - not allowed",
+                    plugin.name
+                );
+                return Err(GapError::auth(format!(
+                    "Host '{}' is not allowed: plugin '{}' has no credentials configured",
+                    hostname, plugin.name
+                )));
+            }
+
+            debug!("Loaded {} credential fields for plugin {}", credentials.credentials.len(), plugin.name);
+
+            // Load plugin code from database
+            let plugin_code = db.get_plugin_source(&plugin.name).await?
+                .ok_or_else(|| GapError::plugin(format!("Plugin code not found for {}", plugin.name)))?;
+
+            // Execute transform
+            // CRITICAL: Scope the PluginRuntime to ensure it's dropped before any await
+            let transformed_request = {
+                let mut runtime = PluginRuntime::new()?;
+                runtime.load_plugin_from_code(&plugin.name, &plugin_code)?;
+                runtime.execute_transform(&plugin.name, request, &credentials)?
+            };
+
+            debug!("Transform executed successfully");
+
+            // Scrub credential values from post-transform headers for audit logging.
+            let scrubbed = scrub_headers(&transformed_request, &credentials.credentials);
+
+            let plugin_info = PluginInfo {
+                name: plugin.name.clone(),
+                commit_sha: plugin.commit_sha.clone(),
+                source_hash: plugin.source_hash.clone(),
+                scrubbed_headers: Some(scrubbed),
+                credential_values: credentials.credentials.clone(),
+            };
+
+            Ok((transformed_request, plugin_info))
+        }
+        MatchResult::HeaderSet(header_set) => {
+            debug!("Found matching header set: {}", header_set.name);
+
+            // SECURITY: HeaderSets always require TLS.
+            if !use_tls {
+                warn!(
+                    "BLOCKED: Header set '{}' does not permit header injection over plain HTTP",
+                    header_set.name
+                );
+                return Err(GapError::auth(format!(
+                    "Header set '{}' does not permit header injection over plain HTTP",
+                    header_set.name
+                )));
+            }
+
+            // Load headers for this set
+            let header_values = db.get_header_set_headers(&header_set.name).await?;
+
+            if header_values.is_empty() {
+                warn!(
+                    "BLOCKED: Header set '{}' has no headers configured",
+                    header_set.name
+                );
+                return Err(GapError::auth(format!(
+                    "header set '{}' has no headers configured",
+                    header_set.name
+                )));
+            }
+
+            debug!("Loaded {} headers for header set {}", header_values.len(), header_set.name);
+
+            // Inject headers into request (overwrite if exists)
+            let mut modified_request = request;
+            for (name, value) in &header_values {
+                modified_request.headers.insert(name.clone(), value.clone());
+            }
+
+            // Scrub: treat header values as the credentials for scrubbing
+            let scrubbed = scrub_headers(&modified_request, &header_values);
+
+            let plugin_info = PluginInfo {
+                name: header_set.name,
+                commit_sha: None,
+                source_hash: None,
+                scrubbed_headers: Some(scrubbed),
+                credential_values: header_values,
+            };
+
+            Ok((modified_request, plugin_info))
+        }
     }
-
-    // Load credentials for the plugin
-    let credentials = load_plugin_credentials(&plugin.name, db).await?;
-
-    // SECURITY: Only allow connections when credentials are configured
-    if credentials.credentials.is_empty() {
-        warn!(
-            "BLOCKED: Plugin {} has no credentials configured - not allowed",
-            plugin.name
-        );
-        return Err(GapError::auth(format!(
-            "Host '{}' is not allowed: plugin '{}' has no credentials configured",
-            hostname, plugin.name
-        )));
-    }
-
-    debug!("Loaded {} credential fields for plugin {}", credentials.credentials.len(), plugin.name);
-
-    // Load plugin code from database
-    let plugin_code = db.get_plugin_source(&plugin.name).await?
-        .ok_or_else(|| GapError::plugin(format!("Plugin code not found for {}", plugin.name)))?;
-
-    // Execute transform
-    // CRITICAL: Scope the PluginRuntime to ensure it's dropped before any await
-    let transformed_request = {
-        let mut runtime = PluginRuntime::new()?;
-        runtime.load_plugin_from_code(&plugin.name, &plugin_code)?;
-        runtime.execute_transform(&plugin.name, request, &credentials)?
-    };
-
-    debug!("Transform executed successfully");
-
-    // Scrub credential values from post-transform headers for audit logging.
-    // This MUST happen here — credentials should never reach the logging code unscrubbed.
-    let scrubbed = scrub_headers(&transformed_request, &credentials.credentials);
-
-    let plugin_info = PluginInfo {
-        name: plugin.name.clone(),
-        commit_sha: plugin.commit_sha.clone(),
-        source_hash: plugin.source_hash.clone(),
-        scrubbed_headers: Some(scrubbed),
-        credential_values: credentials.credentials.clone(),
-    };
-
-    Ok((transformed_request, plugin_info))
 }
 
 /// Parse HTTP request bytes and apply plugin transforms
@@ -320,7 +372,19 @@ pub async fn parse_and_transform(
     debug!("Parsed HTTP request: {} {}", request.method, request.url);
 
     // Apply transforms (parse_and_transform is only used for HTTPS)
-    let (transformed_request, _plugin_info) = transform_request(request, hostname, db, true).await?;
+    // Extract path from the parsed request URL by finding the path segment after host
+    let req_path = {
+        let url = &request.url;
+        // URL format: https://host/path or https://host:port/path
+        if let Some(after_scheme) = url.find("://").map(|i| &url[i + 3..]) {
+            after_scheme.find('/').map(|i| after_scheme[i..].to_string())
+                .unwrap_or_else(|| "/".to_string())
+        } else {
+            "/".to_string()
+        }
+    };
+    let (transformed_request, _plugin_info) =
+        transform_request(request, hostname, None, &req_path, db, true).await?;
 
     // Serialize back to HTTP
     let transformed_bytes = serialize_http_request(&transformed_request)?;
@@ -390,7 +454,7 @@ mod tests {
         let request = GAPRequest::new("GET", "https://api.test.com/data")
             .with_header("Host", "api.test.com");
 
-        let (result, plugin_info) = transform_request(request, "api.test.com", &db, true)
+        let (result, plugin_info) = transform_request(request, "api.test.com", None, "/", &db, true)
             .await
             .expect("transform should succeed");
 
@@ -413,7 +477,7 @@ mod tests {
         let request = GAPRequest::new("GET", "https://evil.com/data")
             .with_header("Host", "evil.com");
 
-        let result = transform_request(request, "evil.com", &db, true).await;
+        let result = transform_request(request, "evil.com", None, "/", &db, true).await;
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("not allowed"));
     }
@@ -445,7 +509,7 @@ mod tests {
         let request = GAPRequest::new("GET", "https://api.nocreds.com/data")
             .with_header("Host", "api.nocreds.com");
 
-        let result = transform_request(request, "api.nocreds.com", &db, true).await;
+        let result = transform_request(request, "api.nocreds.com", None, "/", &db, true).await;
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("credentials"));
     }
@@ -592,7 +656,7 @@ mod tests {
         let request = GAPRequest::new("GET", "https://api.test.com/data")
             .with_header("Host", "api.test.com");
 
-        let (_result, plugin_info) = transform_request(request, "api.test.com", &db, true)
+        let (_result, plugin_info) = transform_request(request, "api.test.com", None, "/", &db, true)
             .await
             .expect("transform should succeed");
 
@@ -617,7 +681,7 @@ mod tests {
             .with_header("Host", "api.test.com");
 
         // use_tls=false should be blocked because plugin doesn't permit HTTP
-        let result = transform_request(request, "api.test.com", &db, false).await;
+        let result = transform_request(request, "api.test.com", None, "/", &db, false).await;
         assert!(result.is_err());
         let err_msg = result.unwrap_err().to_string();
         assert!(
@@ -660,7 +724,7 @@ mod tests {
             .with_header("Host", "api.httpok.com");
 
         // use_tls=false should be allowed because plugin permits HTTP
-        let (result, plugin_info) = transform_request(request, "api.httpok.com", &db, false)
+        let (result, plugin_info) = transform_request(request, "api.httpok.com", None, "/", &db, false)
             .await
             .expect("transform should succeed with dangerously_permit_http=true");
 
@@ -681,7 +745,7 @@ mod tests {
             .with_header("Host", "api.test.com");
 
         // use_tls=true should always work regardless of dangerously_permit_http
-        let (result, _) = transform_request(request, "api.test.com", &db, true)
+        let (result, _) = transform_request(request, "api.test.com", None, "/", &db, true)
             .await
             .expect("HTTPS transform should succeed even without permit flag");
 
@@ -801,7 +865,7 @@ mod tests {
         let request = GAPRequest::new("GET", "https://api.test.com/data")
             .with_header("Host", "api.test.com");
 
-        let (_result, plugin_info) = transform_request(request, "api.test.com", &db, true)
+        let (_result, plugin_info) = transform_request(request, "api.test.com", None, "/", &db, true)
             .await
             .expect("transform should succeed");
 

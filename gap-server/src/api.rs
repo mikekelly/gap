@@ -316,8 +316,8 @@ pub fn create_router(state: ApiState) -> Router {
         .route("/plugins", get(get_plugins).post(post_plugins))
         .route("/plugins/install", post(install_plugin))
         .route("/plugins/register", post(register_plugin))
-        .route("/plugins/:name/update", post(update_plugin))
-        .route("/plugins/:name", delete(uninstall_plugin))
+        .route("/plugins/:name/update", post(update_plugin_from_github))
+        .route("/plugins/:name", axum::routing::patch(update_plugin).delete(uninstall_plugin))
         .route("/tokens", get(list_tokens).post(post_list_tokens))
         .route("/tokens/create", post(create_token))
         .route("/tokens/:id", delete(delete_token))
@@ -330,6 +330,10 @@ pub fn create_router(state: ApiState) -> Router {
         .route("/activity/:request_id/details", get(get_activity_details).post(get_activity_details))
         .route("/management-log", get(get_management_log))
         .route("/management-log/stream", get(management_log_stream))
+        .route("/header-sets", get(list_header_sets).post(create_header_set))
+        .route("/header-sets/:name", axum::routing::patch(update_header_set).delete(delete_header_set))
+        .route("/header-sets/:name/headers", post(set_header_set_header))
+        .route("/header-sets/:name/headers/:header_name", delete(delete_header_set_header))
         .with_state(state)
 }
 
@@ -602,7 +606,7 @@ async fn uninstall_plugin(
 
 /// POST /plugins/{name}/update - Update a plugin from GitHub (requires auth)
 #[axum::debug_handler]
-async fn update_plugin(
+async fn update_plugin_from_github(
     State(state): State<ApiState>,
     Path(name): Path<String>,
     headers: HeaderMap,
@@ -1170,6 +1174,273 @@ fn matches_management_filter(entry: &ManagementLogEntry, filter: &ManagementLogS
         if entry.success != success { return false; }
     }
     true
+}
+
+// ── HeaderSet request/response structs ─────────────────────────────────────
+
+#[derive(Debug, Deserialize)]
+struct CreateHeaderSetRequest {
+    name: String,
+    match_patterns: Vec<String>,
+    #[serde(default)]
+    weight: i32,
+}
+
+#[derive(Debug, Serialize)]
+struct CreateHeaderSetResponse {
+    name: String,
+    created: bool,
+}
+
+#[derive(Debug, Deserialize)]
+struct UpdateHeaderSetRequest {
+    match_patterns: Option<Vec<String>>,
+    weight: Option<i32>,
+}
+
+#[derive(Debug, Serialize)]
+struct HeaderSetListItem {
+    name: String,
+    match_patterns: Vec<String>,
+    weight: i32,
+    headers: Vec<String>, // header names only, no values
+}
+
+#[derive(Debug, Serialize)]
+struct HeaderSetListResponse {
+    header_sets: Vec<HeaderSetListItem>,
+}
+
+#[derive(Debug, Deserialize)]
+struct SetHeaderRequest {
+    name: String,
+    value: String,
+}
+
+#[derive(Debug, Serialize)]
+struct DeleteResponse {
+    deleted: bool,
+}
+
+// ── Plugin weight update structs ────────────────────────────────────────────
+
+#[derive(Debug, Deserialize)]
+struct UpdatePluginRequest {
+    weight: i32,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct UpdatePluginResponse {
+    name: String,
+    updated: bool,
+}
+
+// ── HeaderSet handlers ──────────────────────────────────────────────────────
+
+/// POST /header-sets - Create a header set (requires auth)
+async fn create_header_set(
+    State(state): State<ApiState>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Result<Json<CreateHeaderSetResponse>, (StatusCode, String)> {
+    verify_auth(&state, &headers).await?;
+    let req: CreateHeaderSetRequest = serde_json::from_slice(&body)
+        .map_err(|e| (StatusCode::BAD_REQUEST, format!("Invalid request body: {}", e)))?;
+
+    state.db.add_header_set(&req.name, &req.match_patterns, req.weight).await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to create header set: {}", e)))?;
+
+    let name = req.name.clone();
+    emit_management_log(&state, ManagementLogEntry {
+        timestamp: chrono::Utc::now(),
+        operation: "header_set_create".to_string(),
+        resource_type: "header_set".to_string(),
+        resource_id: Some(name.clone()),
+        detail: None,
+        success: true,
+        error_message: None,
+    });
+
+    Ok(Json(CreateHeaderSetResponse { name, created: true }))
+}
+
+/// GET /header-sets - List header sets (requires auth)
+async fn list_header_sets(
+    State(state): State<ApiState>,
+    headers: HeaderMap,
+) -> Result<Json<HeaderSetListResponse>, (StatusCode, String)> {
+    verify_auth(&state, &headers).await?;
+
+    let header_sets = state.db.list_header_sets().await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to list header sets: {}", e)))?;
+
+    let mut items = Vec::new();
+    for hs in header_sets {
+        let header_names = state.db.list_header_set_header_names(&hs.name).await
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to list headers for '{}': {}", hs.name, e)))?;
+        items.push(HeaderSetListItem {
+            name: hs.name,
+            match_patterns: hs.match_patterns,
+            weight: hs.weight,
+            headers: header_names,
+        });
+    }
+
+    Ok(Json(HeaderSetListResponse { header_sets: items }))
+}
+
+/// PATCH /header-sets/:name - Update a header set (requires auth)
+async fn update_header_set(
+    State(state): State<ApiState>,
+    Path(name): Path<String>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    verify_auth(&state, &headers).await?;
+    let req: UpdateHeaderSetRequest = serde_json::from_slice(&body)
+        .map_err(|e| (StatusCode::BAD_REQUEST, format!("Invalid request body: {}", e)))?;
+
+    if req.match_patterns.is_none() && req.weight.is_none() {
+        return Err((StatusCode::BAD_REQUEST, "At least one field (match_patterns or weight) must be provided".to_string()));
+    }
+
+    // Verify exists first to return proper 404
+    let exists = state.db.get_header_set(&name).await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to check header set: {}", e)))?;
+    if exists.is_none() {
+        return Err((StatusCode::NOT_FOUND, format!("Header set '{}' not found", name)));
+    }
+
+    state.db.update_header_set(&name, req.match_patterns.as_deref(), req.weight).await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to update header set: {}", e)))?;
+
+    emit_management_log(&state, ManagementLogEntry {
+        timestamp: chrono::Utc::now(),
+        operation: "header_set_update".to_string(),
+        resource_type: "header_set".to_string(),
+        resource_id: Some(name.clone()),
+        detail: None,
+        success: true,
+        error_message: None,
+    });
+
+    Ok(Json(serde_json::json!({"name": name, "updated": true})))
+}
+
+/// DELETE /header-sets/:name - Delete a header set (requires auth)
+async fn delete_header_set(
+    State(state): State<ApiState>,
+    Path(name): Path<String>,
+    headers: HeaderMap,
+) -> Result<Json<DeleteResponse>, (StatusCode, String)> {
+    verify_auth(&state, &headers).await?;
+
+    state.db.remove_header_set(&name).await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to delete header set: {}", e)))?;
+
+    emit_management_log(&state, ManagementLogEntry {
+        timestamp: chrono::Utc::now(),
+        operation: "header_set_delete".to_string(),
+        resource_type: "header_set".to_string(),
+        resource_id: Some(name.clone()),
+        detail: None,
+        success: true,
+        error_message: None,
+    });
+
+    Ok(Json(DeleteResponse { deleted: true }))
+}
+
+/// POST /header-sets/:name/headers - Set a header on a header set (requires auth)
+async fn set_header_set_header(
+    State(state): State<ApiState>,
+    Path(name): Path<String>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    verify_auth(&state, &headers).await?;
+    let req: SetHeaderRequest = serde_json::from_slice(&body)
+        .map_err(|e| (StatusCode::BAD_REQUEST, format!("Invalid request body: {}", e)))?;
+
+    // Verify header set exists
+    let exists = state.db.get_header_set(&name).await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to check header set: {}", e)))?;
+    if exists.is_none() {
+        return Err((StatusCode::NOT_FOUND, format!("Header set '{}' not found", name)));
+    }
+
+    state.db.set_header_set_header(&name, &req.name, &req.value).await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to set header: {}", e)))?;
+
+    let header_name = req.name.clone();
+    emit_management_log(&state, ManagementLogEntry {
+        timestamp: chrono::Utc::now(),
+        operation: "header_set_header_set".to_string(),
+        resource_type: "header_set".to_string(),
+        resource_id: Some(name.clone()),
+        detail: Some(header_name.clone()),
+        success: true,
+        error_message: None,
+    });
+
+    Ok(Json(serde_json::json!({"header_set": name, "header": header_name, "set": true})))
+}
+
+/// DELETE /header-sets/:name/headers/:header_name - Delete a header from a header set (requires auth)
+async fn delete_header_set_header(
+    State(state): State<ApiState>,
+    Path((name, header_name)): Path<(String, String)>,
+    headers: HeaderMap,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    verify_auth(&state, &headers).await?;
+
+    state.db.remove_header_set_header(&name, &header_name).await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to delete header: {}", e)))?;
+
+    emit_management_log(&state, ManagementLogEntry {
+        timestamp: chrono::Utc::now(),
+        operation: "header_set_header_delete".to_string(),
+        resource_type: "header_set".to_string(),
+        resource_id: Some(name.clone()),
+        detail: Some(header_name.clone()),
+        success: true,
+        error_message: None,
+    });
+
+    Ok(Json(serde_json::json!({"header_set": name, "header": header_name, "deleted": true})))
+}
+
+/// PATCH /plugins/:name - Update plugin weight (requires auth)
+async fn update_plugin(
+    State(state): State<ApiState>,
+    Path(name): Path<String>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Result<Json<UpdatePluginResponse>, (StatusCode, String)> {
+    verify_auth(&state, &headers).await?;
+    let req: UpdatePluginRequest = serde_json::from_slice(&body)
+        .map_err(|e| (StatusCode::BAD_REQUEST, format!("Invalid request body: {}", e)))?;
+
+    let exists = state.db.has_plugin(&name).await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to check plugin: {}", e)))?;
+    if !exists {
+        return Err((StatusCode::NOT_FOUND, format!("Plugin '{}' is not installed.", name)));
+    }
+
+    state.db.update_plugin_weight(&name, req.weight).await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to update plugin weight: {}", e)))?;
+
+    emit_management_log(&state, ManagementLogEntry {
+        timestamp: chrono::Utc::now(),
+        operation: "plugin_update".to_string(),
+        resource_type: "plugin".to_string(),
+        resource_id: Some(name.clone()),
+        detail: Some(format!("weight={}", req.weight)),
+        success: true,
+        error_message: None,
+    });
+
+    Ok(Json(UpdatePluginResponse { name, updated: true }))
 }
 
 #[cfg(test)]
@@ -3175,5 +3446,330 @@ mod tests {
         // Verify plugin was stored in the database
         let plugins = db.list_plugins().await.expect("list plugins");
         assert!(plugins.iter().any(|p| p.name == "es6-plugin"), "es6 plugin should be in database");
+    }
+
+    // ── HeaderSet endpoint tests ──────────────────────────────────────────
+
+    #[tokio::test]
+    async fn test_create_header_set() {
+        let db = create_test_db().await;
+        let state = ApiState::new(9443, 9080, Arc::clone(&db));
+        let password = setup_auth(&state).await;
+        let app = create_router(state);
+
+        let body = serde_json::json!({
+            "name": "my-headers",
+            "match_patterns": ["api.example.com"],
+            "weight": 10
+        });
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/header-sets")
+                    .header("content-type", "application/json")
+                    .header("Authorization", format!("Bearer {}", password))
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let body_bytes = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let resp: serde_json::Value = serde_json::from_slice(&body_bytes).unwrap();
+        assert_eq!(resp["name"], "my-headers");
+        assert_eq!(resp["created"], true);
+
+        // Verify stored in DB
+        let hs = db.get_header_set("my-headers").await.unwrap().expect("header set should exist");
+        assert_eq!(hs.match_patterns, vec!["api.example.com"]);
+        assert_eq!(hs.weight, 10);
+    }
+
+    #[tokio::test]
+    async fn test_create_header_set_no_auth() {
+        let db = create_test_db().await;
+        let state = ApiState::new(9443, 9080, db);
+        let app = create_router(state);
+
+        let body = serde_json::json!({
+            "name": "my-headers",
+            "match_patterns": ["api.example.com"]
+        });
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/header-sets")
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn test_list_header_sets() {
+        let db = create_test_db().await;
+        let state = ApiState::new(9443, 9080, Arc::clone(&db));
+        let password = setup_auth(&state).await;
+
+        // Pre-populate via DB
+        db.add_header_set("auth-headers", &["api.example.com".to_string()], 5)
+            .await.unwrap();
+        db.set_header_set_header("auth-headers", "Authorization", "Bearer secret-value")
+            .await.unwrap();
+        db.set_header_set_header("auth-headers", "X-Custom", "some-value")
+            .await.unwrap();
+
+        let app = create_router(state);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/header-sets")
+                    .header("Authorization", format!("Bearer {}", password))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let body_bytes = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let resp: serde_json::Value = serde_json::from_slice(&body_bytes).unwrap();
+        let header_sets = resp["header_sets"].as_array().unwrap();
+        assert_eq!(header_sets.len(), 1);
+
+        let hs = &header_sets[0];
+        assert_eq!(hs["name"], "auth-headers");
+        assert_eq!(hs["weight"], 5);
+
+        // Should include header names but NOT values
+        let headers = hs["headers"].as_array().unwrap();
+        assert_eq!(headers.len(), 2);
+        let names: Vec<&str> = headers.iter().map(|h| h.as_str().unwrap()).collect();
+        assert!(names.contains(&"Authorization"), "should include 'Authorization' header name");
+        assert!(names.contains(&"X-Custom"), "should include 'X-Custom' header name");
+
+        // Values must NOT appear anywhere in the response
+        let body_str = String::from_utf8_lossy(&body_bytes);
+        assert!(!body_str.contains("Bearer secret-value"), "header values must not appear in response");
+        assert!(!body_str.contains("some-value"), "header values must not appear in response");
+    }
+
+    #[tokio::test]
+    async fn test_update_header_set() {
+        let db = create_test_db().await;
+        let state = ApiState::new(9443, 9080, Arc::clone(&db));
+        let password = setup_auth(&state).await;
+
+        db.add_header_set("my-headers", &["api.example.com".to_string()], 0)
+            .await.unwrap();
+
+        let app = create_router(state);
+
+        let body = serde_json::json!({ "weight": 42 });
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("PATCH")
+                    .uri("/header-sets/my-headers")
+                    .header("content-type", "application/json")
+                    .header("Authorization", format!("Bearer {}", password))
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let body_bytes = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let resp: serde_json::Value = serde_json::from_slice(&body_bytes).unwrap();
+        assert_eq!(resp["updated"], true);
+
+        // Verify updated in DB
+        let hs = db.get_header_set("my-headers").await.unwrap().expect("should exist");
+        assert_eq!(hs.weight, 42);
+    }
+
+    #[tokio::test]
+    async fn test_delete_header_set() {
+        let db = create_test_db().await;
+        let state = ApiState::new(9443, 9080, Arc::clone(&db));
+        let password = setup_auth(&state).await;
+
+        db.add_header_set("to-delete", &["api.example.com".to_string()], 0)
+            .await.unwrap();
+
+        let app = create_router(state);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("DELETE")
+                    .uri("/header-sets/to-delete")
+                    .header("Authorization", format!("Bearer {}", password))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let body_bytes = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let resp: serde_json::Value = serde_json::from_slice(&body_bytes).unwrap();
+        assert_eq!(resp["deleted"], true);
+
+        // Verify removed from DB
+        let hs = db.get_header_set("to-delete").await.unwrap();
+        assert!(hs.is_none(), "header set should be deleted");
+
+        // Verify not in list
+        let all = db.list_header_sets().await.unwrap();
+        assert!(all.iter().all(|h| h.name != "to-delete"), "should not appear in list");
+    }
+
+    #[tokio::test]
+    async fn test_set_header_set_header() {
+        let db = create_test_db().await;
+        let state = ApiState::new(9443, 9080, Arc::clone(&db));
+        let password = setup_auth(&state).await;
+
+        db.add_header_set("my-headers", &["api.example.com".to_string()], 0)
+            .await.unwrap();
+
+        let app = create_router(state);
+
+        let body = serde_json::json!({
+            "name": "Authorization",
+            "value": "Bearer my-secret-token"
+        });
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/header-sets/my-headers/headers")
+                    .header("content-type", "application/json")
+                    .header("Authorization", format!("Bearer {}", password))
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let body_bytes = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let resp: serde_json::Value = serde_json::from_slice(&body_bytes).unwrap();
+        assert_eq!(resp["set"], true);
+        assert_eq!(resp["header"], "Authorization");
+
+        // Verify stored in DB (by listing names)
+        let names = db.list_header_set_header_names("my-headers").await.unwrap();
+        assert!(names.contains(&"Authorization".to_string()), "Authorization header should be stored");
+    }
+
+    #[tokio::test]
+    async fn test_delete_header_set_header() {
+        let db = create_test_db().await;
+        let state = ApiState::new(9443, 9080, Arc::clone(&db));
+        let password = setup_auth(&state).await;
+
+        db.add_header_set("my-headers", &["api.example.com".to_string()], 0)
+            .await.unwrap();
+        db.set_header_set_header("my-headers", "Authorization", "Bearer token")
+            .await.unwrap();
+        db.set_header_set_header("my-headers", "X-Custom", "value")
+            .await.unwrap();
+
+        let app = create_router(state);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("DELETE")
+                    .uri("/header-sets/my-headers/headers/Authorization")
+                    .header("Authorization", format!("Bearer {}", password))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let body_bytes = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let resp: serde_json::Value = serde_json::from_slice(&body_bytes).unwrap();
+        assert_eq!(resp["deleted"], true);
+        assert_eq!(resp["header"], "Authorization");
+
+        // Verify Authorization removed, X-Custom still there
+        let names = db.list_header_set_header_names("my-headers").await.unwrap();
+        assert!(!names.contains(&"Authorization".to_string()), "Authorization should be removed");
+        assert!(names.contains(&"X-Custom".to_string()), "X-Custom should remain");
+    }
+
+    #[tokio::test]
+    async fn test_update_plugin_weight() {
+        let db = create_test_db().await;
+        let state = ApiState::new(9443, 9080, Arc::clone(&db));
+        let password = setup_auth(&state).await;
+
+        // Register a plugin first
+        let plugin_entry = gap_lib::types::PluginEntry {
+            name: "test-plugin".to_string(),
+            hosts: vec!["api.example.com".to_string()],
+            credential_schema: vec![],
+            commit_sha: None,
+            dangerously_permit_http: false,
+            weight: 0,
+            installed_at: None,
+        };
+        db.add_plugin(&plugin_entry, "var plugin = {};").await.unwrap();
+
+        let app = create_router(state);
+
+        let body = serde_json::json!({ "weight": 100 });
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("PATCH")
+                    .uri("/plugins/test-plugin")
+                    .header("content-type", "application/json")
+                    .header("Authorization", format!("Bearer {}", password))
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        let status = response.status();
+        let body_bytes = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let body_str = String::from_utf8_lossy(&body_bytes);
+        assert_eq!(status, StatusCode::OK, "Expected OK, got {}: {}", status, body_str);
+
+        let resp: UpdatePluginResponse = serde_json::from_slice(&body_bytes).unwrap();
+        assert_eq!(resp.name, "test-plugin");
+        assert!(resp.updated);
+
+        // Verify weight updated in DB
+        let plugins = db.list_plugins().await.unwrap();
+        let plugin = plugins.iter().find(|p| p.name == "test-plugin").unwrap();
+        assert_eq!(plugin.weight, 100);
     }
 }

@@ -348,7 +348,7 @@ async fn handle_connection(
         debug!("Upstream TLS established");
 
         // Bidirectional proxy with HTTP transformation via hyper
-        proxy_via_hyper(agent_stream, upstream_stream, hostname, db, agent_token.name.clone(), is_h2, true, activity_tx).await?;
+        proxy_via_hyper(agent_stream, upstream_stream, hostname, port, db, agent_token.name.clone(), is_h2, true, activity_tx).await?;
     } else {
         // --- Plain HTTP path: no TLS on either side ---
         debug!("Plain HTTP detected through CONNECT tunnel to {}:{}", hostname, port);
@@ -360,7 +360,7 @@ async fn handle_connection(
         debug!("Upstream plain TCP established");
 
         // Proxy via hyper with use_tls=false (HTTP/1.1 only for plain HTTP)
-        proxy_via_hyper(stream, upstream_stream, hostname, db, agent_token.name.clone(), false, false, activity_tx).await?;
+        proxy_via_hyper(stream, upstream_stream, hostname, port, db, agent_token.name.clone(), false, false, activity_tx).await?;
     }
 
     Ok(())
@@ -536,6 +536,7 @@ async fn proxy_via_hyper<A, U>(
     agent_stream: A,
     upstream_stream: U,
     hostname: String,
+    connect_port: u16,
     db: Arc<GapDatabase>,
     agent_name: String,
     is_h2: bool,
@@ -594,8 +595,14 @@ where
                     url = %url,
                 );
 
+                // Extract path from the request for matching
+                let req_path = req.uri()
+                    .path_and_query()
+                    .map(|pq| pq.path().to_string())
+                    .unwrap_or_else(|| "/".to_string());
+
                 let transform_result = crate::proxy_transforms::transform_request(
-                    gap_req, &hostname, &db, use_tls
+                    gap_req, &hostname, Some(connect_port), &req_path, &db, use_tls
                 ).instrument(span.clone()).await;
 
                 let (gap_req, plugin_info) = match transform_result {
@@ -779,8 +786,14 @@ where
                     url = %url,
                 );
 
+                // Extract path from the request for matching
+                let req_path = req.uri()
+                    .path_and_query()
+                    .map(|pq| pq.path().to_string())
+                    .unwrap_or_else(|| "/".to_string());
+
                 let transform_result = crate::proxy_transforms::transform_request(
-                    gap_req, &hostname, &db, use_tls
+                    gap_req, &hostname, Some(connect_port), &req_path, &db, use_tls
                 ).instrument(span.clone()).await;
 
                 let (gap_req, plugin_info) = match transform_result {
@@ -931,9 +944,14 @@ where
 
 /// Classify a transform_request error into a rejection stage and reason.
 fn classify_rejection(err_msg: &str) -> (String, String) {
-    let stage = if err_msg.contains("no plugin registered") || err_msg.contains("not allowed: no plugin") {
+    let stage = if err_msg.contains("no plugin registered")
+        || err_msg.contains("not allowed: no plugin")
+        || err_msg.contains("no matching plugin or header set")
+    {
         "no_matching_plugin"
-    } else if err_msg.contains("no credentials configured") {
+    } else if err_msg.contains("no credentials configured")
+        || err_msg.contains("has no headers configured")
+    {
         "missing_credentials"
     } else if err_msg.contains("does not permit") && err_msg.contains("HTTP") {
         "http_blocked"
@@ -1304,6 +1322,7 @@ mod tests {
                 agent_proxy,
                 upstream_proxy,
                 "api.test.com".to_string(),
+                443,
                 proxy_db,
                 "test-agent".to_string(),
                 false, // is_h2 = false for H1
@@ -1459,6 +1478,7 @@ mod tests {
                 agent_proxy,
                 upstream_proxy,
                 "api.httptest.com".to_string(),
+                80,
                 proxy_db,
                 "test-agent".to_string(),
                 false, // is_h2 = false for H1
@@ -1570,6 +1590,7 @@ mod tests {
                 agent_proxy,
                 upstream_proxy,
                 "api.details.com".to_string(),
+                443,
                 proxy_db,
                 "details-agent".to_string(),
                 false,
