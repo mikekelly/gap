@@ -19,8 +19,9 @@ pub struct CertificateAuthority {
     /// The CA key PEM (for export)
     ca_key_pem: String,
     /// DER-encoded certificates to include in TLS chains after the leaf cert.
-    /// Empty for root CAs (self-signed). For intermediate CAs, contains the
-    /// signing cert and any additional intermediates (but NOT the root).
+    /// Empty for root CAs (self-signed). For intermediate CAs, contains all
+    /// certs from the input PEM chain (typically the signing cert and any
+    /// additional intermediates, excluding the root which clients already trust).
     chain_certs: Vec<Vec<u8>>,
     /// Certificate cache
     cache: Arc<RwLock<CertificateCache>>,
