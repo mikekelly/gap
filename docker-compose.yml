@@ -68,6 +68,26 @@ services:
     profiles:
       - test
 
+  # Go client integration test runner
+  # Runs Go integration tests against the GAP server
+  # Usage: docker compose --profile go-test up go-test-runner --build
+  go-test-runner:
+    build:
+      context: ./management-go
+      dockerfile: Dockerfile.test
+    depends_on:
+      gap-server:
+        condition: service_healthy
+    volumes:
+      - gap-data:/var/lib/gap:ro
+    environment:
+      - GAP_SERVER_URL=https://gap-server:9080
+      - GAP_CA_CERT=/var/lib/gap/ca.crt
+    networks:
+      - gap-network
+    profiles:
+      - go-test
+
   # Mock upstream API for testing
   # Provides a simple echo/mirror service to test proxy behavior
   mock-api:

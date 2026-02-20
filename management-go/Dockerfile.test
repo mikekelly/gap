@@ -1,0 +1,17 @@
+FROM golang:1.22-alpine AS builder
+
+WORKDIR /app
+
+# Copy go.mod (no go.sum since zero deps)
+COPY go.mod ./
+COPY *.go ./
+
+# Build test binary (with integration tag)
+RUN go test -tags integration -c -o /test-runner .
+
+FROM alpine:3.19
+
+COPY --from=builder /test-runner /test-runner
+
+# The entrypoint runs the compiled test binary
+ENTRYPOINT ["/test-runner", "-test.v"]
