@@ -26,6 +26,7 @@ use axum::{
 use chrono::{DateTime, Utc};
 use futures::stream::Stream;
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::convert::Infallible;
 use std::sync::Arc;
 use tokio::sync::RwLock;
@@ -1184,6 +1185,8 @@ struct CreateHeaderSetRequest {
     match_patterns: Vec<String>,
     #[serde(default)]
     weight: i32,
+    #[serde(default)]
+    headers: HashMap<String, String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -1253,6 +1256,12 @@ async fn create_header_set(
 
     state.db.add_header_set(&req.name, &req.match_patterns, req.weight).await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to create header set: {}", e)))?;
+
+    for (header_name, header_value) in &req.headers {
+        state.db.set_header_set_header(&req.name, header_name, header_value)
+            .await
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to set header: {}", e)))?;
+    }
 
     let name = req.name.clone();
     emit_management_log(&state, ManagementLogEntry {
@@ -3558,6 +3567,51 @@ mod tests {
         let body_bytes = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
         let body_str = String::from_utf8_lossy(&body_bytes);
         assert!(body_str.contains("match_patterns must not be empty"), "got: {}", body_str);
+    }
+
+    #[tokio::test]
+    async fn test_create_header_set_with_headers() {
+        // Creating a header set with inline headers should store them atomically.
+        // The caller shouldn't need a second request to set initial headers.
+        let db = create_test_db().await;
+        let state = ApiState::new(9443, 9080, Arc::clone(&db));
+        let password = setup_auth(&state).await;
+        let app = create_router(state);
+
+        let body = serde_json::json!({
+            "name": "my-headers",
+            "match_patterns": ["api.example.com"],
+            "weight": 5,
+            "headers": {
+                "Authorization": "Bearer secret",
+                "X-Custom": "custom-value"
+            }
+        });
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/header-sets")
+                    .header("content-type", "application/json")
+                    .header("Authorization", format!("Bearer {}", password))
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let body_bytes = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let resp: serde_json::Value = serde_json::from_slice(&body_bytes).unwrap();
+        assert_eq!(resp["name"], "my-headers");
+        assert_eq!(resp["created"], true);
+
+        // Verify headers were stored in the DB
+        let names = db.list_header_set_header_names("my-headers").await.unwrap();
+        assert!(names.contains(&"Authorization".to_string()), "Authorization should be stored; got: {:?}", names);
+        assert!(names.contains(&"X-Custom".to_string()), "X-Custom should be stored; got: {:?}", names);
     }
 
     #[tokio::test]
