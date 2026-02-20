@@ -17,12 +17,55 @@ use crate::types::AgentToken;
 use crate::proxy_transforms::{scrub_body, scrub_response_headers, MAX_BODY_SIZE};
 use rustls::pki_types::CertificateDer;
 use rustls::ServerConfig;
+use std::collections::HashMap;
 use std::sync::Arc;
+use std::sync::RwLock;
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{TcpListener, TcpStream};
 use tokio_rustls::{TlsAcceptor, TlsConnector};
 use rand::Rng;
 use tracing::{debug, error, info, Instrument};
+
+/// In-memory cache of validated tokens to avoid DB lookups on every request.
+/// Shared between proxy and API so revocations take effect immediately.
+#[derive(Debug)]
+pub struct TokenCache {
+    inner: RwLock<HashMap<String, ValidatedToken>>,
+}
+
+impl TokenCache {
+    pub fn new() -> Self {
+        Self {
+            inner: RwLock::new(HashMap::new()),
+        }
+    }
+
+    /// Look up a token by its full value. Returns cloned ValidatedToken if cached.
+    pub fn get(&self, token_value: &str) -> Option<ValidatedToken> {
+        self.inner.read().unwrap().get(token_value).cloned()
+    }
+
+    /// Cache a validated token.
+    pub fn insert(&self, token_value: String, token: ValidatedToken) {
+        self.inner.write().unwrap().insert(token_value, token);
+    }
+
+    /// Remove a specific token from cache.
+    pub fn invalidate(&self, token_value: &str) {
+        self.inner.write().unwrap().remove(token_value);
+    }
+
+    /// Clear the entire cache (used on revoke-by-prefix since we don't know the full value).
+    pub fn clear(&self) {
+        self.inner.write().unwrap().clear();
+    }
+}
+
+impl Default for TokenCache {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 
 /// ProxyServer handles MITM HTTPS proxy with agent authentication
 pub struct ProxyServer {
@@ -44,6 +87,8 @@ pub struct ProxyServer {
     /// When set, each proxied request's ActivityEntry is sent here in addition
     /// to being logged to the database.
     activity_tx: Option<tokio::sync::broadcast::Sender<ActivityEntry>>,
+    /// In-memory token cache to avoid DB lookups per request
+    token_cache: Arc<TokenCache>,
 }
 
 impl ProxyServer {
@@ -53,6 +98,7 @@ impl ProxyServer {
         ca: CertificateAuthority,
         db: Arc<GapDatabase>,
         bind_address: String,
+        token_cache: Arc<TokenCache>,
     ) -> Result<Self> {
         // Store root certs for building per-connection upstream TLS connectors
         let upstream_root_certs = Arc::new(rustls::RootCertStore {
@@ -81,6 +127,7 @@ impl ProxyServer {
             upstream_root_certs,
             proxy_acceptor,
             activity_tx: None,
+            token_cache,
         })
     }
 
@@ -96,6 +143,7 @@ impl ProxyServer {
         db: Arc<GapDatabase>,
         upstream_root_certs: Arc<rustls::RootCertStore>,
         bind_address: String,
+        token_cache: Arc<TokenCache>,
     ) -> Result<Self> {
         // Wrap CA in Arc early so it can be shared between the resolver and the struct
         let ca = Arc::new(ca);
@@ -119,6 +167,7 @@ impl ProxyServer {
             upstream_root_certs,
             proxy_acceptor,
             activity_tx: None,
+            token_cache,
         })
     }
 
@@ -140,7 +189,7 @@ impl ProxyServer {
                 .expect("add token to db");
         }
 
-        Self::new(port, ca, db, "127.0.0.1".to_string())
+        Self::new(port, ca, db, "127.0.0.1".to_string(), Arc::new(TokenCache::new()))
     }
 
     /// Start the proxy server
@@ -164,9 +213,10 @@ impl ProxyServer {
             let upstream_root_certs = Arc::clone(&self.upstream_root_certs);
             let proxy_acceptor = self.proxy_acceptor.clone();
             let activity_tx = self.activity_tx.clone();
+            let token_cache = Arc::clone(&self.token_cache);
 
             tokio::spawn(async move {
-                if let Err(e) = handle_connection(stream, ca, db, upstream_root_certs, proxy_acceptor, activity_tx).await {
+                if let Err(e) = handle_connection(stream, ca, db, upstream_root_certs, proxy_acceptor, activity_tx, token_cache).await {
                     error!("Connection error: {}", e);
                 }
             });
@@ -251,6 +301,7 @@ async fn handle_connection(
     upstream_root_certs: Arc<rustls::RootCertStore>,
     proxy_acceptor: TlsAcceptor,
     activity_tx: Option<tokio::sync::broadcast::Sender<ActivityEntry>>,
+    token_cache: Arc<TokenCache>,
 ) -> Result<()> {
     // First, accept the TLS connection from the proxy client
     let tls_stream = proxy_acceptor
@@ -289,8 +340,8 @@ async fn handle_connection(
         headers.push(line);
     }
 
-    // Validate authentication
-    let validated_token = validate_auth(&headers, &db).await?;
+    // Validate authentication (checks cache first, then DB)
+    let validated_token = validate_auth(&headers, &db, &token_cache).await?;
 
     // Parse target early so we can scope-check before accepting the tunnel
     let (hostname, port) = parse_host_port(&target)?;
@@ -396,10 +447,12 @@ fn parse_connect_request(line: &str) -> Result<String> {
     Ok(parts[1].to_string())
 }
 
-/// Validate Proxy-Authorization header
+/// Validate Proxy-Authorization header.
+/// Checks the in-memory token cache first to avoid a DB lookup on every request.
 async fn validate_auth(
     headers: &[String],
     db: &GapDatabase,
+    token_cache: &TokenCache,
 ) -> Result<ValidatedToken> {
     for header in headers {
         let header = header.trim();
@@ -413,17 +466,25 @@ async fn validate_auth(
                 return Err(GapError::auth("Invalid authorization scheme, expected Bearer"));
             };
 
-            // Check if token exists in database
+            // Check cache first
+            if let Some(validated) = token_cache.get(&token_value) {
+                return Ok(validated);
+            }
+
+            // Cache miss — check database
             if let Some(metadata) = db.get_token(&token_value).await? {
                 let prefix = if token_value.len() >= 12 {
                     token_value[..12].to_string()
                 } else {
                     token_value.clone()
                 };
-                return Ok(ValidatedToken {
+                let validated = ValidatedToken {
                     prefix,
                     scopes: metadata.scopes,
-                });
+                };
+                // Populate cache
+                token_cache.insert(token_value, validated.clone());
+                return Ok(validated);
             }
 
             return Err(GapError::auth("Invalid bearer token"));
@@ -1101,6 +1162,7 @@ mod tests {
     #[tokio::test]
     async fn test_validate_auth_valid() {
         let db = GapDatabase::in_memory().await.unwrap();
+        let cache = TokenCache::new();
 
         let token = AgentToken::new();
         let token_value = token.token.clone();
@@ -1111,13 +1173,14 @@ mod tests {
 
         let headers = vec![format!("Proxy-Authorization: Bearer {}", token_value)];
 
-        let result = validate_auth(&headers, &db).await;
+        let result = validate_auth(&headers, &db, &cache).await;
         assert!(result.is_ok());
     }
 
     #[tokio::test]
     async fn test_validate_auth_invalid_token() {
         let db = GapDatabase::in_memory().await.unwrap();
+        let cache = TokenCache::new();
 
         let token = AgentToken::new();
         db.add_token(&token.token, token.created_at, None)
@@ -1126,16 +1189,17 @@ mod tests {
 
         let headers = vec!["Proxy-Authorization: Bearer wrong-token".to_string()];
 
-        let result = validate_auth(&headers, &db).await;
+        let result = validate_auth(&headers, &db, &cache).await;
         assert!(result.is_err());
     }
 
     #[tokio::test]
     async fn test_validate_auth_missing() {
         let db = GapDatabase::in_memory().await.unwrap();
+        let cache = TokenCache::new();
         let headers = vec!["Host: example.com".to_string()];
 
-        let result = validate_auth(&headers, &db).await;
+        let result = validate_auth(&headers, &db, &cache).await;
         assert!(result.is_err());
     }
 
@@ -1763,5 +1827,108 @@ mod tests {
         prefixed.read_exact(&mut read_buf).await.unwrap();
         assert_eq!(read_buf[0], 0x16); // prefix byte
         assert_eq!(&read_buf[1..], b"world");
+    }
+
+    #[test]
+    fn test_token_cache_insert_and_get() {
+        let cache = TokenCache::new();
+        let token = ValidatedToken {
+            prefix: "abc123".to_string(),
+            scopes: None,
+        };
+        cache.insert("full-token-value".to_string(), token.clone());
+        let cached = cache.get("full-token-value");
+        assert!(cached.is_some());
+        assert_eq!(cached.unwrap().prefix, "abc123");
+    }
+
+    #[test]
+    fn test_token_cache_miss() {
+        let cache = TokenCache::new();
+        assert!(cache.get("nonexistent").is_none());
+    }
+
+    #[test]
+    fn test_token_cache_invalidate() {
+        let cache = TokenCache::new();
+        let token = ValidatedToken {
+            prefix: "abc123".to_string(),
+            scopes: None,
+        };
+        cache.insert("token-to-remove".to_string(), token);
+        cache.invalidate("token-to-remove");
+        assert!(cache.get("token-to-remove").is_none());
+    }
+
+    #[test]
+    fn test_token_cache_clear() {
+        let cache = TokenCache::new();
+        let token1 = ValidatedToken { prefix: "aaa".to_string(), scopes: None };
+        let token2 = ValidatedToken { prefix: "bbb".to_string(), scopes: None };
+        cache.insert("token-1".to_string(), token1);
+        cache.insert("token-2".to_string(), token2);
+        cache.clear();
+        assert!(cache.get("token-1").is_none());
+        assert!(cache.get("token-2").is_none());
+    }
+
+    /// Verify that validate_auth populates the cache on first call,
+    /// and that the second call returns the cached value.
+    #[tokio::test]
+    async fn test_validate_auth_populates_cache() {
+        let db = GapDatabase::in_memory().await.unwrap();
+        let cache = TokenCache::new();
+
+        let token = AgentToken::new();
+        let token_value = token.token.clone();
+        db.add_token(&token.token, token.created_at, None)
+            .await
+            .expect("add token to db");
+
+        let headers = vec![format!("Proxy-Authorization: Bearer {}", token_value)];
+
+        // First call: cache miss, goes to DB
+        let result = validate_auth(&headers, &db, &cache).await;
+        assert!(result.is_ok());
+
+        // Cache should now contain the token
+        let cached = cache.get(&token_value);
+        assert!(cached.is_some(), "Token should be cached after first validate_auth call");
+        assert_eq!(cached.unwrap().prefix, token_value[..12]);
+
+        // Second call: should hit cache (we can't easily prove DB wasn't called,
+        // but we verify correctness)
+        let result2 = validate_auth(&headers, &db, &cache).await;
+        assert!(result2.is_ok());
+        assert_eq!(result2.unwrap().prefix, token_value[..12]);
+    }
+
+    /// Verify that clearing the cache forces a DB lookup on next validate_auth call.
+    #[tokio::test]
+    async fn test_validate_auth_after_cache_clear() {
+        let db = GapDatabase::in_memory().await.unwrap();
+        let cache = TokenCache::new();
+
+        let token = AgentToken::new();
+        let token_value = token.token.clone();
+        db.add_token(&token.token, token.created_at, None)
+            .await
+            .expect("add token to db");
+
+        let headers = vec![format!("Proxy-Authorization: Bearer {}", token_value)];
+
+        // Populate cache
+        validate_auth(&headers, &db, &cache).await.unwrap();
+        assert!(cache.get(&token_value).is_some());
+
+        // Clear cache
+        cache.clear();
+        assert!(cache.get(&token_value).is_none());
+
+        // Should still succeed (goes back to DB)
+        let result = validate_auth(&headers, &db, &cache).await;
+        assert!(result.is_ok());
+        // Cache should be repopulated
+        assert!(cache.get(&token_value).is_some());
     }
 }

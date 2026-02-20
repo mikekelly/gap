@@ -9,7 +9,7 @@
 //!   Client --TLS(proxy CA)--> Proxy (CONNECT) --TLS(server CA)--> Echo HTTPS Server
 
 use gap_lib::database::GapDatabase;
-use gap_lib::proxy::ProxyServer;
+use gap_lib::proxy::{ProxyServer, TokenCache};
 use gap_lib::tls::CertificateAuthority;
 use gap_lib::types::{AgentToken, PluginEntry};
 use rustls::pki_types::ServerName;
@@ -274,6 +274,7 @@ async fn start_proxy(
         db,
         upstream_root_certs,
         "127.0.0.1".to_string(),
+        Arc::new(TokenCache::new()),
     )
     .expect("create proxy");
 
@@ -314,9 +315,9 @@ async fn test_e2e_header_set_injection() {
         .expect("set X-Custom header");
 
     // Add agent token
-    let token = AgentToken::new("e2e-header-set-agent");
+    let token = AgentToken::new();
     let token_value = token.token.clone();
-    db.add_token(&token.token, &token.name, token.created_at)
+    db.add_token(&token.token, token.created_at, None)
         .await
         .expect("store token");
 
@@ -400,9 +401,9 @@ async fn test_e2e_header_set_vs_plugin_weight() {
         .expect("set X-Source header");
 
     // Add agent token
-    let token = AgentToken::new("e2e-weight-agent");
+    let token = AgentToken::new();
     let token_value = token.token.clone();
-    db.add_token(&token.token, &token.name, token.created_at)
+    db.add_token(&token.token, token.created_at, None)
         .await
         .expect("store token");
 
@@ -447,9 +448,9 @@ async fn test_e2e_header_set_path_matching() {
         .expect("set X-Api-Key header");
 
     // Add agent token
-    let token = AgentToken::new("e2e-path-agent");
+    let token = AgentToken::new();
     let token_value = token.token.clone();
-    db.add_token(&token.token, &token.name, token.created_at)
+    db.add_token(&token.token, token.created_at, None)
         .await
         .expect("store token");
 
@@ -544,9 +545,9 @@ async fn test_e2e_plugin_beats_header_set_by_weight() {
         .expect("set X-Source header");
 
     // Add agent token
-    let token = AgentToken::new("e2e-plugin-wins-agent");
+    let token = AgentToken::new();
     let token_value = token.token.clone();
-    db.add_token(&token.token, &token.name, token.created_at)
+    db.add_token(&token.token, token.created_at, None)
         .await
         .expect("store token");
 
@@ -598,9 +599,9 @@ async fn test_e2e_header_set_vs_header_set_weight() {
         .expect("set X-Source for hs-b");
 
     // Add agent token
-    let token = AgentToken::new("e2e-hs-vs-hs-agent");
+    let token = AgentToken::new();
     let token_value = token.token.clone();
-    db.add_token(&token.token, &token.name, token.created_at)
+    db.add_token(&token.token, token.created_at, None)
         .await
         .expect("store token");
 
@@ -656,9 +657,9 @@ async fn test_e2e_same_weight_oldest_wins() {
         .expect("set X-Source for newer hs");
 
     // Add agent token
-    let token = AgentToken::new("e2e-oldest-wins-agent");
+    let token = AgentToken::new();
     let token_value = token.token.clone();
-    db.add_token(&token.token, &token.name, token.created_at)
+    db.add_token(&token.token, token.created_at, None)
         .await
         .expect("store token");
 
@@ -711,9 +712,9 @@ async fn test_e2e_path_specific_header_set_wins_by_weight() {
         .expect("set X-Source for catchall hs");
 
     // Add agent token
-    let token = AgentToken::new("e2e-path-weight-agent");
+    let token = AgentToken::new();
     let token_value = token.token.clone();
-    db.add_token(&token.token, &token.name, token.created_at)
+    db.add_token(&token.token, token.created_at, None)
         .await
         .expect("store token");
 

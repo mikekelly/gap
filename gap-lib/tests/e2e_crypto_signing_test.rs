@@ -23,7 +23,7 @@
 
 use base64::prelude::*;
 use gap_lib::database::GapDatabase;
-use gap_lib::proxy::ProxyServer;
+use gap_lib::proxy::{ProxyServer, TokenCache};
 use gap_lib::tls::CertificateAuthority;
 use gap_lib::types::{AgentToken, PluginEntry};
 use ring::rand::SystemRandom;
@@ -125,9 +125,9 @@ async fn setup_test_db(pkcs8_b64: &str, key_id: &str) -> (Arc<GapDatabase>, Stri
         .await
         .expect("set key_id credential");
 
-    let token = AgentToken::new("e2e-signing-test-agent");
+    let token = AgentToken::new();
     let token_value = token.token.clone();
-    db.add_token(&token.token, &token.name, token.created_at)
+    db.add_token(&token.token, token.created_at, None)
         .await
         .expect("store token");
 
@@ -587,6 +587,7 @@ async fn test_e2e_crypto_httpsig_h1() {
         db,
         upstream_root_certs,
         "127.0.0.1".to_string(),
+        Arc::new(TokenCache::new()),
     )
     .expect("create proxy");
 
@@ -647,6 +648,7 @@ async fn test_e2e_crypto_httpsig_h2() {
         db,
         upstream_root_certs,
         "127.0.0.1".to_string(),
+        Arc::new(TokenCache::new()),
     )
     .expect("create proxy");
 
@@ -772,6 +774,7 @@ async fn test_e2e_crypto_httpsig_header_format() {
         db,
         upstream_root_certs,
         "127.0.0.1".to_string(),
+        Arc::new(TokenCache::new()),
     )
     .expect("create proxy");
 

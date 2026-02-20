@@ -7,7 +7,7 @@
 //! - Token management
 //! - Activity monitoring
 
-use gap_lib::{AgentToken, ActivityEntry, ManagementLogEntry};
+use gap_lib::{AgentToken, ActivityEntry, ManagementLogEntry, TokenCache};
 use gap_lib::types::{RequestDetails, TokenScope};
 use gap_lib::database::GapDatabase;
 use gap_lib::types::PluginEntry;
@@ -48,11 +48,13 @@ pub struct ApiState {
     pub activity_tx: Option<tokio::sync::broadcast::Sender<ActivityEntry>>,
     /// Broadcast channel for real-time management log streaming (SSE)
     pub management_tx: Option<tokio::sync::broadcast::Sender<ManagementLogEntry>>,
+    /// In-memory token cache shared with proxy for immediate revocation
+    pub token_cache: Arc<TokenCache>,
 }
 
 impl ApiState {
     /// Create ApiState with database backend
-    pub fn new(proxy_port: u16, api_port: u16, db: Arc<GapDatabase>) -> Self {
+    pub fn new(proxy_port: u16, api_port: u16, db: Arc<GapDatabase>, token_cache: Arc<TokenCache>) -> Self {
         Self {
             start_time: std::time::Instant::now(),
             proxy_port,
@@ -61,6 +63,7 @@ impl ApiState {
             db,
             activity_tx: None,
             management_tx: None,
+            token_cache,
         }
     }
 
@@ -71,6 +74,7 @@ impl ApiState {
         db: Arc<GapDatabase>,
         activity_tx: tokio::sync::broadcast::Sender<ActivityEntry>,
         management_tx: tokio::sync::broadcast::Sender<ManagementLogEntry>,
+        token_cache: Arc<TokenCache>,
     ) -> Self {
         Self {
             start_time: std::time::Instant::now(),
@@ -80,6 +84,7 @@ impl ApiState {
             db,
             activity_tx: Some(activity_tx),
             management_tx: Some(management_tx),
+            token_cache,
         }
     }
 
@@ -842,6 +847,11 @@ async fn delete_token(
     state.db.revoke_token(&token_value).await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to revoke token: {}", e)))?;
 
+    // Clear entire token cache — we only have the prefix, not the full token value,
+    // so we can't selectively invalidate. This is safe because revocation is infrequent
+    // and the cache repopulates on next request.
+    state.token_cache.clear();
+
     emit_management_log(&state, ManagementLogEntry {
         timestamp: chrono::Utc::now(),
         operation: "token_revoke".to_string(),
@@ -1457,7 +1467,7 @@ mod tests {
     #[tokio::test]
     async fn test_get_status_without_auth() {
         let db = create_test_db().await;
-        let state = ApiState::new(9443, 9080, db);
+        let state = ApiState::new(9443, 9080, db, Arc::new(TokenCache::new()));
         let app = create_router(state);
 
         let response = app
@@ -1506,7 +1516,7 @@ mod tests {
         use argon2::{Argon2, PasswordHasher};
 
         let db = create_test_db().await;
-        let state = ApiState::new(9443, 9080, db);
+        let state = ApiState::new(9443, 9080, db, Arc::new(TokenCache::new()));
 
         // Set up password hash
         let password = "testpass123";
@@ -1538,7 +1548,7 @@ mod tests {
         use argon2::{Argon2, PasswordHasher};
 
         let db = create_test_db().await;
-        let state = ApiState::new(9443, 9080, db);
+        let state = ApiState::new(9443, 9080, db, Arc::new(TokenCache::new()));
 
         // Set up password hash
         let password = "testpass123";
@@ -1580,7 +1590,7 @@ mod tests {
         use argon2::{Argon2, PasswordHasher};
 
         let db = create_test_db().await;
-        let state = ApiState::new(9443, 9080, db);
+        let state = ApiState::new(9443, 9080, db, Arc::new(TokenCache::new()));
 
         // Set up password hash
         let password = "testpass123";
@@ -1622,7 +1632,7 @@ mod tests {
         db.set_config("ca:cert", ca.ca_cert_pem().as_bytes()).await.expect("store CA cert");
         db.set_config("ca:key", ca.ca_key_pem().as_bytes()).await.expect("store CA key");
 
-        let state = ApiState::new(9443, 9080, db);
+        let state = ApiState::new(9443, 9080, db, Arc::new(TokenCache::new()));
         let app = create_router(state.clone());
 
         let password = "testpass123";
@@ -1674,7 +1684,7 @@ mod tests {
         db.set_config("ca:cert", ca.ca_cert_pem().as_bytes()).await.expect("store CA cert");
         db.set_config("ca:key", ca.ca_key_pem().as_bytes()).await.expect("store CA key");
 
-        let state = ApiState::new(9443, 9080, db);
+        let state = ApiState::new(9443, 9080, db, Arc::new(TokenCache::new()));
         let app = create_router(state.clone());
 
         let password = "testpass123";
@@ -1719,7 +1729,7 @@ mod tests {
         std::env::set_var("GAP_DATA_DIR", temp_dir.path());
 
         let db = create_test_db().await;
-        let state = ApiState::new(9443, 9080, db);
+        let state = ApiState::new(9443, 9080, db, Arc::new(TokenCache::new()));
 
         // Set up password hash
         let password = "testpass123";
@@ -1764,7 +1774,7 @@ mod tests {
         std::env::set_var("GAP_DATA_DIR", temp_dir.path());
 
         let db = create_test_db().await;
-        let state = ApiState::new(9443, 9080, db);
+        let state = ApiState::new(9443, 9080, db, Arc::new(TokenCache::new()));
 
         // Set up password hash
         let password = "testpass123";
@@ -1813,7 +1823,7 @@ mod tests {
         std::env::set_var("GAP_DATA_DIR", temp_dir.path());
 
         let db = create_test_db().await;
-        let state = ApiState::new(9443, 9080, Arc::clone(&db));
+        let state = ApiState::new(9443, 9080, Arc::clone(&db), Arc::new(TokenCache::new()));
 
         // Set up password hash
         let password = "testpass123";
@@ -1865,7 +1875,7 @@ mod tests {
     #[tokio::test]
     async fn test_install_plugin_requires_auth() {
         let db = create_test_db().await;
-        let state = ApiState::new(9443, 9080, db);
+        let state = ApiState::new(9443, 9080, db, Arc::new(TokenCache::new()));
         let app = create_router(state);
 
         // Try to install without Authorization header
@@ -1899,7 +1909,7 @@ mod tests {
         std::env::set_var("GAP_DATA_DIR", temp_dir.path());
 
         let db = create_test_db().await;
-        let state = ApiState::new(9443, 9080, db);
+        let state = ApiState::new(9443, 9080, db, Arc::new(TokenCache::new()));
 
         // Set up password hash
         let password = "testpass123";
@@ -1942,7 +1952,7 @@ mod tests {
         std::env::set_var("GAP_DATA_DIR", temp_dir.path());
 
         let db = create_test_db().await;
-        let state = ApiState::new(9443, 9080, db);
+        let state = ApiState::new(9443, 9080, db, Arc::new(TokenCache::new()));
 
         // Set up password hash
         let password = "testpass123";
@@ -1976,7 +1986,7 @@ mod tests {
         use argon2::{Argon2, PasswordHasher};
 
         let db = create_test_db().await;
-        let state = ApiState::new(9443, 9080, Arc::clone(&db));
+        let state = ApiState::new(9443, 9080, Arc::clone(&db), Arc::new(TokenCache::new()));
 
         // Set up password hash
         let password = "testpass123";
@@ -2028,7 +2038,7 @@ mod tests {
         std::env::set_var("GAP_DATA_DIR", temp_dir.path());
 
         let db = create_test_db().await;
-        let state = ApiState::new(9443, 9080, Arc::clone(&db));
+        let state = ApiState::new(9443, 9080, Arc::clone(&db), Arc::new(TokenCache::new()));
 
         // Set up password hash
         let password = "testpass123";
@@ -2078,7 +2088,7 @@ mod tests {
         std::env::set_var("GAP_DATA_DIR", temp_dir.path());
 
         let db = create_test_db().await;
-        let state = ApiState::new(9443, 9080, Arc::clone(&db));
+        let state = ApiState::new(9443, 9080, Arc::clone(&db), Arc::new(TokenCache::new()));
 
         // Set up password hash
         let password = "testpass123";
@@ -2122,7 +2132,7 @@ mod tests {
         std::env::set_var("GAP_DATA_DIR", temp_dir.path());
 
         let db = create_test_db().await;
-        let state = ApiState::new(9443, 9080, Arc::clone(&db));
+        let state = ApiState::new(9443, 9080, Arc::clone(&db), Arc::new(TokenCache::new()));
 
         // Set up password hash
         let password = "testpass123";
@@ -2191,7 +2201,7 @@ mod tests {
         std::env::set_var("GAP_DATA_DIR", temp_dir.path());
 
         let db = create_test_db().await;
-        let state = ApiState::new(9443, 9080, Arc::clone(&db));
+        let state = ApiState::new(9443, 9080, Arc::clone(&db), Arc::new(TokenCache::new()));
 
         // Set up password hash
         let password = "testpass123";
@@ -2242,7 +2252,7 @@ mod tests {
         std::env::set_var("GAP_DATA_DIR", temp_dir.path());
 
         let db = create_test_db().await;
-        let state = ApiState::new(9443, 9080, Arc::clone(&db));
+        let state = ApiState::new(9443, 9080, Arc::clone(&db), Arc::new(TokenCache::new()));
 
         // Set up password hash
         let password = "testpass123";
@@ -2290,7 +2300,7 @@ mod tests {
         std::env::set_var("GAP_DATA_DIR", temp_dir.path());
 
         let db = create_test_db().await;
-        let state = ApiState::new(9443, 9080, Arc::clone(&db));
+        let state = ApiState::new(9443, 9080, Arc::clone(&db), Arc::new(TokenCache::new()));
 
         // Set up password hash
         let password = "testpass123";
@@ -2338,7 +2348,7 @@ mod tests {
         std::env::set_var("GAP_DATA_DIR", temp_dir.path());
 
         let db = create_test_db().await;
-        let state = ApiState::new(9443, 9080, Arc::clone(&db));
+        let state = ApiState::new(9443, 9080, Arc::clone(&db), Arc::new(TokenCache::new()));
         let app = create_router(state);
 
         let password = "testpass123";
@@ -2389,7 +2399,7 @@ mod tests {
         let db = create_test_db().await;
         let (activity_tx, _) = tokio::sync::broadcast::channel(100);
         let (management_tx, _) = tokio::sync::broadcast::channel(100);
-        let state = ApiState::new_with_broadcast(9443, 9080, db, activity_tx, management_tx);
+        let state = ApiState::new_with_broadcast(9443, 9080, db, activity_tx, management_tx, Arc::new(TokenCache::new()));
 
         // Set up password hash
         let password = "testpass123";
@@ -2421,7 +2431,7 @@ mod tests {
         let db = create_test_db().await;
         let (activity_tx, _) = tokio::sync::broadcast::channel(100);
         let (management_tx, _) = tokio::sync::broadcast::channel(100);
-        let state = ApiState::new_with_broadcast(9443, 9080, db, activity_tx, management_tx);
+        let state = ApiState::new_with_broadcast(9443, 9080, db, activity_tx, management_tx, Arc::new(TokenCache::new()));
 
         let app = create_router(state);
 
@@ -2447,7 +2457,7 @@ mod tests {
         let db = create_test_db().await;
         let (activity_tx, _) = tokio::sync::broadcast::channel(100);
         let (management_tx, _) = tokio::sync::broadcast::channel(100);
-        let state = ApiState::new_with_broadcast(9443, 9080, db, activity_tx.clone(), management_tx);
+        let state = ApiState::new_with_broadcast(9443, 9080, db, activity_tx.clone(), management_tx, Arc::new(TokenCache::new()));
 
         // Set up password hash
         let password = "testpass123";
@@ -2515,7 +2525,7 @@ mod tests {
         let db = create_test_db().await;
         let (activity_tx, _) = tokio::sync::broadcast::channel(100);
         let (management_tx, _) = tokio::sync::broadcast::channel(100);
-        let state = ApiState::new_with_broadcast(9443, 9080, db, activity_tx.clone(), management_tx);
+        let state = ApiState::new_with_broadcast(9443, 9080, db, activity_tx.clone(), management_tx, Arc::new(TokenCache::new()));
 
         // Set up password hash
         let password = "testpass123";
@@ -2600,7 +2610,7 @@ mod tests {
         use argon2::{Argon2, PasswordHasher};
 
         let db = create_test_db().await;
-        let state = ApiState::new(9443, 9080, Arc::clone(&db));
+        let state = ApiState::new(9443, 9080, Arc::clone(&db), Arc::new(TokenCache::new()));
 
         let password = "testpass123";
         let salt = SaltString::generate(&mut OsRng);
@@ -2849,7 +2859,7 @@ mod tests {
     #[tokio::test]
     async fn test_get_activity_requires_auth() {
         let db = create_test_db().await;
-        let state = ApiState::new(9443, 9080, db);
+        let state = ApiState::new(9443, 9080, db, Arc::new(TokenCache::new()));
         // No password hash set — any request should fail auth
 
         let app = create_router(state);
@@ -2875,7 +2885,7 @@ mod tests {
         use argon2::{Argon2, PasswordHasher};
 
         let db = create_test_db().await;
-        let state = ApiState::new(9443, 9080, Arc::clone(&db));
+        let state = ApiState::new(9443, 9080, Arc::clone(&db), Arc::new(TokenCache::new()));
 
         let password = "test-password";
         let salt = SaltString::generate(&mut OsRng);
@@ -2925,7 +2935,7 @@ mod tests {
         use argon2::{Argon2, PasswordHasher};
 
         let db = create_test_db().await;
-        let state = ApiState::new(9443, 9080, Arc::clone(&db));
+        let state = ApiState::new(9443, 9080, Arc::clone(&db), Arc::new(TokenCache::new()));
 
         let password = "test-password";
         let salt = SaltString::generate(&mut OsRng);
@@ -2955,7 +2965,7 @@ mod tests {
     #[tokio::test]
     async fn test_management_log_requires_auth() {
         let db = create_test_db().await;
-        let state = ApiState::new(9443, 9080, db);
+        let state = ApiState::new(9443, 9080, db, Arc::new(TokenCache::new()));
         let app = create_router(state);
 
         // No password hash set on server, so auth should fail
@@ -2993,7 +3003,7 @@ mod tests {
             error_message: None,
         }).await.unwrap();
 
-        let state = ApiState::new(9443, 9080, Arc::clone(&db));
+        let state = ApiState::new(9443, 9080, Arc::clone(&db), Arc::new(TokenCache::new()));
 
         // Set up password hash
         let password = "testpass123";
@@ -3038,7 +3048,7 @@ mod tests {
         std::env::set_var("GAP_DATA_DIR", temp_dir.path());
 
         let db = create_test_db().await;
-        let state = ApiState::new(9443, 9080, Arc::clone(&db));
+        let state = ApiState::new(9443, 9080, Arc::clone(&db), Arc::new(TokenCache::new()));
 
         // Set up password hash
         let password = "testpass123";
@@ -3085,7 +3095,7 @@ mod tests {
         std::env::set_var("GAP_DATA_DIR", temp_dir.path());
 
         let db = create_test_db().await;
-        let state = ApiState::new(9443, 9080, Arc::clone(&db));
+        let state = ApiState::new(9443, 9080, Arc::clone(&db), Arc::new(TokenCache::new()));
 
         // Set up password hash
         let password = "testpass123";
@@ -3135,7 +3145,7 @@ mod tests {
         let db = create_test_db().await;
         let (activity_tx, _) = tokio::sync::broadcast::channel(100);
         let (management_tx, _) = tokio::sync::broadcast::channel(100);
-        let state = ApiState::new_with_broadcast(9443, 9080, db, activity_tx, management_tx);
+        let state = ApiState::new_with_broadcast(9443, 9080, db, activity_tx, management_tx, Arc::new(TokenCache::new()));
 
         // Set up password hash
         let password = "testpass123";
@@ -3167,7 +3177,7 @@ mod tests {
         let db = create_test_db().await;
         let (activity_tx, _) = tokio::sync::broadcast::channel(100);
         let (management_tx, _) = tokio::sync::broadcast::channel(100);
-        let state = ApiState::new_with_broadcast(9443, 9080, db, activity_tx, management_tx);
+        let state = ApiState::new_with_broadcast(9443, 9080, db, activity_tx, management_tx, Arc::new(TokenCache::new()));
 
         let app = create_router(state);
 
@@ -3194,7 +3204,7 @@ mod tests {
         let db = create_test_db().await;
         let (activity_tx, _) = tokio::sync::broadcast::channel(100);
         let (management_tx, _) = tokio::sync::broadcast::channel(100);
-        let state = ApiState::new_with_broadcast(9443, 9080, db, activity_tx, management_tx.clone());
+        let state = ApiState::new_with_broadcast(9443, 9080, db, activity_tx, management_tx.clone(), Arc::new(TokenCache::new()));
 
         // Set up password hash
         let password = "testpass123";
@@ -3264,7 +3274,7 @@ mod tests {
     #[tokio::test]
     async fn test_register_plugin_requires_auth() {
         let db = create_test_db().await;
-        let state = ApiState::new(9443, 9080, db);
+        let state = ApiState::new(9443, 9080, db, Arc::new(TokenCache::new()));
         let app = create_router(state);
 
         let body = serde_json::json!({
@@ -3290,7 +3300,7 @@ mod tests {
     #[tokio::test]
     async fn test_register_plugin_with_valid_code() {
         let db = create_test_db().await;
-        let state = ApiState::new(9443, 9080, Arc::clone(&db));
+        let state = ApiState::new(9443, 9080, Arc::clone(&db), Arc::new(TokenCache::new()));
         let password = setup_auth(&state).await;
         let app = create_router(state);
 
@@ -3332,7 +3342,7 @@ mod tests {
     #[tokio::test]
     async fn test_register_plugin_with_invalid_code() {
         let db = create_test_db().await;
-        let state = ApiState::new(9443, 9080, db);
+        let state = ApiState::new(9443, 9080, db, Arc::new(TokenCache::new()));
         let password = setup_auth(&state).await;
         let app = create_router(state);
 
@@ -3360,7 +3370,7 @@ mod tests {
     #[tokio::test]
     async fn test_register_plugin_with_es6_export() {
         let db = create_test_db().await;
-        let state = ApiState::new(9443, 9080, Arc::clone(&db));
+        let state = ApiState::new(9443, 9080, Arc::clone(&db), Arc::new(TokenCache::new()));
         let password = setup_auth(&state).await;
         let app = create_router(state);
 
@@ -3404,7 +3414,7 @@ mod tests {
     #[tokio::test]
     async fn test_create_header_set() {
         let db = create_test_db().await;
-        let state = ApiState::new(9443, 9080, Arc::clone(&db));
+        let state = ApiState::new(9443, 9080, Arc::clone(&db), Arc::new(TokenCache::new()));
         let password = setup_auth(&state).await;
         let app = create_router(state);
 
@@ -3443,7 +3453,7 @@ mod tests {
     #[tokio::test]
     async fn test_create_header_set_no_auth() {
         let db = create_test_db().await;
-        let state = ApiState::new(9443, 9080, db);
+        let state = ApiState::new(9443, 9080, db, Arc::new(TokenCache::new()));
         let app = create_router(state);
 
         let body = serde_json::json!({
@@ -3472,7 +3482,7 @@ mod tests {
         // An empty list would create an unreachable header set (matches nothing),
         // which is almost certainly a client mistake.
         let db = create_test_db().await;
-        let state = ApiState::new(9443, 9080, db);
+        let state = ApiState::new(9443, 9080, db, Arc::new(TokenCache::new()));
         let password = setup_auth(&state).await;
         let app = create_router(state);
 
@@ -3506,7 +3516,7 @@ mod tests {
         // Creating a header set with inline headers should store them atomically.
         // The caller shouldn't need a second request to set initial headers.
         let db = create_test_db().await;
-        let state = ApiState::new(9443, 9080, Arc::clone(&db));
+        let state = ApiState::new(9443, 9080, Arc::clone(&db), Arc::new(TokenCache::new()));
         let password = setup_auth(&state).await;
         let app = create_router(state);
 
@@ -3550,7 +3560,7 @@ mod tests {
     async fn test_update_header_set_empty_patterns() {
         // Updating match_patterns to an empty list should be rejected with 400 Bad Request.
         let db = create_test_db().await;
-        let state = ApiState::new(9443, 9080, Arc::clone(&db));
+        let state = ApiState::new(9443, 9080, Arc::clone(&db), Arc::new(TokenCache::new()));
         let password = setup_auth(&state).await;
 
         db.add_header_set("my-headers", &["api.example.com".to_string()], 0)
@@ -3583,7 +3593,7 @@ mod tests {
     #[tokio::test]
     async fn test_list_header_sets() {
         let db = create_test_db().await;
-        let state = ApiState::new(9443, 9080, Arc::clone(&db));
+        let state = ApiState::new(9443, 9080, Arc::clone(&db), Arc::new(TokenCache::new()));
         let password = setup_auth(&state).await;
 
         // Pre-populate via DB
@@ -3635,7 +3645,7 @@ mod tests {
     #[tokio::test]
     async fn test_update_header_set() {
         let db = create_test_db().await;
-        let state = ApiState::new(9443, 9080, Arc::clone(&db));
+        let state = ApiState::new(9443, 9080, Arc::clone(&db), Arc::new(TokenCache::new()));
         let password = setup_auth(&state).await;
 
         db.add_header_set("my-headers", &["api.example.com".to_string()], 0)
@@ -3672,7 +3682,7 @@ mod tests {
     #[tokio::test]
     async fn test_delete_header_set() {
         let db = create_test_db().await;
-        let state = ApiState::new(9443, 9080, Arc::clone(&db));
+        let state = ApiState::new(9443, 9080, Arc::clone(&db), Arc::new(TokenCache::new()));
         let password = setup_auth(&state).await;
 
         db.add_header_set("to-delete", &["api.example.com".to_string()], 0)
@@ -3710,7 +3720,7 @@ mod tests {
     #[tokio::test]
     async fn test_set_header_set_header() {
         let db = create_test_db().await;
-        let state = ApiState::new(9443, 9080, Arc::clone(&db));
+        let state = ApiState::new(9443, 9080, Arc::clone(&db), Arc::new(TokenCache::new()));
         let password = setup_auth(&state).await;
 
         db.add_header_set("my-headers", &["api.example.com".to_string()], 0)
@@ -3751,7 +3761,7 @@ mod tests {
     #[tokio::test]
     async fn test_delete_header_set_header() {
         let db = create_test_db().await;
-        let state = ApiState::new(9443, 9080, Arc::clone(&db));
+        let state = ApiState::new(9443, 9080, Arc::clone(&db), Arc::new(TokenCache::new()));
         let password = setup_auth(&state).await;
 
         db.add_header_set("my-headers", &["api.example.com".to_string()], 0)
@@ -3791,7 +3801,7 @@ mod tests {
     #[tokio::test]
     async fn test_update_plugin_weight() {
         let db = create_test_db().await;
-        let state = ApiState::new(9443, 9080, Arc::clone(&db));
+        let state = ApiState::new(9443, 9080, Arc::clone(&db), Arc::new(TokenCache::new()));
         let password = setup_auth(&state).await;
 
         // Register a plugin first

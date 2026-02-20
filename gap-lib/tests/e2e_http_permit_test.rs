@@ -11,7 +11,7 @@
 //! The proxy detects the non-TLS traffic and routes accordingly.
 
 use gap_lib::database::GapDatabase;
-use gap_lib::proxy::ProxyServer;
+use gap_lib::proxy::{ProxyServer, TokenCache};
 use gap_lib::tls::CertificateAuthority;
 use gap_lib::types::{AgentToken, PluginEntry};
 use rustls::pki_types::ServerName;
@@ -127,9 +127,9 @@ async fn setup_test_db(
         .await
         .expect("set credential");
 
-    let token = AgentToken::new("e2e-http-test-agent");
+    let token = AgentToken::new();
     let token_value = token.token.clone();
-    db.add_token(&token.token, &token.name, token.created_at)
+    db.add_token(&token.token, token.created_at, None)
         .await
         .expect("store token");
 
@@ -255,7 +255,7 @@ async fn test_http_blocked_without_dangerously_permit_http() {
     let proxy_ca_cert_pem = proxy_ca.ca_cert_pem();
 
     let proxy_port = portpicker::pick_unused_port().expect("pick proxy port");
-    let proxy = ProxyServer::new(proxy_port, proxy_ca, db, "127.0.0.1".to_string()).expect("create proxy");
+    let proxy = ProxyServer::new(proxy_port, proxy_ca, db, "127.0.0.1".to_string(), Arc::new(TokenCache::new())).expect("create proxy");
 
     tokio::spawn(async move {
         let _ = proxy.start().await;
@@ -317,7 +317,7 @@ async fn test_http_allowed_with_dangerously_permit_http() {
     let proxy_ca_cert_pem = proxy_ca.ca_cert_pem();
 
     let proxy_port = portpicker::pick_unused_port().expect("pick proxy port");
-    let proxy = ProxyServer::new(proxy_port, proxy_ca, db, "127.0.0.1".to_string()).expect("create proxy");
+    let proxy = ProxyServer::new(proxy_port, proxy_ca, db, "127.0.0.1".to_string(), Arc::new(TokenCache::new())).expect("create proxy");
 
     tokio::spawn(async move {
         let _ = proxy.start().await;

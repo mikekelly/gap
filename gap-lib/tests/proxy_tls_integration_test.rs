@@ -7,7 +7,7 @@
 //! 4. Invalid/missing tokens are rejected
 
 use gap_lib::database::GapDatabase;
-use gap_lib::proxy::ProxyServer;
+use gap_lib::proxy::{ProxyServer, TokenCache};
 use gap_lib::tls::CertificateAuthority;
 use gap_lib::types::AgentToken;
 use rustls::pki_types::ServerName;
@@ -45,11 +45,11 @@ async fn create_test_proxy(port: u16, token: AgentToken) -> (ProxyServer, String
     let db = Arc::new(GapDatabase::in_memory().await.expect("create in-memory db"));
 
     // Store the token in the database
-    db.add_token(&token.token, &token.name, token.created_at)
+    db.add_token(&token.token, token.created_at, None)
         .await
         .expect("store token");
 
-    let proxy = ProxyServer::new(port, ca, db, "127.0.0.1".to_string()).expect("create proxy");
+    let proxy = ProxyServer::new(port, ca, db, "127.0.0.1".to_string(), Arc::new(TokenCache::new())).expect("create proxy");
 
     (proxy, ca_cert_pem, token_value)
 }
@@ -59,7 +59,7 @@ async fn test_proxy_accepts_tls_connection() {
     // Install default crypto provider for rustls
     let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
 
-    let token = AgentToken::new("test-agent");
+    let token = AgentToken::new();
     let port = portpicker::pick_unused_port().expect("pick port");
 
     let (proxy, ca_cert_pem, _token_value) = create_test_proxy(port, token).await;
@@ -89,7 +89,7 @@ async fn test_proxy_connect_with_valid_token() {
     // Install default crypto provider for rustls
     let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
 
-    let token = AgentToken::new("test-agent");
+    let token = AgentToken::new();
     let port = portpicker::pick_unused_port().expect("pick port");
 
     let (proxy, ca_cert_pem, token_value) = create_test_proxy(port, token).await;
@@ -153,7 +153,7 @@ async fn test_proxy_connect_rejects_invalid_token() {
     // Install default crypto provider for rustls
     let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
 
-    let token = AgentToken::new("test-agent");
+    let token = AgentToken::new();
     let port = portpicker::pick_unused_port().expect("pick port");
 
     let (proxy, ca_cert_pem, _token_value) = create_test_proxy(port, token).await;
@@ -226,7 +226,7 @@ async fn test_proxy_connect_rejects_missing_auth() {
     // Install default crypto provider for rustls
     let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
 
-    let token = AgentToken::new("test-agent");
+    let token = AgentToken::new();
     let port = portpicker::pick_unused_port().expect("pick port");
 
     let (proxy, ca_cert_pem, _token_value) = create_test_proxy(port, token).await;
@@ -298,7 +298,7 @@ async fn test_proxy_certificate_valid_for_localhost() {
     // Install default crypto provider for rustls
     let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
 
-    let token = AgentToken::new("test-agent");
+    let token = AgentToken::new();
     let port = portpicker::pick_unused_port().expect("pick port");
 
     let (proxy, ca_cert_pem, _token_value) = create_test_proxy(port, token).await;

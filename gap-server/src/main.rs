@@ -12,7 +12,7 @@ pub mod api;
 #[cfg(target_os = "macos")]
 pub mod launchd;
 
-use gap_lib::{database::GapDatabase, key_provider::KeyProvider, tls::CertificateAuthority, Config, ProxyServer};
+use gap_lib::{database::GapDatabase, key_provider::KeyProvider, tls::CertificateAuthority, Config, ProxyServer, TokenCache};
 use clap::{Parser, Subcommand};
 use std::sync::Arc;
 
@@ -321,12 +321,16 @@ async fn main() -> anyhow::Result<()> {
     let mgmt_ca = CertificateAuthority::from_pem(&ca.ca_cert_pem(), &ca.ca_key_pem())?;
     let resolver = gap_lib::DynamicCertResolver::new(Arc::new(mgmt_ca));
 
+    // Shared token cache between proxy and API for immediate revocation
+    let token_cache = Arc::new(TokenCache::new());
+
     // Create ProxyServer with database and activity broadcast
     let mut proxy = ProxyServer::new(
         config.proxy_port,
         ca,
         Arc::clone(&db),
         args.bind_address.clone(),
+        Arc::clone(&token_cache),
     )?;
     proxy.set_activity_broadcast(activity_tx.clone());
 
@@ -350,11 +354,12 @@ async fn main() -> anyhow::Result<()> {
     server_config.alpn_protocols = vec![b"h2".to_vec(), b"http/1.1".to_vec()];
     let tls_config = axum_server::tls_rustls::RustlsConfig::from_config(Arc::new(server_config));
 
-    // Create API state with database and activity broadcast
+    // Create API state with database, activity broadcast, and shared token cache
     let mut api_state = api::ApiState::new(
         config.proxy_port,
         config.api_port,
         Arc::clone(&db),
+        Arc::clone(&token_cache),
     );
     api_state.activity_tx = Some(activity_tx);
     api_state.management_tx = Some(management_tx);

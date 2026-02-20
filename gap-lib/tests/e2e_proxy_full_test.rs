@@ -27,7 +27,7 @@
 //!   Plugin sees outgoing request and injects X-Test-Credential-One and X-Test-Credential-Two.
 
 use gap_lib::database::GapDatabase;
-use gap_lib::proxy::ProxyServer;
+use gap_lib::proxy::{ProxyServer, TokenCache};
 use gap_lib::types::PluginEntry;
 use gap_lib::tls::CertificateAuthority;
 use gap_lib::types::AgentToken;
@@ -232,9 +232,9 @@ async fn setup_test_db(
     }
 
     // Store agent token
-    let token = AgentToken::new("e2e-test-agent");
+    let token = AgentToken::new();
     let token_value = token.token.clone();
-    db.add_token(&token.token, &token.name, token.created_at)
+    db.add_token(&token.token, token.created_at, None)
         .await
         .expect("store token");
 
@@ -274,6 +274,7 @@ async fn test_full_e2e_proxy_pipeline() {
         db,
         upstream_root_certs,
         "127.0.0.1".to_string(),
+        Arc::new(TokenCache::new()),
     )
     .expect("create proxy");
 
@@ -428,6 +429,7 @@ async fn test_e2e_missing_credential() {
         db,
         upstream_root_certs,
         "127.0.0.1".to_string(),
+        Arc::new(TokenCache::new()),
     )
     .expect("create proxy");
 
@@ -564,6 +566,7 @@ async fn test_e2e_wrong_proxy_ca_rejected() {
         db,
         upstream_root_certs,
         "127.0.0.1".to_string(),
+        Arc::new(TokenCache::new()),
     )
     .expect("create proxy");
 
@@ -732,6 +735,7 @@ async fn test_e2e_h2_proxy_pipeline() {
         db,
         upstream_root_certs,
         "127.0.0.1".to_string(),
+        Arc::new(TokenCache::new()),
     )
     .expect("create proxy");
 

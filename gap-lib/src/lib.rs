@@ -28,7 +28,7 @@ pub use paths::ca_cert_path;
 pub use plugin_matcher::{find_matching_plugin, find_matching_handler, MatchResult};
 pub use scope_matcher::{check_scopes_host, check_scopes_request};
 pub use plugin_runtime::PluginRuntime;
-pub use proxy::ProxyServer;
+pub use proxy::{ProxyServer, TokenCache};
 pub use database::GapDatabase;
 pub use tls::{CertificateAuthority, DynamicCertResolver};
 pub use types::{
