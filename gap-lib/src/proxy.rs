@@ -9,8 +9,11 @@
 
 use crate::database::GapDatabase;
 use crate::error::{GapError, Result};
+use crate::scope_matcher::{check_scopes_host, check_scopes_request};
 use crate::tls::CertificateAuthority;
-use crate::types::{ActivityEntry, AgentToken, RequestDetails};
+use crate::types::{ActivityEntry, RequestDetails, TokenScope, ValidatedToken};
+#[cfg(test)]
+use crate::types::AgentToken;
 use crate::proxy_transforms::{scrub_body, scrub_response_headers, MAX_BODY_SIZE};
 use rustls::pki_types::CertificateDer;
 use rustls::ServerConfig;
@@ -132,7 +135,7 @@ impl ProxyServer {
         let db = Arc::new(GapDatabase::in_memory().await.expect("create in-memory db"));
 
         for token in &tokens {
-            db.add_token(&token.token, &token.name, token.created_at)
+            db.add_token(&token.token, token.created_at, None)
                 .await
                 .expect("add token to db");
         }
@@ -287,7 +290,19 @@ async fn handle_connection(
     }
 
     // Validate authentication
-    let agent_token = validate_auth(&headers, &db).await?;
+    let validated_token = validate_auth(&headers, &db).await?;
+
+    // Parse target early so we can scope-check before accepting the tunnel
+    let (hostname, port) = parse_host_port(&target)?;
+
+    // CONNECT-phase scope check (host:port only)
+    if !check_scopes_host(&validated_token.scopes, &hostname, port) {
+        let mut stream = reader.into_inner();
+        stream.write_all(b"HTTP/1.1 403 Forbidden\r\n\r\n").await
+            .map_err(|e| GapError::network(format!("Failed to send scope denial: {}", e)))?;
+        info!("Scope denied CONNECT to {}:{} for token {}", hostname, port, validated_token.prefix);
+        return Ok(());
+    }
 
     // Get the underlying stream back from BufReader
     // The BufReader may have buffered bytes that are part of the TLS handshake,
@@ -301,8 +316,6 @@ async fn handle_connection(
         .map_err(|e| GapError::network(format!("Failed to send CONNECT response: {}", e)))?;
 
     debug!("Sent 200 Connection Established");
-
-    let (hostname, port) = parse_host_port(&target)?;
 
     // Peek at first byte to detect protocol: TLS ClientHello starts with 0x16,
     // plain HTTP starts with an ASCII method character (G, P, H, D, O, T, C).
@@ -348,7 +361,7 @@ async fn handle_connection(
         debug!("Upstream TLS established");
 
         // Bidirectional proxy with HTTP transformation via hyper
-        proxy_via_hyper(agent_stream, upstream_stream, hostname, port, db, agent_token.name.clone(), is_h2, true, activity_tx).await?;
+        proxy_via_hyper(agent_stream, upstream_stream, hostname, port, db, validated_token.prefix.clone(), validated_token.scopes.clone(), is_h2, true, activity_tx).await?;
     } else {
         // --- Plain HTTP path: no TLS on either side ---
         debug!("Plain HTTP detected through CONNECT tunnel to {}:{}", hostname, port);
@@ -360,7 +373,7 @@ async fn handle_connection(
         debug!("Upstream plain TCP established");
 
         // Proxy via hyper with use_tls=false (HTTP/1.1 only for plain HTTP)
-        proxy_via_hyper(stream, upstream_stream, hostname, port, db, agent_token.name.clone(), false, false, activity_tx).await?;
+        proxy_via_hyper(stream, upstream_stream, hostname, port, db, validated_token.prefix.clone(), validated_token.scopes.clone(), false, false, activity_tx).await?;
     }
 
     Ok(())
@@ -387,7 +400,7 @@ fn parse_connect_request(line: &str) -> Result<String> {
 async fn validate_auth(
     headers: &[String],
     db: &GapDatabase,
-) -> Result<AgentToken> {
+) -> Result<ValidatedToken> {
     for header in headers {
         let header = header.trim();
         if header.to_lowercase().starts_with("proxy-authorization:") {
@@ -402,18 +415,14 @@ async fn validate_auth(
 
             // Check if token exists in database
             if let Some(metadata) = db.get_token(&token_value).await? {
-                // Construct AgentToken from TokenMetadata
                 let prefix = if token_value.len() >= 12 {
                     token_value[..12].to_string()
                 } else {
                     token_value.clone()
                 };
-                return Ok(AgentToken {
-                    id: token_value.clone(),
-                    name: metadata.name,
+                return Ok(ValidatedToken {
                     prefix,
-                    token: token_value,
-                    created_at: metadata.created_at,
+                    scopes: metadata.scopes,
                 });
             }
 
@@ -538,7 +547,8 @@ async fn proxy_via_hyper<A, U>(
     hostname: String,
     connect_port: u16,
     db: Arc<GapDatabase>,
-    agent_name: String,
+    token_prefix: String,
+    token_scopes: Option<Vec<TokenScope>>,
     is_h2: bool,
     use_tls: bool,
     activity_tx: Option<tokio::sync::broadcast::Sender<ActivityEntry>>,
@@ -567,11 +577,23 @@ where
         let service = service_fn(move |req: hyper::Request<hyper::body::Incoming>| {
             let hostname = hostname.clone();
             let db = Arc::clone(&db);
-            let agent_name = agent_name.clone();
+            let token_prefix = token_prefix.clone();
+            let token_scopes = token_scopes.clone();
             let mut sender = sender.clone();
             let activity_tx = activity_tx_h2.clone();
 
             async move {
+                // Per-request scope check (path + method)
+                let method_str = req.method().as_str();
+                let path = req.uri().path();
+                if !check_scopes_request(&token_scopes, &hostname, connect_port, path, method_str) {
+                    info!("Scope denied {} {} for token {}", method_str, path, token_prefix);
+                    return Ok(hyper::Response::builder()
+                        .status(403)
+                        .body(http_body_util::Full::new(bytes::Bytes::from("Forbidden by token scope")))
+                        .unwrap());
+                }
+
                 let request_id: u64 = rand::thread_rng().gen();
                 let request_id_str = format!("{:016x}", request_id);
                 let (parts, body) = req.into_parts();
@@ -616,7 +638,7 @@ where
                         let request_id_err = request_id_str.clone();
                         let method_err = method.clone();
                         let url_err = url.clone();
-                        let agent_name_err = agent_name.clone();
+                        let token_prefix_err = token_prefix.clone();
                         let pre_headers_err = pre_headers_json.clone();
                         let pre_body_err = pre_body.clone();
                         tokio::spawn(async move {
@@ -625,7 +647,7 @@ where
                                 request_id: Some(request_id_err.clone()),
                                 method: method_err,
                                 url: url_err,
-                                agent_id: Some(agent_name_err),
+                                agent_id: Some(token_prefix_err),
                                 status: 0,
                                 plugin_name: None,
                                 plugin_sha: None,
@@ -695,7 +717,7 @@ where
 
                 // Log activity and save request details asynchronously
                 let db_log = Arc::clone(&db);
-                let agent_name_log = agent_name.clone();
+                let token_prefix_log = token_prefix.clone();
                 let request_id_log = request_id_str.clone();
                 let pre_headers_log = pre_headers_json;
                 let pre_body_log = pre_body;
@@ -705,7 +727,7 @@ where
                         request_id: Some(request_id_log.clone()),
                         method,
                         url,
-                        agent_id: Some(agent_name_log),
+                        agent_id: Some(token_prefix_log),
                         status,
                         plugin_name: Some(plugin_info.name),
                         plugin_sha: plugin_info.commit_sha,
@@ -758,11 +780,23 @@ where
         let service = service_fn(move |req: hyper::Request<hyper::body::Incoming>| {
             let hostname = hostname.clone();
             let db = Arc::clone(&db);
-            let agent_name = agent_name.clone();
+            let token_prefix = token_prefix.clone();
+            let token_scopes = token_scopes.clone();
             let sender = Arc::clone(&sender);
             let activity_tx = activity_tx_h1.clone();
 
             async move {
+                // Per-request scope check (path + method)
+                let method_str = req.method().as_str();
+                let path = req.uri().path();
+                if !check_scopes_request(&token_scopes, &hostname, connect_port, path, method_str) {
+                    info!("Scope denied {} {} for token {}", method_str, path, token_prefix);
+                    return Ok(hyper::Response::builder()
+                        .status(403)
+                        .body(http_body_util::Full::new(bytes::Bytes::from("Forbidden by token scope")))
+                        .unwrap());
+                }
+
                 let request_id: u64 = rand::thread_rng().gen();
                 let request_id_str = format!("{:016x}", request_id);
                 let (parts, body) = req.into_parts();
@@ -807,7 +841,7 @@ where
                         let request_id_err = request_id_str.clone();
                         let method_err = method.clone();
                         let url_err = url.clone();
-                        let agent_name_err = agent_name.clone();
+                        let token_prefix_err = token_prefix.clone();
                         let pre_headers_err = pre_headers_json.clone();
                         let pre_body_err = pre_body.clone();
                         tokio::spawn(async move {
@@ -816,7 +850,7 @@ where
                                 request_id: Some(request_id_err.clone()),
                                 method: method_err,
                                 url: url_err,
-                                agent_id: Some(agent_name_err),
+                                agent_id: Some(token_prefix_err),
                                 status: 0,
                                 plugin_name: None,
                                 plugin_sha: None,
@@ -887,7 +921,7 @@ where
 
                 // Log activity and save request details asynchronously
                 let db_log = Arc::clone(&db);
-                let agent_name_log = agent_name.clone();
+                let token_prefix_log = token_prefix.clone();
                 let request_id_log = request_id_str.clone();
                 let pre_headers_log = pre_headers_json;
                 let pre_body_log = pre_body;
@@ -897,7 +931,7 @@ where
                         request_id: Some(request_id_log.clone()),
                         method,
                         url,
-                        agent_id: Some(agent_name_log),
+                        agent_id: Some(token_prefix_log),
                         status,
                         plugin_name: Some(plugin_info.name),
                         plugin_sha: plugin_info.commit_sha,
@@ -1068,10 +1102,10 @@ mod tests {
     async fn test_validate_auth_valid() {
         let db = GapDatabase::in_memory().await.unwrap();
 
-        let token = AgentToken::new("Test Agent");
+        let token = AgentToken::new();
         let token_value = token.token.clone();
 
-        db.add_token(&token.token, &token.name, token.created_at)
+        db.add_token(&token.token, token.created_at, None)
             .await
             .expect("add token to db");
 
@@ -1085,8 +1119,8 @@ mod tests {
     async fn test_validate_auth_invalid_token() {
         let db = GapDatabase::in_memory().await.unwrap();
 
-        let token = AgentToken::new("Test Agent");
-        db.add_token(&token.token, &token.name, token.created_at)
+        let token = AgentToken::new();
+        db.add_token(&token.token, token.created_at, None)
             .await
             .expect("add token to db");
 
@@ -1111,7 +1145,7 @@ mod tests {
         let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
 
         let ca = CertificateAuthority::generate().expect("CA generation failed");
-        let tokens = vec![AgentToken::new("Test Agent")];
+        let tokens = vec![AgentToken::new()];
 
         let proxy = ProxyServer::new_from_vec_async(9443, ca, tokens).await;
         assert!(proxy.is_ok());
@@ -1126,7 +1160,7 @@ mod tests {
         let ca = CertificateAuthority::generate().expect("CA generation failed");
 
         // Create token
-        let token = AgentToken::new("Test Agent");
+        let token = AgentToken::new();
 
         // Create proxy server - this should successfully create the TLS acceptor
         let proxy = ProxyServer::new_from_vec_async(19443, ca, vec![token])
@@ -1325,6 +1359,7 @@ mod tests {
                 443,
                 proxy_db,
                 "test-agent".to_string(),
+                None,  // no scope restrictions
                 false, // is_h2 = false for H1
                 true,  // use_tls = true (HTTPS)
                 None,  // no activity broadcast
@@ -1481,6 +1516,7 @@ mod tests {
                 80,
                 proxy_db,
                 "test-agent".to_string(),
+                None,  // no scope restrictions
                 false, // is_h2 = false for H1
                 false, // use_tls = false (plain HTTP)
                 None,  // no activity broadcast
@@ -1593,6 +1629,7 @@ mod tests {
                 443,
                 proxy_db,
                 "details-agent".to_string(),
+                None,  // no scope restrictions
                 false,
                 true,
                 None,
