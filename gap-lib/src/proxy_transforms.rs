@@ -873,4 +873,123 @@ mod tests {
         assert!(!plugin_info.credential_values.is_empty());
         assert_eq!(plugin_info.credential_values.get("api_key"), Some(&"secret-key-123".to_string()));
     }
+
+    // ── HeaderSet transform tests ───────────────────────────────────
+
+    #[tokio::test]
+    async fn test_transform_request_header_set_injects_headers() {
+        let db = GapDatabase::in_memory().await.unwrap();
+
+        // Create a header set matching the host
+        db.add_header_set("test-hs", &["api.hs.com".to_string()], 0)
+            .await
+            .unwrap();
+        db.set_header_set_header("test-hs", "Authorization", "Bearer hs-secret-123")
+            .await
+            .unwrap();
+        db.set_header_set_header("test-hs", "X-Custom", "custom-value")
+            .await
+            .unwrap();
+
+        let request = GAPRequest::new("GET", "https://api.hs.com/data")
+            .with_header("Host", "api.hs.com");
+
+        let (result, plugin_info) = transform_request(request, "api.hs.com", None, "/", &db, true)
+            .await
+            .expect("header set transform should succeed");
+
+        // Headers should be injected
+        assert_eq!(
+            result.get_header("Authorization"),
+            Some(&"Bearer hs-secret-123".to_string())
+        );
+        assert_eq!(
+            result.get_header("X-Custom"),
+            Some(&"custom-value".to_string())
+        );
+        // Original headers preserved
+        assert_eq!(result.get_header("Host"), Some(&"api.hs.com".to_string()));
+        // Plugin info should identify the header set
+        assert_eq!(plugin_info.name, "test-hs");
+        assert!(plugin_info.commit_sha.is_none());
+        assert!(plugin_info.source_hash.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_transform_request_header_set_blocks_http() {
+        let db = GapDatabase::in_memory().await.unwrap();
+
+        db.add_header_set("http-hs", &["api.httphs.com".to_string()], 0)
+            .await
+            .unwrap();
+        db.set_header_set_header("http-hs", "Authorization", "Bearer secret")
+            .await
+            .unwrap();
+
+        let request = GAPRequest::new("GET", "http://api.httphs.com/data")
+            .with_header("Host", "api.httphs.com");
+
+        // use_tls=false should be blocked for header sets
+        let result = transform_request(request, "api.httphs.com", None, "/", &db, false).await;
+        assert!(result.is_err());
+        let err_msg = result.unwrap_err().to_string();
+        assert!(
+            err_msg.contains("does not permit") || err_msg.contains("plain HTTP"),
+            "Expected HTTP blocking error, got: {}",
+            err_msg
+        );
+    }
+
+    #[tokio::test]
+    async fn test_transform_request_header_set_empty_headers() {
+        let db = GapDatabase::in_memory().await.unwrap();
+
+        // Header set with no headers configured
+        db.add_header_set("empty-hs", &["api.empty.com".to_string()], 0)
+            .await
+            .unwrap();
+
+        let request = GAPRequest::new("GET", "https://api.empty.com/data")
+            .with_header("Host", "api.empty.com");
+
+        let result = transform_request(request, "api.empty.com", None, "/", &db, true).await;
+        assert!(result.is_err());
+        let err_msg = result.unwrap_err().to_string();
+        assert!(
+            err_msg.contains("no headers configured"),
+            "Expected missing headers error, got: {}",
+            err_msg
+        );
+    }
+
+    #[tokio::test]
+    async fn test_transform_request_header_set_scrubs_values() {
+        let db = GapDatabase::in_memory().await.unwrap();
+
+        db.add_header_set("scrub-hs", &["api.scrub.com".to_string()], 0)
+            .await
+            .unwrap();
+        db.set_header_set_header("scrub-hs", "Authorization", "Bearer scrub-secret-val")
+            .await
+            .unwrap();
+
+        let request = GAPRequest::new("GET", "https://api.scrub.com/data")
+            .with_header("Host", "api.scrub.com");
+
+        let (_result, plugin_info) = transform_request(request, "api.scrub.com", None, "/", &db, true)
+            .await
+            .expect("header set transform should succeed");
+
+        // Scrubbed headers should not contain the secret value
+        assert!(plugin_info.scrubbed_headers.is_some());
+        let scrubbed = plugin_info.scrubbed_headers.unwrap();
+        assert!(!scrubbed.contains("scrub-secret-val"));
+        assert!(scrubbed.contains("[REDACTED]"));
+
+        // credential_values should contain the header values for response body scrubbing
+        assert_eq!(
+            plugin_info.credential_values.get("Authorization"),
+            Some(&"Bearer scrub-secret-val".to_string())
+        );
+    }
 }

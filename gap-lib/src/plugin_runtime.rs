@@ -910,6 +910,13 @@ impl PluginRuntime {
             Err(_) => false,
         };
 
+        // Extract weight (optional, default 0)
+        let weight = plugin_obj
+            .get(JsString::from("weight"), &mut self.context)
+            .ok()
+            .and_then(|v| v.to_i32(&mut self.context).ok())
+            .unwrap_or(0);
+
         Ok(GAPPlugin {
             name,
             match_patterns,
@@ -918,7 +925,7 @@ impl PluginRuntime {
             commit_sha: None,
             source_hash: None,
             dangerously_permit_http: permit_http,
-            weight: 0,
+            weight,
         })
     }
 

@@ -24,7 +24,7 @@ pub use key_provider::{KeyProvider, EnvKeyProvider};
 #[cfg(target_os = "macos")]
 pub use key_provider::KeychainKeyProvider;
 pub use paths::ca_cert_path;
-pub use plugin_matcher::find_matching_plugin;
+pub use plugin_matcher::{find_matching_plugin, find_matching_handler, MatchResult};
 pub use plugin_runtime::PluginRuntime;
 pub use proxy::ProxyServer;
 pub use database::GapDatabase;
