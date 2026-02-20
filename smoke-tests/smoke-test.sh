@@ -149,12 +149,11 @@ echo "-----------------------------------"
 
 # 3.1: Create token using CLI
 log_step "Phase 3.1: Creating agent token with 'gap token create'"
-TOKEN_NAME="smoke-test-agent-$(date +%s)"
-TOKEN_OUTPUT=$("$GAP" --server "http://localhost:$API_PORT" token create "$TOKEN_NAME" 2>&1)
+TOKEN_OUTPUT=$("$GAP" --server "http://localhost:$API_PORT" token create 2>&1)
 
 if echo "$TOKEN_OUTPUT" | grep -q "Token created"; then
-    TOKEN_ID=$(echo "$TOKEN_OUTPUT" | grep "ID:" | awk '{print $2}')
-    log_success "Token created: $TOKEN_NAME (ID: $TOKEN_ID)"
+    TOKEN_PREFIX=$(echo "$TOKEN_OUTPUT" | grep "Prefix:" | awk '{print $2}')
+    log_success "Token created (Prefix: $TOKEN_PREFIX)"
 else
     log_error "Token creation failed: $TOKEN_OUTPUT"
     exit 1
@@ -164,7 +163,7 @@ fi
 log_step "Phase 3.2: Listing tokens with 'gap token list'"
 LIST_OUTPUT=$("$GAP" --server "http://localhost:$API_PORT" token list 2>&1)
 
-if echo "$LIST_OUTPUT" | grep -q "$TOKEN_NAME"; then
+if echo "$LIST_OUTPUT" | grep -q "Prefix: $TOKEN_PREFIX"; then
     log_success "Token appears in list"
 else
     log_error "Token not found in list: $LIST_OUTPUT"
@@ -173,7 +172,7 @@ fi
 
 # 3.3: Revoke token using CLI
 log_step "Phase 3.3: Revoking token with 'gap token revoke'"
-REVOKE_OUTPUT=$("$GAP" --server "http://localhost:$API_PORT" token revoke "$TOKEN_ID" 2>&1)
+REVOKE_OUTPUT=$("$GAP" --server "http://localhost:$API_PORT" token revoke "$TOKEN_PREFIX" 2>&1)
 
 if echo "$REVOKE_OUTPUT" | grep -qi "revoked\|deleted\|success"; then
     log_success "Token revoked"
@@ -186,7 +185,7 @@ fi
 log_step "Phase 3.4: Verifying token was deleted"
 LIST_AFTER=$("$GAP" --server "http://localhost:$API_PORT" token list 2>&1)
 
-if echo "$LIST_AFTER" | grep -q "$TOKEN_NAME"; then
+if echo "$LIST_AFTER" | grep -q "Prefix: $TOKEN_PREFIX"; then
     log_error "Token still appears after deletion"
     exit 1
 else
@@ -372,8 +371,7 @@ echo "-----------------------------------"
 
 # 6.1: Create a token for proxy authentication
 log_step "Phase 6.1: Creating token for proxy test"
-PROXY_TOKEN_NAME="proxy-test-$(date +%s)"
-PROXY_TOKEN_OUTPUT=$("$GAP" --server "http://localhost:$API_PORT" token create "$PROXY_TOKEN_NAME" 2>&1)
+PROXY_TOKEN_OUTPUT=$("$GAP" --server "http://localhost:$API_PORT" token create 2>&1)
 
 if echo "$PROXY_TOKEN_OUTPUT" | grep -q "Token created"; then
     PROXY_TOKEN=$(echo "$PROXY_TOKEN_OUTPUT" | grep "Token:" | awk '{print $2}')

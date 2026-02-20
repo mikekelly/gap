@@ -118,9 +118,10 @@ log_success "CA certificate found: $CA_CERT"
 
 # Create token
 log_step "Creating authentication token"
-TOKEN_RESPONSE=$($CURL -s -k -X POST https://localhost:$API_PORT/tokens/create \
+TOKEN_RESPONSE=$($CURL -s -k -X POST https://localhost:$API_PORT/tokens \
     -H "Content-Type: application/json" \
-    -d "{\"name\": \"test-token\", \"password_hash\": \"$PASSWORD_HASH\"}")
+    -H "Authorization: Bearer $PASSWORD_HASH" \
+    -d '{}')
 TOKEN=$(echo "$TOKEN_RESPONSE" | grep -o '"token":"[^"]*"' | cut -d'"' -f4)
 
 if [ -z "$TOKEN" ]; then
