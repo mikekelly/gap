@@ -1247,6 +1247,10 @@ async fn create_header_set(
     let req: CreateHeaderSetRequest = serde_json::from_slice(&body)
         .map_err(|e| (StatusCode::BAD_REQUEST, format!("Invalid request body: {}", e)))?;
 
+    if req.match_patterns.is_empty() {
+        return Err((StatusCode::BAD_REQUEST, "match_patterns must not be empty".to_string()));
+    }
+
     state.db.add_header_set(&req.name, &req.match_patterns, req.weight).await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to create header set: {}", e)))?;
 
@@ -1302,6 +1306,12 @@ async fn update_header_set(
 
     if req.match_patterns.is_none() && req.weight.is_none() {
         return Err((StatusCode::BAD_REQUEST, "At least one field (match_patterns or weight) must be provided".to_string()));
+    }
+
+    if let Some(ref patterns) = req.match_patterns {
+        if patterns.is_empty() {
+            return Err((StatusCode::BAD_REQUEST, "match_patterns must not be empty".to_string()));
+        }
     }
 
     // Verify exists first to return proper 404
@@ -3513,6 +3523,75 @@ mod tests {
             .unwrap();
 
         assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn test_create_header_set_empty_patterns() {
+        // Empty match_patterns should be rejected with 400 Bad Request.
+        // An empty list would create an unreachable header set (matches nothing),
+        // which is almost certainly a client mistake.
+        let db = create_test_db().await;
+        let state = ApiState::new(9443, 9080, db);
+        let password = setup_auth(&state).await;
+        let app = create_router(state);
+
+        let body = serde_json::json!({
+            "name": "my-headers",
+            "match_patterns": []
+        });
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/header-sets")
+                    .header("content-type", "application/json")
+                    .header("Authorization", format!("Bearer {}", password))
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+
+        let body_bytes = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let body_str = String::from_utf8_lossy(&body_bytes);
+        assert!(body_str.contains("match_patterns must not be empty"), "got: {}", body_str);
+    }
+
+    #[tokio::test]
+    async fn test_update_header_set_empty_patterns() {
+        // Updating match_patterns to an empty list should be rejected with 400 Bad Request.
+        let db = create_test_db().await;
+        let state = ApiState::new(9443, 9080, Arc::clone(&db));
+        let password = setup_auth(&state).await;
+
+        db.add_header_set("my-headers", &["api.example.com".to_string()], 0)
+            .await.unwrap();
+
+        let app = create_router(state);
+
+        let body = serde_json::json!({ "match_patterns": [] });
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("PATCH")
+                    .uri("/header-sets/my-headers")
+                    .header("content-type", "application/json")
+                    .header("Authorization", format!("Bearer {}", password))
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+
+        let body_bytes = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let body_str = String::from_utf8_lossy(&body_bytes);
+        assert!(body_str.contains("match_patterns must not be empty"), "got: {}", body_str);
     }
 
     #[tokio::test]
