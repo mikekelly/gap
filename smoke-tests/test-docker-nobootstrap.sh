@@ -7,14 +7,14 @@ PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
 FIXTURES_DIR="$SCRIPT_DIR/fixtures"
 
 # Generate fixtures if needed
-if [ ! -f "$FIXTURES_DIR/test-ca-cert.b64" ]; then
+if [ ! -f "$FIXTURES_DIR/test-intermediate-chain.pem" ]; then
     echo "Generating test CA fixtures..."
     "$SCRIPT_DIR/generate-test-ca.sh"
 fi
 
-# Export env vars for docker-compose
-export GAP_CA_CERT_CHAIN="$(cat "$FIXTURES_DIR/test-ca-cert.b64")"
-export GAP_CA_KEY="$(cat "$FIXTURES_DIR/test-ca-key.b64")"
+# Export env vars for docker-compose (PEM format)
+export GAP_CA_CERT_CHAIN="$(cat "$FIXTURES_DIR/test-intermediate-chain.pem")"
+export GAP_CA_KEY="$(cat "$FIXTURES_DIR/test-intermediate.key")"
 export GAP_ENCRYPTION_KEY_NOBOOTSTRAP="$(cat "$FIXTURES_DIR/test-encryption.key")"
 
 echo "=== Testing no-bootstrap mode (should succeed) ==="

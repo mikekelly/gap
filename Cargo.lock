@@ -1362,7 +1362,6 @@ dependencies = [
  "async-stream",
  "axum 0.7.9",
  "axum-server",
- "base64 0.22.1",
  "chrono",
  "clap",
  "dirs",

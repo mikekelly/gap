@@ -1,30 +1,52 @@
 #!/bin/bash
-# Generate a test CA cert+key for no-bootstrap mode testing.
-# Outputs base64-encoded DER values suitable for GAP_CA_CERT_CHAIN/GAP_CA_KEY env vars.
+# Generate test CA fixtures for no-bootstrap mode testing.
+# Produces a root CA and an intermediate CA (signed by root) as PEM files.
 set -e
 
 FIXTURES_DIR="$(dirname "$0")/fixtures"
 mkdir -p "$FIXTURES_DIR"
 
-# Generate CA private key (ECDSA P-256 — same as rcgen default)
-openssl ecparam -name prime256v1 -genkey -noout -out "$FIXTURES_DIR/test-ca.key"
-
-# Generate self-signed CA certificate (10 years, matching GAP defaults)
-openssl req -new -x509 -key "$FIXTURES_DIR/test-ca.key" -out "$FIXTURES_DIR/test-ca.crt" \
-    -days 3650 -subj "/CN=GAP Test CA/O=GAP Testing" \
+# --- Root CA ---
+openssl ecparam -name prime256v1 -genkey -noout -out "$FIXTURES_DIR/test-root-ca.key"
+openssl req -new -x509 -key "$FIXTURES_DIR/test-root-ca.key" -out "$FIXTURES_DIR/test-root-ca.crt" \
+    -days 3650 -subj "/CN=GAP Test Root CA/O=GAP Testing" \
     -addext "basicConstraints=critical,CA:TRUE" \
     -addext "keyUsage=critical,keyCertSign,cRLSign"
 
-# Convert to DER and base64 encode for env vars
-openssl x509 -in "$FIXTURES_DIR/test-ca.crt" -outform DER | base64 | tr -d '\n' > "$FIXTURES_DIR/test-ca-cert.b64"
-openssl pkcs8 -topk8 -nocrypt -in "$FIXTURES_DIR/test-ca.key" -outform DER | base64 | tr -d '\n' > "$FIXTURES_DIR/test-ca-key.b64"
+# --- Intermediate CA (signed by root) ---
+openssl ecparam -name prime256v1 -genkey -noout -out "$FIXTURES_DIR/test-intermediate-ec.key"
 
-# Also generate a random encryption key (32 bytes hex-encoded, matching GAP_ENCRYPTION_KEY format)
+# Convert to PKCS#8 format (required by rcgen/rustls)
+openssl pkcs8 -topk8 -nocrypt \
+    -in "$FIXTURES_DIR/test-intermediate-ec.key" \
+    -out "$FIXTURES_DIR/test-intermediate.key"
+
+# Create CSR for intermediate
+openssl req -new -key "$FIXTURES_DIR/test-intermediate.key" \
+    -out "$FIXTURES_DIR/test-intermediate.csr" \
+    -subj "/CN=GAP Test Intermediate CA/O=GAP Testing"
+
+# Sign intermediate cert with root CA
+openssl x509 -req -in "$FIXTURES_DIR/test-intermediate.csr" \
+    -CA "$FIXTURES_DIR/test-root-ca.crt" -CAkey "$FIXTURES_DIR/test-root-ca.key" \
+    -CAcreateserial -out "$FIXTURES_DIR/test-intermediate.crt" \
+    -days 3650 \
+    -extfile <(printf "basicConstraints=critical,CA:TRUE\nkeyUsage=critical,keyCertSign,cRLSign")
+
+# Create chain file (intermediate cert only — root is NOT included because
+# clients already have it in their trust store)
+cp "$FIXTURES_DIR/test-intermediate.crt" "$FIXTURES_DIR/test-intermediate-chain.pem"
+
+# Encryption key (unchanged)
 openssl rand -hex 32 > "$FIXTURES_DIR/test-encryption.key"
 
+# Clean up temp files
+rm -f "$FIXTURES_DIR/test-intermediate-ec.key" "$FIXTURES_DIR/test-intermediate.csr" "$FIXTURES_DIR"/*.srl
+
 echo "Test fixtures generated in $FIXTURES_DIR/"
-echo "  test-ca.crt          — CA certificate (PEM)"
-echo "  test-ca.key          — CA private key (PEM)"
-echo "  test-ca-cert.b64     — CA certificate (base64 DER for GAP_CA_CERT_CHAIN)"
-echo "  test-ca-key.b64      — CA private key (base64 DER for GAP_CA_KEY)"
-echo "  test-encryption.key  — Encryption key (hex for GAP_ENCRYPTION_KEY)"
+echo "  test-root-ca.crt             — Root CA certificate (PEM, for client trust)"
+echo "  test-root-ca.key             — Root CA private key (PEM)"
+echo "  test-intermediate.crt        — Intermediate CA certificate (PEM)"
+echo "  test-intermediate.key        — Intermediate CA private key (PEM, PKCS#8)"
+echo "  test-intermediate-chain.pem  — Chain file for GAP_CA_CERT_CHAIN"
+echo "  test-encryption.key          — Encryption key (hex for GAP_ENCRYPTION_KEY)"

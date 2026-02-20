@@ -140,7 +140,7 @@ services:
         condition: service_started
     volumes:
       - ./smoke-tests/test-docker-integration.sh:/tests/test-docker-integration.sh:ro
-      - gap-data-nobootstrap:/var/lib/gap:ro
+      - ./smoke-tests/fixtures/test-root-ca.crt:/var/lib/gap/ca.crt:ro
     environment:
       - GAP_SERVER_URL=https://gap-server-nobootstrap:9080
     networks:
