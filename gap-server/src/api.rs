@@ -8,7 +8,7 @@
 //! - Activity monitoring
 
 use gap_lib::{AgentToken, ActivityEntry, ManagementLogEntry};
-use gap_lib::types::RequestDetails;
+use gap_lib::types::{RequestDetails, TokenScope};
 use gap_lib::database::GapDatabase;
 use gap_lib::types::PluginEntry;
 use argon2::{Argon2, PasswordHash, PasswordVerifier};
@@ -156,29 +156,19 @@ pub struct PluginsResponse {
 /// Token creation request
 #[derive(Debug, Deserialize)]
 pub struct CreateTokenRequest {
-    pub name: String,
+    /// Optional scope restrictions (whitelist of permitted patterns)
+    pub permitted: Option<Vec<TokenScope>>,
 }
 
 /// Token response (includes full token only on creation)
 #[derive(Debug, Serialize, Deserialize)]
 pub struct TokenResponse {
-    pub id: String,
-    pub name: String,
     pub prefix: String,
     pub token: Option<String>,
     pub created_at: DateTime<Utc>,
-}
-
-impl From<AgentToken> for TokenResponse {
-    fn from(token: AgentToken) -> Self {
-        Self {
-            id: token.id.clone(),
-            name: token.name.clone(),
-            prefix: token.prefix.clone(),
-            token: None, // Don't expose token by default
-            created_at: token.created_at,
-        }
-    }
+    pub permitted: Option<Vec<TokenScope>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub revoked_at: Option<DateTime<Utc>>,
 }
 
 /// Tokens list response
@@ -319,9 +309,8 @@ pub fn create_router(state: ApiState) -> Router {
         .route("/plugins/register", post(register_plugin))
         .route("/plugins/:name/update", post(update_plugin_from_github))
         .route("/plugins/:name", axum::routing::patch(update_plugin).delete(uninstall_plugin))
-        .route("/tokens", get(list_tokens).post(post_list_tokens))
-        .route("/tokens/create", post(create_token))
-        .route("/tokens/:id", delete(delete_token))
+        .route("/tokens", get(list_tokens).post(create_token))
+        .route("/tokens/:prefix", delete(delete_token))
         .route(
             "/credentials/:plugin/:key",
             post(set_credential).delete(delete_credential),
@@ -765,26 +754,29 @@ fn transform_es6_export(code: &str) -> String {
 async fn list_tokens(
     State(state): State<ApiState>,
     headers: HeaderMap,
+    Query(params): Query<HashMap<String, String>>,
 ) -> Result<Json<TokensResponse>, (StatusCode, String)> {
     verify_auth(&state, &headers).await?;
 
-    // List tokens from database
-    let token_entries = state.db.list_tokens().await
+    let include_revoked = params.get("include_revoked").map_or(false, |v| v == "true");
+
+    let token_entries = state.db.list_tokens(include_revoked).await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to list tokens: {}", e)))?;
 
-    // Convert TokenEntry to TokenResponse
     let token_list: Vec<TokenResponse> = token_entries
         .into_iter()
         .map(|entry| {
-            // TokenEntry.token_value is the full token, use it as id
-            // Calculate prefix from token_value (first 8 chars)
-            let prefix = entry.token_value.chars().take(8).collect::<String>();
+            let prefix = if entry.token_value.len() >= 12 {
+                entry.token_value[..12].to_string()
+            } else {
+                entry.token_value.clone()
+            };
             TokenResponse {
-                id: entry.token_value,
-                name: entry.name,
                 prefix,
-                token: None, // Never expose full token in list
+                token: None,
                 created_at: entry.created_at,
+                permitted: entry.scopes,
+                revoked_at: entry.revoked_at,
             }
         })
         .collect();
@@ -792,90 +784,76 @@ async fn list_tokens(
     Ok(Json(TokensResponse { tokens: token_list }))
 }
 
-/// POST /tokens - List agent tokens (requires auth, same as GET)
-async fn post_list_tokens(
-    State(state): State<ApiState>,
-    headers: HeaderMap,
-) -> Result<Json<TokensResponse>, (StatusCode, String)> {
-    list_tokens(State(state), headers).await
-}
-
-/// POST /tokens/create - Create new agent token (requires auth)
+/// POST /tokens - Create new agent token (requires auth)
 async fn create_token(
     State(state): State<ApiState>,
     headers: HeaderMap,
     body: Bytes,
 ) -> Result<Json<TokenResponse>, (StatusCode, String)> {
     verify_auth(&state, &headers).await?;
-    let req: CreateTokenRequest = serde_json::from_slice(&body)
-        .map_err(|e| (StatusCode::BAD_REQUEST, format!("Invalid request body: {}", e)))?;
 
-    // Create a new AgentToken
-    let token = AgentToken::new(&req.name);
+    // Body is optional — empty body means no scopes (unrestricted token)
+    let scopes: Option<Vec<TokenScope>> = if body.is_empty() {
+        None
+    } else {
+        let req: CreateTokenRequest = serde_json::from_slice(&body)
+            .map_err(|e| (StatusCode::BAD_REQUEST, format!("Invalid request body: {}", e)))?;
+        req.permitted
+    };
 
-    // Store token in database
-    state.db.add_token(&token.token, &token.name, token.created_at)
-        .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to add token: {}", e)))?;
+    let token = AgentToken::new();
 
-    let token_value = token.token.clone();
+    state.db.add_token(&token.token, token.created_at, scopes.as_deref()).await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to create token: {}", e)))?;
 
     emit_management_log(&state, ManagementLogEntry {
         timestamp: chrono::Utc::now(),
         operation: "token_create".to_string(),
         resource_type: "token".to_string(),
-        resource_id: Some(token_value.clone()),
-        detail: Some(serde_json::json!({"name": req.name}).to_string()),
+        resource_id: Some(token.prefix.clone()),
+        detail: scopes.as_ref().map(|s| serde_json::to_string(s).unwrap_or_default()),
         success: true,
         error_message: None,
     });
 
-    // Return with full token (only time it's revealed)
-    // NOTE: id is the token value (not UUID) to match list_tokens behavior
     Ok(Json(TokenResponse {
-        id: token_value.clone(),
-        name: token.name,
         prefix: token.prefix,
-        token: Some(token_value),
+        token: Some(token.token),
         created_at: token.created_at,
+        permitted: scopes,
+        revoked_at: None,
     }))
 }
 
-/// DELETE /tokens/:id - Revoke agent token (requires auth)
+/// DELETE /tokens/:prefix - Revoke agent token (requires auth)
 async fn delete_token(
     State(state): State<ApiState>,
-    Path(id): Path<String>,
+    Path(prefix): Path<String>,
     headers: HeaderMap,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
     verify_auth(&state, &headers).await?;
 
-    // The id is the token value
-    // Check if token exists in database
-    let token = state.db.get_token(&id)
-        .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to get token: {}", e)))?;
+    // Look up full token value by prefix
+    let token_value = state.db.get_token_by_prefix(&prefix).await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to find token: {}", e)))?
+        .ok_or_else(|| (StatusCode::NOT_FOUND, format!("No active token found with prefix '{}'", prefix)))?;
 
-    if token.is_none() {
-        return Err((StatusCode::NOT_FOUND, format!("Token '{}' not found", id)));
-    }
-
-    // Remove from database
-    state.db.remove_token(&id)
-        .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to remove token: {}", e)))?;
+    // Soft delete (set revoked_at)
+    state.db.revoke_token(&token_value).await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to revoke token: {}", e)))?;
 
     emit_management_log(&state, ManagementLogEntry {
         timestamp: chrono::Utc::now(),
-        operation: "token_delete".to_string(),
+        operation: "token_revoke".to_string(),
         resource_type: "token".to_string(),
-        resource_id: Some(id.clone()),
+        resource_id: Some(prefix.clone()),
         detail: None,
         success: true,
         error_message: None,
     });
 
     Ok(Json(serde_json::json!({
-        "id": id,
+        "prefix": prefix,
         "revoked": true
     })))
 }
@@ -1555,45 +1533,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_post_tokens_list_endpoint() {
-        use argon2::password_hash::{rand_core::OsRng, SaltString};
-        use argon2::{Argon2, PasswordHasher};
-
-        let db = create_test_db().await;
-        let state = ApiState::new(9443, 9080, db);
-
-        // Set up password hash
-        let password = "testpass123";
-        let salt = SaltString::generate(&mut OsRng);
-        let argon2 = Argon2::default();
-        let password_hash = argon2.hash_password(password.as_bytes(), &salt).unwrap().to_string();
-        state.set_password_hash(password_hash).await;
-
-        let app = create_router(state);
-
-        let response = app
-            .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri("/tokens")
-                    .header("Authorization", format!("Bearer {}", password))
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-
-        let status = response.status();
-        if status != StatusCode::OK {
-            let body_bytes = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
-            let body_str = String::from_utf8_lossy(&body_bytes);
-            eprintln!("Error response: {}", body_str);
-            panic!("Expected OK, got {}", status);
-        }
-        assert_eq!(status, StatusCode::OK);
-    }
-
-    #[tokio::test]
     async fn test_post_tokens_create_endpoint() {
         use argon2::password_hash::{rand_core::OsRng, SaltString};
         use argon2::{Argon2, PasswordHasher};
@@ -1610,18 +1549,14 @@ mod tests {
 
         let app = create_router(state);
 
-        let body = serde_json::json!({
-            "name": "test-token"
-        });
-
+        // POST /tokens with empty body creates an unrestricted token
         let response = app
             .oneshot(
                 Request::builder()
                     .method("POST")
-                    .uri("/tokens/create")
-                    .header("content-type", "application/json")
+                    .uri("/tokens")
                     .header("Authorization", format!("Bearer {}", password))
-                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .body(Body::empty())
                     .unwrap(),
             )
             .await
@@ -1634,8 +1569,9 @@ mod tests {
             .unwrap();
         let token_response: TokenResponse = serde_json::from_slice(&body).unwrap();
 
-        assert_eq!(token_response.name, "test-token");
         assert!(token_response.token.is_some());
+        assert!(token_response.permitted.is_none());
+        assert!(token_response.revoked_at.is_none());
     }
 
     #[tokio::test]
@@ -2266,7 +2202,7 @@ mod tests {
 
         // Add a token to the database directly
         let token_value = "gap_test_token_12345".to_string();
-        db.add_token(&token_value, "test-token", Utc::now()).await.expect("add token to database");
+        db.add_token(&token_value, Utc::now(), None).await.expect("add token to database");
 
         // List tokens via API
         let app = create_router(state);
@@ -2274,7 +2210,7 @@ mod tests {
         let response = app
             .oneshot(
                 Request::builder()
-                    .method("POST")
+                    .method("GET")
                     .uri("/tokens")
                     .header("Authorization", format!("Bearer {}", password))
                     .body(Body::empty())
@@ -2292,9 +2228,8 @@ mod tests {
 
         // Verify the token from database is in the response
         assert_eq!(tokens_response.tokens.len(), 1);
-        assert_eq!(tokens_response.tokens[0].id, token_value);
-        assert_eq!(tokens_response.tokens[0].name, "test-token");
-        assert_eq!(tokens_response.tokens[0].prefix, "gap_test");
+        assert_eq!(tokens_response.tokens[0].prefix, "gap_test_tok");
+        assert!(tokens_response.tokens[0].permitted.is_none());
     }
 
     #[tokio::test]
@@ -2316,20 +2251,16 @@ mod tests {
         let password_hash = argon2.hash_password(password.as_bytes(), &salt).unwrap().to_string();
         state.set_password_hash(password_hash).await;
 
-        // Create token via API
+        // Create token via API (empty body = unrestricted)
         let app = create_router(state);
-        let body = serde_json::json!({
-            "name": "new-token"
-        });
 
         let response = app
             .oneshot(
                 Request::builder()
                     .method("POST")
-                    .uri("/tokens/create")
-                    .header("content-type", "application/json")
+                    .uri("/tokens")
                     .header("Authorization", format!("Bearer {}", password))
-                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .body(Body::empty())
                     .unwrap(),
             )
             .await
@@ -2343,15 +2274,15 @@ mod tests {
         let token_response: TokenResponse = serde_json::from_slice(&body_bytes).unwrap();
 
         // Verify the token was added to the database
-        let tokens = db.list_tokens().await.expect("list tokens from database");
+        let tokens = db.list_tokens(false).await.expect("list tokens from database");
         assert_eq!(tokens.len(), 1);
-        assert_eq!(tokens[0].token_value, token_response.id);
-        assert_eq!(tokens[0].name, "new-token");
+        // The full token value should start with the prefix
+        assert!(tokens[0].token_value.starts_with(&token_response.prefix));
     }
 
     #[tokio::test]
     #[serial]
-    async fn test_delete_token_removes_from_database() {
+    async fn test_delete_token_revokes_in_database() {
         use argon2::password_hash::{rand_core::OsRng, SaltString};
         use argon2::{Argon2, PasswordHasher};
 
@@ -2369,17 +2300,17 @@ mod tests {
         state.set_password_hash(password_hash).await;
 
         // Create a token and add it to the database
-        let token = AgentToken::new("test-token");
-        db.add_token(&token.token, &token.name, token.created_at).await.expect("add token to database");
+        let token = AgentToken::new();
+        db.add_token(&token.token, token.created_at, None).await.expect("add token to database");
 
-        // Delete token via API
+        // Delete (revoke) token via API using its prefix
         let app = create_router(state);
 
         let response = app
             .oneshot(
                 Request::builder()
                     .method("DELETE")
-                    .uri(&format!("/tokens/{}", token.token))
+                    .uri(&format!("/tokens/{}", token.prefix))
                     .header("Authorization", format!("Bearer {}", password))
                     .body(Body::empty())
                     .unwrap(),
@@ -2389,9 +2320,14 @@ mod tests {
 
         assert_eq!(response.status(), StatusCode::OK);
 
-        // Verify the token was removed from the database
-        let tokens = db.list_tokens().await.expect("list tokens from database");
-        assert_eq!(tokens.len(), 0, "Token should be removed from database");
+        // Verify the token is no longer in active list (soft deleted)
+        let tokens = db.list_tokens(false).await.expect("list tokens from database");
+        assert_eq!(tokens.len(), 0, "Token should not appear in active list after revocation");
+
+        // But it should still exist in the full list (including revoked)
+        let all_tokens = db.list_tokens(true).await.expect("list all tokens from database");
+        assert_eq!(all_tokens.len(), 1, "Revoked token should still exist in full list");
+        assert!(all_tokens[0].revoked_at.is_some(), "Token should have revoked_at set");
     }
 
     /// Verify /init returns 200 OK with a ca_path and no longer stores mgmt certs
@@ -3113,18 +3049,14 @@ mod tests {
 
         // Create a token via API (this should emit a management log event)
         let app = create_router(state);
-        let body = serde_json::json!({
-            "name": "audit-test-token"
-        });
 
         let response = app
             .oneshot(
                 Request::builder()
                     .method("POST")
-                    .uri("/tokens/create")
-                    .header("content-type", "application/json")
+                    .uri("/tokens")
                     .header("Authorization", format!("Bearer {}", password))
-                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .body(Body::empty())
                     .unwrap(),
             )
             .await

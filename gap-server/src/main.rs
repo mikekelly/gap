@@ -309,7 +309,7 @@ async fn main() -> anyhow::Result<()> {
 
 
     // Log initial token count from database
-    let initial_tokens = db.list_tokens().await?;
+    let initial_tokens = db.list_tokens(false).await?;
     tracing::info!("Loaded {} agent tokens from storage", initial_tokens.len());
 
     // Create broadcast channels for real-time streaming (SSE)
