@@ -10,8 +10,8 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"net/url"
 	"os"
+	"strings"
 )
 
 // Client is an API client for the GAP Management API.
@@ -79,10 +79,7 @@ func WithCACert(certPath string) Option {
 
 // doRequest builds and executes an HTTP request. body may be nil.
 func (c *Client) doRequest(ctx context.Context, method, path string, body io.Reader) (*http.Response, error) {
-	fullURL, err := url.JoinPath(c.baseURL, path)
-	if err != nil {
-		return nil, fmt.Errorf("building url: %w", err)
-	}
+	fullURL := strings.TrimRight(c.baseURL, "/") + path
 
 	req, err := http.NewRequestWithContext(ctx, method, fullURL, body)
 	if err != nil {
@@ -187,10 +184,7 @@ func (c *Client) decodeEmptyResponse(resp *http.Response) error {
 // doSSE sets the Accept: text/event-stream header and returns the response without
 // reading the body. The caller is responsible for closing resp.Body.
 func (c *Client) doSSE(ctx context.Context, path string) (*http.Response, error) {
-	fullURL, err := url.JoinPath(c.baseURL, path)
-	if err != nil {
-		return nil, fmt.Errorf("building url: %w", err)
-	}
+	fullURL := strings.TrimRight(c.baseURL, "/") + path
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, fullURL, nil)
 	if err != nil {
