@@ -239,8 +239,13 @@ impl<'de> Deserialize<'de> for TokenScope {
             where
                 M: MapAccess<'de>,
             {
+                // Compact form: {"match": "host[:port][/path]", "methods": [...]}
                 let mut match_str: Option<String> = None;
                 let mut methods: Option<Vec<String>> = None;
+                // Expanded form: {"host_pattern": "...", "port": ..., "path_pattern": "...", "methods": [...]}
+                let mut host_pattern: Option<String> = None;
+                let mut port: Option<u16> = None;
+                let mut path_pattern: Option<String> = None;
 
                 while let Some(key) = map.next_key::<String>()? {
                     match key.as_str() {
@@ -250,6 +255,15 @@ impl<'de> Deserialize<'de> for TokenScope {
                         "methods" => {
                             methods = Some(map.next_value()?);
                         }
+                        "host_pattern" => {
+                            host_pattern = Some(map.next_value()?);
+                        }
+                        "port" => {
+                            port = map.next_value()?;
+                        }
+                        "path_pattern" => {
+                            path_pattern = Some(map.next_value()?);
+                        }
                         _ => {
                             // Skip unknown fields
                             let _ = map.next_value::<serde::de::IgnoredAny>()?;
@@ -257,17 +271,29 @@ impl<'de> Deserialize<'de> for TokenScope {
                     }
                 }
 
-                let match_val =
-                    match_str.ok_or_else(|| de::Error::missing_field("match"))?;
-                let (host_pattern, port, path_pattern) =
-                    parse_scope_string(&match_val).map_err(de::Error::custom)?;
-
-                Ok(TokenScope {
-                    host_pattern,
-                    port,
-                    path_pattern,
-                    methods,
-                })
+                if let Some(match_val) = match_str {
+                    // Compact form: parse "host[:port][/path]" string
+                    let (hp, p, pp) =
+                        parse_scope_string(&match_val).map_err(de::Error::custom)?;
+                    Ok(TokenScope {
+                        host_pattern: hp,
+                        port: p,
+                        path_pattern: pp,
+                        methods,
+                    })
+                } else if let Some(hp) = host_pattern {
+                    // Expanded struct form — host_pattern is the only required field
+                    Ok(TokenScope {
+                        host_pattern: hp,
+                        port,
+                        path_pattern: path_pattern.unwrap_or_else(|| "/*".to_string()),
+                        methods,
+                    })
+                } else {
+                    Err(de::Error::custom(
+                        "object must have either a \"match\" field or a \"host_pattern\" field",
+                    ))
+                }
             }
         }
 
@@ -765,6 +791,29 @@ mod tests {
         assert_eq!(scopes[1].port, None);
         assert_eq!(scopes[1].path_pattern, "/v1/*");
         assert_eq!(scopes[1].methods, Some(vec!["GET".to_string()]));
+    }
+
+    #[test]
+    fn test_token_scope_deserialize_expanded_form() {
+        let json = r#"{"host_pattern": "example.com", "port": 8080, "path_pattern": "/v1/*", "methods": ["GET"]}"#;
+        let scope: TokenScope = serde_json::from_str(json).unwrap();
+        assert_eq!(scope.host_pattern, "example.com");
+        assert_eq!(scope.port, Some(8080));
+        assert_eq!(scope.path_pattern, "/v1/*");
+        assert_eq!(scope.methods, Some(vec!["GET".to_string()]));
+    }
+
+    #[test]
+    fn test_token_scope_round_trip() {
+        let scope = TokenScope {
+            host_pattern: "api.example.com".to_string(),
+            port: Some(443),
+            path_pattern: "/v2/*".to_string(),
+            methods: Some(vec!["GET".to_string(), "POST".to_string()]),
+        };
+        let json = serde_json::to_string(&scope).unwrap();
+        let deserialized: TokenScope = serde_json::from_str(&json).unwrap();
+        assert_eq!(scope, deserialized);
     }
 
     #[test]
