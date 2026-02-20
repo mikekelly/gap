@@ -55,7 +55,7 @@ func main() {
 	}
 
 	// List tokens
-	tokens, err := authClient.ListTokens(ctx)
+	tokens, err := authClient.ListTokens(ctx, false)
 	if err != nil {
 		log.Fatalf("Failed to list tokens: %v", err)
 	}

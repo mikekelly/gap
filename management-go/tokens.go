@@ -5,10 +5,14 @@ import (
 	"fmt"
 )
 
-// ListTokens returns all agent tokens.
-// GET /tokens
-func (c *Client) ListTokens(ctx context.Context) (*TokensResponse, error) {
-	resp, err := c.doGet(ctx, "/tokens")
+// ListTokens returns agent tokens. If includeRevoked is true, revoked tokens are included.
+// GET /tokens[?include_revoked=true]
+func (c *Client) ListTokens(ctx context.Context, includeRevoked bool) (*TokensResponse, error) {
+	path := "/tokens"
+	if includeRevoked {
+		path += "?include_revoked=true"
+	}
+	resp, err := c.doGet(ctx, path)
 	if err != nil {
 		return nil, err
 	}
@@ -21,9 +25,9 @@ func (c *Client) ListTokens(ctx context.Context) (*TokensResponse, error) {
 
 // CreateToken creates a new agent token. The returned TokenResponse includes the
 // token value (only available at creation time).
-// POST /tokens/create
+// POST /tokens
 func (c *Client) CreateToken(ctx context.Context, req *CreateTokenRequest) (*TokenResponse, error) {
-	resp, err := c.doPost(ctx, "/tokens/create", req)
+	resp, err := c.doPost(ctx, "/tokens", req)
 	if err != nil {
 		return nil, err
 	}
@@ -34,10 +38,10 @@ func (c *Client) CreateToken(ctx context.Context, req *CreateTokenRequest) (*Tok
 	return &result, nil
 }
 
-// RevokeToken revokes the token with the given ID.
-// DELETE /tokens/:id
-func (c *Client) RevokeToken(ctx context.Context, id string) (*RevokeTokenResponse, error) {
-	path := fmt.Sprintf("/tokens/%s", id)
+// RevokeToken revokes the token with the given prefix.
+// DELETE /tokens/{prefix}
+func (c *Client) RevokeToken(ctx context.Context, prefix string) (*RevokeTokenResponse, error) {
+	path := fmt.Sprintf("/tokens/%s", prefix)
 	resp, err := c.doDelete(ctx, path)
 	if err != nil {
 		return nil, err

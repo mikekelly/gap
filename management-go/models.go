@@ -89,19 +89,29 @@ type UpdatePluginResponse struct {
 
 // ── Tokens ───────────────────────────────────────────────────────────────────
 
-// CreateTokenRequest is sent to POST /tokens/create.
+// TokenScope defines a permitted host/path/method pattern for scoped tokens.
+// JSON can be either a string ("example.com/v1/*") or an object ({"match": "...", "methods": [...]}).
+// The Go client always uses the struct form.
+type TokenScope struct {
+	HostPattern string   `json:"host_pattern"`
+	Port        *uint16  `json:"port,omitempty"`
+	PathPattern string   `json:"path_pattern"`
+	Methods     []string `json:"methods,omitempty"`
+}
+
+// CreateTokenRequest is sent to POST /tokens.
 type CreateTokenRequest struct {
-	Name string `json:"name"`
+	Permitted []TokenScope `json:"permitted,omitempty"`
 }
 
 // TokenResponse represents an agent token. The Token field is only populated
-// on creation (POST /tokens/create); list responses omit it.
+// on creation (POST /tokens); list responses omit it.
 type TokenResponse struct {
-	ID        string     `json:"id"`
-	Name      string     `json:"name"`
-	Prefix    string     `json:"prefix"`
-	Token     *string    `json:"token,omitempty"`
-	CreatedAt time.Time  `json:"created_at"`
+	Prefix    string       `json:"prefix"`
+	Token     *string      `json:"token,omitempty"`
+	CreatedAt time.Time    `json:"created_at"`
+	Permitted []TokenScope `json:"permitted,omitempty"`
+	RevokedAt *time.Time   `json:"revoked_at,omitempty"`
 }
 
 // TokensResponse is returned by GET /tokens.
@@ -109,9 +119,9 @@ type TokensResponse struct {
 	Tokens []TokenResponse `json:"tokens"`
 }
 
-// RevokeTokenResponse is returned by DELETE /tokens/:id.
+// RevokeTokenResponse is returned by DELETE /tokens/{prefix}.
 type RevokeTokenResponse struct {
-	ID      string `json:"id"`
+	Prefix  string `json:"prefix"`
 	Revoked bool   `json:"revoked"`
 }
 

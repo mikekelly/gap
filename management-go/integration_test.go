@@ -55,7 +55,7 @@ func TestIntegration(t *testing.T) {
 	var authClient *gap.Client
 
 	// Track state across subtests.
-	var createdTokenID string
+	var createdTokenPrefix string
 	var createdTokenValue string
 	var signingPluginName string
 
@@ -118,23 +118,24 @@ func TestIntegration(t *testing.T) {
 
 	// ── Test 5: Create agent token ─────────────────────────────────────────────
 	t.Run("Test05_CreateToken", func(t *testing.T) {
-		resp, err := authClient.CreateToken(ctx, &gap.CreateTokenRequest{
-			Name: "test-agent-integration",
-		})
+		resp, err := authClient.CreateToken(ctx, &gap.CreateTokenRequest{})
 		if err != nil {
 			t.Fatalf("CreateToken failed: %v", err)
 		}
 		if resp.Token == nil || *resp.Token == "" {
 			t.Fatal("expected token value in creation response")
 		}
-		createdTokenID = resp.ID
+		if resp.Prefix == "" {
+			t.Fatal("expected prefix in creation response")
+		}
+		createdTokenPrefix = resp.Prefix
 		createdTokenValue = *resp.Token
-		t.Logf("Token created: id=%s prefix=%s", resp.ID, resp.Prefix)
+		t.Logf("Token created: prefix=%s", resp.Prefix)
 	})
 
 	// ── Test 6: List tokens ────────────────────────────────────────────────────
 	t.Run("Test06_ListTokens", func(t *testing.T) {
-		resp, err := authClient.ListTokens(ctx)
+		resp, err := authClient.ListTokens(ctx, false)
 		if err != nil {
 			t.Fatalf("ListTokens failed: %v", err)
 		}
@@ -541,15 +542,15 @@ func TestIntegration(t *testing.T) {
 
 	// ── Test 19: Delete token ──────────────────────────────────────────────────
 	t.Run("Test19_DeleteToken", func(t *testing.T) {
-		if createdTokenID == "" {
-			t.Skip("no token ID available — skipping deletion test")
+		if createdTokenPrefix == "" {
+			t.Skip("no token prefix available — skipping deletion test")
 		}
-		resp, err := authClient.RevokeToken(ctx, createdTokenID)
+		resp, err := authClient.RevokeToken(ctx, createdTokenPrefix)
 		if err != nil {
-			t.Fatalf("RevokeToken(%s) failed: %v", createdTokenID, err)
+			t.Fatalf("RevokeToken(%s) failed: %v", createdTokenPrefix, err)
 		}
 		if !resp.Revoked {
-			t.Errorf("expected Revoked == true, got false (id=%s)", createdTokenID)
+			t.Errorf("expected Revoked == true, got false (prefix=%s)", createdTokenPrefix)
 		}
 	})
 
@@ -783,7 +784,7 @@ func TestIntegrationSSEStreams(t *testing.T) {
 		go func() {
 			time.Sleep(100 * time.Millisecond)
 			// Fire any authenticated request to potentially generate a log entry.
-			authClient.ListTokens(context.Background()) //nolint:errcheck
+			authClient.ListTokens(context.Background(), false) //nolint:errcheck
 		}()
 
 		// Read one event or until timeout.
