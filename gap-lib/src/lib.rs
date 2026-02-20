@@ -13,6 +13,7 @@ pub mod plugin_runtime;
 pub mod database;
 pub mod proxy;
 pub mod proxy_transforms;
+pub mod scope_matcher;
 pub mod tls;
 pub mod types;
 
@@ -25,6 +26,7 @@ pub use key_provider::{KeyProvider, EnvKeyProvider};
 pub use key_provider::KeychainKeyProvider;
 pub use paths::ca_cert_path;
 pub use plugin_matcher::{find_matching_plugin, find_matching_handler, MatchResult};
+pub use scope_matcher::{check_scopes_host, check_scopes_request};
 pub use plugin_runtime::PluginRuntime;
 pub use proxy::ProxyServer;
 pub use database::GapDatabase;
