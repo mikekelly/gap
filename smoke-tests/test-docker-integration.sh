@@ -648,6 +648,152 @@ else
     log_fail "Filter by resource_type failed: got $TOKEN_TYPE_COUNT entries, $ALL_TOKEN_TYPE matching"
 fi
 
+# Test 23: Create a header set
+echo ""
+echo "Test 23: Create a header set"
+echo "==========================="
+
+RESPONSE=$(curl -ks -X POST "$GAP_SERVER_URL/header-sets" \
+    -H "Content-Type: application/json" \
+    -H "Authorization: Bearer $PW_HASH" \
+    -d '{"name": "test-header-set", "match_patterns": ["api.example.com"], "weight": 5}')
+
+if echo "$RESPONSE" | jq -e '.created == true' > /dev/null 2>&1; then
+    log_pass "Header set created successfully"
+else
+    log_fail "Failed to create header set: $RESPONSE"
+fi
+
+# Test 24: Create header set without auth returns 401
+echo ""
+echo "Test 24: Create header set without auth returns 401"
+echo "===================================================="
+
+NOAUTH_STATUS=$(curl -ks -o /dev/null -w "%{http_code}" -X POST "$GAP_SERVER_URL/header-sets" \
+    -H "Content-Type: application/json" \
+    -d '{"name": "noauth-hs", "match_patterns": ["example.com"]}')
+
+if [ "$NOAUTH_STATUS" = "401" ]; then
+    log_pass "Create header set without auth correctly returns 401"
+else
+    log_fail "Create without auth returned $NOAUTH_STATUS (expected 401)"
+fi
+
+# Test 25: Add headers to header set
+echo ""
+echo "Test 25: Add headers to header set"
+echo "==================================="
+
+# Add first header
+RESPONSE=$(curl -ks -X POST "$GAP_SERVER_URL/header-sets/test-header-set/headers" \
+    -H "Content-Type: application/json" \
+    -H "Authorization: Bearer $PW_HASH" \
+    -d '{"name": "Authorization", "value": "Bearer sk-test-key-123"}')
+
+if echo "$RESPONSE" | jq -e '.set == true' > /dev/null 2>&1; then
+    log_pass "Header added to header set"
+else
+    log_fail "Failed to add header: $RESPONSE"
+fi
+
+# Add second header
+curl -ks -X POST "$GAP_SERVER_URL/header-sets/test-header-set/headers" \
+    -H "Content-Type: application/json" \
+    -H "Authorization: Bearer $PW_HASH" \
+    -d '{"name": "X-Custom-Header", "value": "custom-value"}' > /dev/null
+
+# Test 26: List header sets (verify names visible, values hidden)
+echo ""
+echo "Test 26: List header sets (verify names visible, values hidden)"
+echo "================================================================"
+
+RESPONSE=$(curl -ks "$GAP_SERVER_URL/header-sets" \
+    -H "Authorization: Bearer $PW_HASH")
+
+if echo "$RESPONSE" | jq -e '.header_sets[] | select(.name == "test-header-set") | .headers | length == 2' > /dev/null 2>&1; then
+    log_pass "Header set listed with 2 header names"
+else
+    log_fail "Header set listing unexpected: $RESPONSE"
+fi
+
+# Verify values are NOT in the response
+if echo "$RESPONSE" | grep -q "sk-test-key-123"; then
+    log_fail "Header values should not be exposed in list response"
+else
+    log_pass "Header values correctly hidden in list response"
+fi
+
+# Test 27: Update header set weight
+echo ""
+echo "Test 27: Update header set weight"
+echo "=================================="
+
+RESPONSE=$(curl -ks -X PATCH "$GAP_SERVER_URL/header-sets/test-header-set" \
+    -H "Content-Type: application/json" \
+    -H "Authorization: Bearer $PW_HASH" \
+    -d '{"weight": 10}')
+
+if echo "$RESPONSE" | jq -e '.updated == true' > /dev/null 2>&1; then
+    log_pass "Header set weight updated"
+else
+    log_fail "Failed to update header set: $RESPONSE"
+fi
+
+# Test 28: Update plugin weight
+echo ""
+echo "Test 28: Update plugin weight"
+echo "=============================="
+
+# Use the signing-test plugin registered in Test 18
+RESPONSE=$(curl -ks -X PATCH "$GAP_SERVER_URL/plugins/signing-test" \
+    -H "Content-Type: application/json" \
+    -H "Authorization: Bearer $PW_HASH" \
+    -d '{"weight": 20}')
+
+if echo "$RESPONSE" | jq -e '.updated == true' > /dev/null 2>&1; then
+    log_pass "Plugin weight updated"
+else
+    log_fail "Failed to update plugin weight: $RESPONSE"
+fi
+
+# Test 29: Delete header from header set
+echo ""
+echo "Test 29: Delete header from header set"
+echo "======================================="
+
+RESPONSE=$(curl -ks -X DELETE "$GAP_SERVER_URL/header-sets/test-header-set/headers/X-Custom-Header" \
+    -H "Authorization: Bearer $PW_HASH")
+
+if echo "$RESPONSE" | jq -e '.deleted == true' > /dev/null 2>&1; then
+    log_pass "Header deleted from header set"
+else
+    log_fail "Failed to delete header: $RESPONSE"
+fi
+
+# Test 30: Delete header set
+echo ""
+echo "Test 30: Delete header set"
+echo "==========================="
+
+RESPONSE=$(curl -ks -X DELETE "$GAP_SERVER_URL/header-sets/test-header-set" \
+    -H "Authorization: Bearer $PW_HASH")
+
+if echo "$RESPONSE" | jq -e '.deleted == true' > /dev/null 2>&1; then
+    log_pass "Header set deleted"
+else
+    log_fail "Failed to delete header set: $RESPONSE"
+fi
+
+# Verify it's gone from the list
+RESPONSE=$(curl -ks "$GAP_SERVER_URL/header-sets" \
+    -H "Authorization: Bearer $PW_HASH")
+
+if echo "$RESPONSE" | jq -e '.header_sets | length == 0' > /dev/null 2>&1; then
+    log_pass "Header set no longer in list after deletion"
+else
+    log_fail "Header set still appears after deletion: $RESPONSE"
+fi
+
 echo ""
 echo -e "${GREEN}All Docker integration tests passed!${NC}"
 echo ""
