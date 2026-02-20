@@ -847,10 +847,8 @@ async fn delete_token(
     state.db.revoke_token(&token_value).await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to revoke token: {}", e)))?;
 
-    // Clear entire token cache — we only have the prefix, not the full token value,
-    // so we can't selectively invalidate. This is safe because revocation is infrequent
-    // and the cache repopulates on next request.
-    state.token_cache.clear();
+    // Invalidate the revoked token from cache
+    state.token_cache.invalidate(&token_value);
 
     emit_management_log(&state, ManagementLogEntry {
         timestamp: chrono::Utc::now(),
