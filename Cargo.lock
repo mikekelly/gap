@@ -1307,10 +1307,12 @@ name = "gap"
 version = "0.6.1"
 dependencies = [
  "anyhow",
+ "base64 0.22.1",
  "clap",
  "gap-lib",
  "hex",
  "reqwest",
+ "ring",
  "rpassword",
  "serde",
  "serde_json",

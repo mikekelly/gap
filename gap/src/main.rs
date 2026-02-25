@@ -6,10 +6,15 @@
 
 use clap::{Parser, Subcommand};
 use std::process;
+use std::sync::{Arc, OnceLock};
+
+/// Global signing keypair, set once at startup from --signing-key / GAP_SIGNING_KEY.
+static SIGNING_KEYPAIR: OnceLock<Arc<ring::signature::Ed25519KeyPair>> = OnceLock::new();
 
 mod auth;
 mod client;
 mod commands;
+pub mod signing;
 
 #[derive(Parser)]
 #[command(name = "gap")]
@@ -18,6 +23,10 @@ struct Cli {
     /// Server URL (default: https://localhost:9080, can be set via SERVER env var)
     #[arg(long, default_value = "https://localhost:9080")]
     server: String,
+
+    /// Path to Ed25519 private key PEM for signing management API requests
+    #[arg(long, env = "GAP_SIGNING_KEY")]
+    signing_key: Option<String>,
 
     #[command(subcommand)]
     command: Commands,
@@ -151,8 +160,14 @@ pub fn create_api_client(server_url: &str) -> anyhow::Result<client::ApiClient> 
         let ca_pem = std::fs::read(&ca_path)
             .map_err(|e| anyhow::anyhow!("Failed to read CA certificate from {}: {}", ca_path.display(), e))?;
 
-        client::ApiClient::with_ca_cert(server_url, &ca_pem)
-            .map_err(|e| anyhow::anyhow!("Failed to create HTTPS client: {}. Ensure the CA certificate at {} is valid.", e, ca_path.display()))
+        let mut client = client::ApiClient::with_ca_cert(server_url, &ca_pem)
+            .map_err(|e| anyhow::anyhow!("Failed to create HTTPS client: {}. Ensure the CA certificate at {} is valid.", e, ca_path.display()))?;
+
+        if let Some(keypair) = SIGNING_KEYPAIR.get() {
+            client = client.with_signing_key(Arc::clone(keypair));
+        }
+
+        Ok(client)
     } else {
         // CA cert doesn't exist - likely need to run `gap init` first
         Err(anyhow::anyhow!(
@@ -164,10 +179,33 @@ pub fn create_api_client(server_url: &str) -> anyhow::Result<client::ApiClient> 
 
 #[tokio::main]
 async fn main() {
+    use anyhow::Context;
+
     // Initialize tracing
     tracing_subscriber::fmt::init();
 
     let cli = Cli::parse();
+
+    // Load signing key if configured
+    if let Some(key_path) = &cli.signing_key {
+        let pem_bytes = match std::fs::read(key_path) {
+            Ok(b) => b,
+            Err(e) => {
+                eprintln!("Error: Failed to read signing key '{}': {}", key_path, e);
+                process::exit(1);
+            }
+        };
+        let keypair = match signing::load_private_key_pem(&pem_bytes)
+            .context(format!("Failed to load signing key from '{}'", key_path))
+        {
+            Ok(kp) => kp,
+            Err(e) => {
+                eprintln!("Error: {}", e);
+                process::exit(1);
+            }
+        };
+        let _ = SIGNING_KEYPAIR.set(Arc::new(keypair));
+    }
 
     let result = match cli.command {
         Commands::Init { ca_path, management_sans } => commands::init::run(&cli.server, ca_path.as_deref(), management_sans.as_deref()).await,
@@ -421,6 +459,18 @@ mod tests {
             }
             _ => panic!("Expected Init command"),
         }
+    }
+
+    #[test]
+    fn test_cli_signing_key_parses() {
+        let cli = Cli::parse_from(["gap", "--signing-key", "/tmp/key.pem", "status"]);
+        assert_eq!(cli.signing_key.as_deref(), Some("/tmp/key.pem"));
+    }
+
+    #[test]
+    fn test_cli_signing_key_default_none() {
+        let cli = Cli::parse_from(["gap", "status"]);
+        assert!(cli.signing_key.is_none());
     }
 
     #[test]

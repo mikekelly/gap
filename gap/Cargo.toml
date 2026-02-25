@@ -24,3 +24,5 @@ reqwest.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 urlencoding = "2.1.3"
+ring = "0.17"
+base64 = "0.22"

@@ -1,12 +1,15 @@
 //! HTTP client for Management API
 
 use anyhow::{Context, Result};
+use ring::signature::Ed25519KeyPair;
 use serde::Deserialize;
+use std::sync::Arc;
 
 /// API client for GAP server
 pub struct ApiClient {
     base_url: String,
     client: reqwest::Client,
+    signing_keypair: Option<Arc<Ed25519KeyPair>>,
 }
 
 impl ApiClient {
@@ -14,6 +17,7 @@ impl ApiClient {
         Self {
             base_url: base_url.trim_end_matches('/').to_string(),
             client: reqwest::Client::new(),
+            signing_keypair: None,
         }
     }
 
@@ -32,6 +36,7 @@ impl ApiClient {
         Ok(Self {
             base_url: base_url.trim_end_matches('/').to_string(),
             client,
+            signing_keypair: None,
         })
     }
 
@@ -40,7 +45,17 @@ impl ApiClient {
         Self {
             base_url: base_url.trim_end_matches('/').to_string(),
             client,
+            signing_keypair: None,
         }
+    }
+
+    /// Set the Ed25519 signing keypair for request signing.
+    ///
+    /// When set, all authenticated requests (post_auth, get_auth, delete_auth)
+    /// will include Ed25519 signature headers.
+    pub fn with_signing_key(mut self, key: Arc<Ed25519KeyPair>) -> Self {
+        self.signing_keypair = Some(key);
+        self
     }
 
     /// GET request without authentication
@@ -83,12 +98,25 @@ impl ApiClient {
         body: serde_json::Value,
     ) -> Result<T> {
         let url = format!("{}{}", self.base_url, path);
+        let body_bytes = serde_json::to_vec(&body).context("Failed to serialize body")?;
 
-        let response = self
+        let mut request = self
             .client
             .post(&url)
             .header("Authorization", format!("Bearer {}", password_hash))
-            .json(&body)
+            .header("content-type", "application/json");
+
+        if let Some(keypair) = &self.signing_keypair {
+            let signed = crate::signing::sign_request(keypair, "POST", path, &body_bytes);
+            request = request
+                .header("x-gap-timestamp", &signed.timestamp)
+                .header("x-gap-nonce", &signed.nonce)
+                .header("x-gap-signature", &signed.signature)
+                .header("x-gap-key-id", &signed.key_id);
+        }
+
+        let response = request
+            .body(body_bytes)
             .send()
             .await
             .context("Failed to send request")?;
@@ -111,10 +139,22 @@ impl ApiClient {
                 .collect();
             url = format!("{}?{}", url, params.join("&"));
         }
-        let response = self
+
+        let mut request = self
             .client
             .get(&url)
-            .header("Authorization", format!("Bearer {}", password_hash))
+            .header("Authorization", format!("Bearer {}", password_hash));
+
+        if let Some(keypair) = &self.signing_keypair {
+            let signed = crate::signing::sign_request(keypair, "GET", path, b"");
+            request = request
+                .header("x-gap-timestamp", &signed.timestamp)
+                .header("x-gap-nonce", &signed.nonce)
+                .header("x-gap-signature", &signed.signature)
+                .header("x-gap-key-id", &signed.key_id);
+        }
+
+        let response = request
             .send()
             .await
             .context("Failed to send request")?;
@@ -129,10 +169,21 @@ impl ApiClient {
     ) -> Result<T> {
         let url = format!("{}{}", self.base_url, path);
 
-        let response = self
+        let mut request = self
             .client
             .delete(&url)
-            .header("Authorization", format!("Bearer {}", password_hash))
+            .header("Authorization", format!("Bearer {}", password_hash));
+
+        if let Some(keypair) = &self.signing_keypair {
+            let signed = crate::signing::sign_request(keypair, "DELETE", path, b"");
+            request = request
+                .header("x-gap-timestamp", &signed.timestamp)
+                .header("x-gap-nonce", &signed.nonce)
+                .header("x-gap-signature", &signed.signature)
+                .header("x-gap-key-id", &signed.key_id);
+        }
+
+        let response = request
             .send()
             .await
             .context("Failed to send request")?;
@@ -287,6 +338,23 @@ pub struct ManagementLogResponse {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_client_with_signing_key() {
+        let rng = ring::rand::SystemRandom::new();
+        let pkcs8 = ring::signature::Ed25519KeyPair::generate_pkcs8(&rng).unwrap();
+        let keypair = ring::signature::Ed25519KeyPair::from_pkcs8(pkcs8.as_ref()).unwrap();
+
+        let client = ApiClient::new("http://localhost:9080")
+            .with_signing_key(Arc::new(keypair));
+        assert!(client.signing_keypair.is_some());
+    }
+
+    #[test]
+    fn test_client_without_signing_key() {
+        let client = ApiClient::new("http://localhost:9080");
+        assert!(client.signing_keypair.is_none());
+    }
 
     #[test]
     fn test_client_creation() {
