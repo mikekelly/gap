@@ -815,7 +815,7 @@ impl PluginRuntime {
             .to_std_string_escaped();
 
         // Use the canonical name (e.g., GitHub path) as the plugin identifier
-        let name = canonical_name.to_string();
+        let id = canonical_name.to_string();
 
         // Extract matchPatterns (array of strings)
         let patterns_value = plugin_obj.get(JsString::from("matchPatterns"), &mut self.context)
@@ -918,7 +918,7 @@ impl PluginRuntime {
             .unwrap_or(0);
 
         Ok(GAPPlugin {
-            name,
+            id,
             match_patterns,
             credential_schema,
             transform,
@@ -1346,7 +1346,8 @@ mod tests {
         "#;
 
         let entry = PluginEntry {
-            name: "test-plugin".to_string(),
+            id: "test-plugin".to_string(),
+            source: None,
             hosts: vec!["api.example.com".to_string()],
             credential_schema: vec!["api_key".to_string()],
             commit_sha: None,
@@ -1359,7 +1360,7 @@ mod tests {
         let mut runtime = PluginRuntime::new().unwrap();
         let plugin = runtime.load_plugin("test-plugin", &db).await.unwrap();
 
-        assert_eq!(plugin.name, "test-plugin");
+        assert_eq!(plugin.id, "test-plugin");
         assert_eq!(plugin.match_patterns, vec!["api.example.com"]);
         assert_eq!(plugin.credential_schema, vec!["api_key"]);
     }
@@ -1384,7 +1385,7 @@ mod tests {
         runtime.execute(plugin_code).unwrap();
         let plugin = runtime.extract_plugin_metadata("test-plugin").unwrap();
 
-        assert_eq!(plugin.name, "test-plugin");
+        assert_eq!(plugin.id, "test-plugin");
         assert_eq!(plugin.match_patterns, vec!["*.s3.amazonaws.com", "s3.amazonaws.com"]);
         assert_eq!(plugin.credential_schema, vec!["access_key", "secret_key"]);
     }
@@ -1411,7 +1412,7 @@ mod tests {
         assert!(result.is_ok());
         let plugin = result.unwrap();
         // The plugin name should be the GitHub path, not the internal name
-        assert_eq!(plugin.name, "mikekelly/exa-gap");
+        assert_eq!(plugin.id, "mikekelly/exa-gap");
     }
 
     #[test]
@@ -1438,7 +1439,7 @@ mod tests {
         runtime.execute(plugin_code).unwrap();
         let plugin = runtime.extract_plugin_metadata("mikekelly/exa-gap").unwrap();
 
-        assert_eq!(plugin.name, "mikekelly/exa-gap");
+        assert_eq!(plugin.id, "mikekelly/exa-gap");
         assert_eq!(plugin.match_patterns, vec!["api.exa.ai"]);
         // Should extract just the "name" field from each object in the fields array
         assert_eq!(plugin.credential_schema, vec!["apiKey"]);
@@ -1490,7 +1491,7 @@ mod tests {
         runtime.execute(plugin_code).unwrap();
         let plugin = runtime.extract_plugin_metadata("test-plugin").unwrap();
         // Manually cache the plugin since we didn't use load_plugin
-        runtime.plugins.insert(plugin.name.clone(), plugin);
+        runtime.plugins.insert(plugin.id.clone(), plugin);
 
         let request = GAPRequest::new("GET", "https://api.example.com/users")
             .with_header("Content-Type", "application/json");
@@ -1526,7 +1527,7 @@ mod tests {
 
         runtime.execute(plugin_code).unwrap();
         let plugin = runtime.extract_plugin_metadata("rewriter").unwrap();
-        runtime.plugins.insert(plugin.name.clone(), plugin);
+        runtime.plugins.insert(plugin.id.clone(), plugin);
 
         let request = GAPRequest::new("GET", "https://old.example.com/api");
 
@@ -1560,7 +1561,7 @@ mod tests {
 
         runtime.execute(plugin_code).unwrap();
         let plugin = runtime.extract_plugin_metadata("body-transformer").unwrap();
-        runtime.plugins.insert(plugin.name.clone(), plugin);
+        runtime.plugins.insert(plugin.id.clone(), plugin);
 
         let request = GAPRequest::new("POST", "https://api.example.com/data")
             .with_body(b"original".to_vec());
@@ -1752,7 +1753,7 @@ mod tests {
 
         runtime.execute(plugin_code).unwrap();
         let plugin = runtime.extract_plugin_metadata("fast-plugin").unwrap();
-        runtime.plugins.insert(plugin.name.clone(), plugin);
+        runtime.plugins.insert(plugin.id.clone(), plugin);
 
         let request = GAPRequest::new("GET", "https://api.example.com/test");
 
@@ -1794,7 +1795,7 @@ mod tests {
 
         runtime.execute(plugin_code).unwrap();
         let plugin = runtime.extract_plugin_metadata("slow-plugin").unwrap();
-        runtime.plugins.insert(plugin.name.clone(), plugin);
+        runtime.plugins.insert(plugin.id.clone(), plugin);
 
         let request = GAPRequest::new("GET", "https://api.example.com/test");
 
