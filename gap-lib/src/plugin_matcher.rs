@@ -105,7 +105,7 @@ struct MatchCandidate {
 }
 
 enum CandidateKind {
-    Plugin { name: String, entry: crate::types::PluginEntry },
+    Plugin { id: String, entry: crate::types::PluginEntry },
     HeaderSet(HeaderSet),
 }
 
@@ -137,7 +137,7 @@ pub async fn find_matching_handler(
                 weight: entry.weight,
                 timestamp: entry.installed_at.unwrap_or_else(Utc::now),
                 kind: CandidateKind::Plugin {
-                    name: entry.name.clone(),
+                    id: entry.id.clone(),
                     entry,
                 },
             });
@@ -173,12 +173,12 @@ pub async fn find_matching_handler(
     // Take the winner and materialise the full result
     let winner = candidates.into_iter().next().unwrap();
     match winner.kind {
-        CandidateKind::Plugin { name, entry } => {
+        CandidateKind::Plugin { id, entry } => {
             // Load plugin source only for the winner
-            let plugin_code = db.get_plugin_source(&name).await?;
+            let plugin_code = db.get_plugin_source(&id).await?;
             if let Some(code) = plugin_code {
                 let mut runtime = PluginRuntime::new()?;
-                if let Ok(mut plugin) = runtime.load_plugin_from_code(&name, &code) {
+                if let Ok(mut plugin) = runtime.load_plugin_from_code(&id, &code) {
                     plugin.commit_sha = entry.commit_sha.clone();
                     plugin.dangerously_permit_http = entry.dangerously_permit_http;
                     plugin.weight = entry.weight;
@@ -299,7 +299,8 @@ mod tests {
         "#;
 
         let entry = PluginEntry {
-            name: "test".to_string(),
+            id: "test".to_string(),
+            source: None,
             hosts: vec!["api.example.com".to_string()],
             credential_schema: vec![],
             commit_sha: None,
@@ -311,7 +312,7 @@ mod tests {
 
         let result = find_matching_plugin("api.example.com", &db).await.unwrap();
         assert!(result.is_some());
-        assert_eq!(result.unwrap().name, "test");
+        assert_eq!(result.unwrap().id, "test");
     }
 
     #[tokio::test]
@@ -328,7 +329,8 @@ mod tests {
         "#;
 
         let entry = PluginEntry {
-            name: "s3".to_string(),
+            id: "s3".to_string(),
+            source: None,
             hosts: vec!["*.s3.amazonaws.com".to_string()],
             credential_schema: vec![],
             commit_sha: None,
@@ -340,7 +342,7 @@ mod tests {
 
         let result = find_matching_plugin("bucket.s3.amazonaws.com", &db).await.unwrap();
         assert!(result.is_some());
-        assert_eq!(result.unwrap().name, "s3");
+        assert_eq!(result.unwrap().id, "s3");
     }
 
     #[tokio::test]
@@ -357,7 +359,8 @@ mod tests {
         "#;
 
         let entry = PluginEntry {
-            name: "test".to_string(),
+            id: "test".to_string(),
+            source: None,
             hosts: vec!["api.example.com".to_string()],
             credential_schema: vec![],
             commit_sha: None,
@@ -376,7 +379,8 @@ mod tests {
         let db = GapDatabase::in_memory().await.unwrap();
 
         let entry1 = PluginEntry {
-            name: "nomatch1".to_string(),
+            id: "nomatch1".to_string(),
+            source: None,
             hosts: vec!["api.other.com".to_string()],
             credential_schema: vec![],
             commit_sha: None,
@@ -388,7 +392,8 @@ mod tests {
         db.add_plugin(&entry1, invalid_code).await.unwrap();
 
         let entry2 = PluginEntry {
-            name: "nomatch2".to_string(),
+            id: "nomatch2".to_string(),
+            source: None,
             hosts: vec!["api.another.com".to_string()],
             credential_schema: vec![],
             commit_sha: None,
@@ -407,7 +412,8 @@ mod tests {
         };
         "#;
         let entry3 = PluginEntry {
-            name: "match".to_string(),
+            id: "match".to_string(),
+            source: None,
             hosts: vec!["api.example.com".to_string()],
             credential_schema: vec![],
             commit_sha: None,
@@ -419,7 +425,7 @@ mod tests {
 
         let result = find_matching_plugin("api.example.com", &db).await.unwrap();
         assert!(result.is_some());
-        assert_eq!(result.unwrap().name, "match");
+        assert_eq!(result.unwrap().id, "match");
     }
 
     // ── find_matching_handler tests ─────────────────────────────────
@@ -438,7 +444,8 @@ mod tests {
         };
         "#;
         let entry = PluginEntry {
-            name: "high-weight".to_string(),
+            id: "high-weight".to_string(),
+            source: None,
             hosts: vec!["api.example.com".to_string()],
             credential_schema: vec![],
             commit_sha: None,
@@ -448,7 +455,7 @@ mod tests {
         };
         db.add_plugin(&entry, plugin_code).await.unwrap();
 
-        db.add_header_set("low-weight-hs", &["api.example.com".to_string()], 5)
+        db.add_header_set(&["api.example.com".to_string()], 5)
             .await
             .unwrap();
 
@@ -457,7 +464,7 @@ mod tests {
             .unwrap();
         assert!(result.is_some());
         match result.unwrap() {
-            MatchResult::Plugin(p) => assert_eq!(p.name, "high-weight"),
+            MatchResult::Plugin(p) => assert_eq!(p.id, "high-weight"),
             MatchResult::HeaderSet(_) => panic!("Expected Plugin, got HeaderSet"),
         }
     }
@@ -468,7 +475,7 @@ mod tests {
         let db = GapDatabase::in_memory().await.unwrap();
 
         // Header set created first (will have an earlier timestamp)
-        db.add_header_set("older-hs", &["api.example.com".to_string()], 5)
+        db.add_header_set(&["api.example.com".to_string()], 5)
             .await
             .unwrap();
 
@@ -484,7 +491,8 @@ mod tests {
         };
         "#;
         let entry = PluginEntry {
-            name: "newer-plugin".to_string(),
+            id: "newer-plugin".to_string(),
+            source: None,
             hosts: vec!["api.example.com".to_string()],
             credential_schema: vec![],
             commit_sha: None,
@@ -499,7 +507,7 @@ mod tests {
             .unwrap();
         assert!(result.is_some());
         match result.unwrap() {
-            MatchResult::HeaderSet(hs) => assert_eq!(hs.name, "older-hs"),
+            MatchResult::HeaderSet(_) => {} // The older header set should win
             MatchResult::Plugin(_) => panic!("Expected HeaderSet (older), got Plugin"),
         }
     }
@@ -509,7 +517,7 @@ mod tests {
         // Header set matches, no plugins
         let db = GapDatabase::in_memory().await.unwrap();
 
-        db.add_header_set("my-hs", &["api.example.com".to_string()], 0)
+        db.add_header_set(&["api.example.com".to_string()], 0)
             .await
             .unwrap();
 
@@ -518,7 +526,7 @@ mod tests {
             .unwrap();
         assert!(result.is_some());
         match result.unwrap() {
-            MatchResult::HeaderSet(hs) => assert_eq!(hs.name, "my-hs"),
+            MatchResult::HeaderSet(_) => {} // Any header set is fine
             MatchResult::Plugin(_) => panic!("Expected HeaderSet, got Plugin"),
         }
 
@@ -534,28 +542,28 @@ mod tests {
         // Test that path patterns work in find_matching_handler
         let db = GapDatabase::in_memory().await.unwrap();
 
-        db.add_header_set("specific-path", &["api.example.com/v1/chat".to_string()], 10)
+        db.add_header_set(&["api.example.com/v1/chat".to_string()], 10)
             .await
             .unwrap();
-        db.add_header_set("wildcard-path", &["api.example.com/v1/*".to_string()], 5)
+        db.add_header_set(&["api.example.com/v1/*".to_string()], 5)
             .await
             .unwrap();
 
-        // Exact path match wins (higher weight)
+        // Exact path match wins (higher weight=10 vs weight=5)
         let result = find_matching_handler("api.example.com", None, "/v1/chat", &db)
             .await
             .unwrap();
         match result.unwrap() {
-            MatchResult::HeaderSet(hs) => assert_eq!(hs.name, "specific-path"),
-            _ => panic!("Expected specific-path HeaderSet"),
+            MatchResult::HeaderSet(hs) => assert_eq!(hs.weight, 10),
+            _ => panic!("Expected higher-weight HeaderSet for /v1/chat"),
         }
 
-        // Wildcard match for different path
+        // Wildcard match for different path (only weight=5 set matches)
         let result = find_matching_handler("api.example.com", None, "/v1/completions", &db)
             .await
             .unwrap();
         match result.unwrap() {
-            MatchResult::HeaderSet(hs) => assert_eq!(hs.name, "wildcard-path"),
+            MatchResult::HeaderSet(hs) => assert_eq!(hs.weight, 5),
             _ => panic!("Expected wildcard-path HeaderSet"),
         }
 
