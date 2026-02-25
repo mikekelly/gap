@@ -105,6 +105,11 @@ impl ApiState {
     }
 }
 
+/// Stores the original request path before namespace middleware rewrites it.
+/// Used by the signing middleware to verify signatures against the path the client signed.
+#[derive(Debug, Clone)]
+struct OriginalPath(String);
+
 /// Namespace + scope context extracted by the namespace middleware.
 #[derive(Debug, Clone)]
 pub struct NsScope {
@@ -186,6 +191,10 @@ async fn namespace_middleware(
             }
 
             let rest = format!("/{}", segments[5]);
+
+            // Store original path before rewriting so the signing middleware
+            // can verify signatures against the path the client actually signed.
+            request.extensions_mut().insert(OriginalPath(path.clone()));
 
             // Rewrite URI to strip namespace prefix
             let mut parts = request.uri().clone().into_parts();
@@ -456,9 +465,10 @@ async fn verify_signing(
         .await
         .map_err(|e| (StatusCode::BAD_REQUEST, format!("Failed to read body: {}", e)))?;
 
-    // Verify signature
+    // Verify signature — use original path if namespace middleware rewrote the URI
     let method = parts.method.as_str();
-    let path = parts.uri.path();
+    let original_path = parts.extensions.get::<OriginalPath>().map(|op| op.0.clone());
+    let path = original_path.as_deref().unwrap_or(parts.uri.path());
     crate::signing::verify_request_signature(
         method, path, &body_bytes, &parts.headers, signing_config, &state.nonce_cache,
     ).map_err(|e| (StatusCode::UNAUTHORIZED, format!("Signature verification failed: {}", e)))?;
@@ -4645,5 +4655,50 @@ mod tests {
 
         let default_tokens = db.list_tokens(false, "default", "default").await.unwrap();
         assert_eq!(default_tokens.len(), 0, "Should have no tokens in default/default");
+    }
+
+    // ── Signing + namespace interaction tests ─────────────────────────────
+
+    #[tokio::test]
+    async fn test_signing_with_namespace_path() {
+        // When signing is enabled and namespace_mode is true, a request signed
+        // with the full canonical path (/namespaces/org1/scopes/team1/tokens)
+        // should pass signature verification even though the namespace middleware
+        // rewrites the URI to /tokens before the signing middleware sees it.
+        let db = create_test_db().await;
+        let (keypair, pub_key) = test_signing_keypair();
+        let mut state = ApiState::new(9443, 9080, Arc::clone(&db), Arc::new(TokenCache::new()));
+        state.signing_config = Some(Arc::new(test_signing_config(&pub_key)));
+        state.namespace_mode = true;
+        let password = setup_auth(&state).await;
+        let app = create_router(state);
+
+        let body = b"";
+        let full_path = "/namespaces/org1/scopes/team1/tokens";
+        let headers = sign_test_request(&keypair, "GET", full_path, body, "nonce-ns-sign-1");
+
+        let mut req = Request::builder()
+            .uri(full_path)
+            .header("Authorization", format!("Bearer {}", password));
+
+        for (name, value) in &headers {
+            req = req.header(*name, value.as_str());
+        }
+
+        let response = app
+            .oneshot(req.body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+
+        let status = response.status();
+        let body_bytes = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let body_str = String::from_utf8_lossy(&body_bytes);
+
+        // Must NOT be 401 from signing — the signature was valid for the original path
+        if status == StatusCode::UNAUTHORIZED {
+            assert!(!body_str.contains("Signature verification failed"),
+                "Signing middleware rejected signature on namespace path: {}", body_str);
+        }
+        assert_eq!(status, StatusCode::OK, "Expected OK, got {}: {}", status, body_str);
     }
 }
