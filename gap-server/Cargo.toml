@@ -35,6 +35,11 @@ urlencoding = "2.1.3"
 rustls = { version = "0.23", features = ["aws-lc-rs"] }
 async-stream = "0.3"
 futures = "0.3"
+ring = "0.17"
+dashmap = "6"
+base64 = "0.22"
+thiserror.workspace = true
+http = "1"
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util"] }

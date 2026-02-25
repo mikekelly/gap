@@ -8,6 +8,7 @@
 //! - Secure credential storage
 
 pub mod api;
+pub mod signing;
 
 #[cfg(target_os = "macos")]
 pub mod launchd;
