@@ -147,7 +147,7 @@ async fn verify_auth(
 /// Plugin info
 #[derive(Debug, Serialize)]
 pub struct PluginInfo {
-    pub name: String,
+    pub id: String,
     pub match_patterns: Vec<String>,
     pub credential_schema: Vec<String>,
 }
@@ -250,13 +250,14 @@ pub struct InitResponse {
 /// Install plugin request
 #[derive(Debug, Deserialize)]
 pub struct InstallRequest {
-    pub name: String,
+    pub source: String,
 }
 
 /// Install plugin response
 #[derive(Debug, Serialize, Deserialize)]
 pub struct InstallResponse {
-    pub name: String,
+    pub id: String,
+    pub source: String,
     pub installed: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub commit_sha: Option<String>,
@@ -265,28 +266,27 @@ pub struct InstallResponse {
 /// Uninstall plugin response
 #[derive(Debug, Serialize, Deserialize)]
 pub struct UninstallResponse {
-    pub name: String,
+    pub id: String,
     pub uninstalled: bool,
 }
 
 /// Register plugin request (inline code)
 #[derive(Debug, Deserialize)]
 pub struct RegisterPluginRequest {
-    pub name: String,
     pub code: String,
 }
 
 /// Register plugin response
 #[derive(Debug, Serialize, Deserialize)]
 pub struct RegisterResponse {
-    pub name: String,
+    pub id: String,
     pub registered: bool,
 }
 
 /// Update plugin response
 #[derive(Debug, Serialize, Deserialize)]
 pub struct UpdateResponse {
-    pub name: String,
+    pub id: String,
     pub updated: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub commit_sha: Option<String>,
@@ -312,12 +312,12 @@ pub fn create_router(state: ApiState) -> Router {
         .route("/plugins", get(get_plugins).post(post_plugins))
         .route("/plugins/install", post(install_plugin))
         .route("/plugins/register", post(register_plugin))
-        .route("/plugins/:name/update", post(update_plugin_from_github))
-        .route("/plugins/:name", axum::routing::patch(update_plugin).delete(uninstall_plugin))
+        .route("/plugins/:id/update", post(update_plugin_from_github))
+        .route("/plugins/:id", axum::routing::patch(update_plugin).delete(uninstall_plugin))
         .route("/tokens", get(list_tokens).post(create_token))
         .route("/tokens/:prefix", delete(delete_token))
         .route(
-            "/credentials/:plugin/:key",
+            "/credentials/:plugin_id/:key",
             post(set_credential).delete(delete_credential),
         )
         .route("/activity", get(get_activity).post(get_activity))
@@ -326,9 +326,9 @@ pub fn create_router(state: ApiState) -> Router {
         .route("/management-log", get(get_management_log))
         .route("/management-log/stream", get(management_log_stream))
         .route("/header-sets", get(list_header_sets).post(create_header_set))
-        .route("/header-sets/:name", axum::routing::patch(update_header_set).delete(delete_header_set))
-        .route("/header-sets/:name/headers", post(set_header_set_header))
-        .route("/header-sets/:name/headers/:header_name", delete(delete_header_set_header))
+        .route("/header-sets/:id", axum::routing::patch(update_header_set).delete(delete_header_set))
+        .route("/header-sets/:id/headers", post(set_header_set_header))
+        .route("/header-sets/:id/headers/:header_name", delete(delete_header_set_header))
         .with_state(state)
 }
 
@@ -416,7 +416,7 @@ async fn get_plugins(
     let plugins = plugin_entries
         .into_iter()
         .map(|entry| PluginInfo {
-            name: entry.name,
+            id: entry.id,
             match_patterns: entry.hosts,
             credential_schema: entry.credential_schema,
         })
@@ -440,7 +440,7 @@ async fn post_plugins(
     let plugins = plugin_entries
         .into_iter()
         .map(|entry| PluginInfo {
-            name: entry.name,
+            id: entry.id,
             match_patterns: entry.hosts,
             credential_schema: entry.credential_schema,
         })
@@ -461,37 +461,27 @@ async fn install_plugin(
     let req: InstallRequest = serde_json::from_slice(&body)
         .map_err(|e| (StatusCode::BAD_REQUEST, format!("Invalid request body: {}", e)))?;
 
-    // Parse GitHub owner/repo from name (e.g., "mikekelly/exa-gap")
-    let plugin_name = parse_plugin_name(&req.name)?;
+    // Parse GitHub owner/repo from source (e.g., "mikekelly/exa-gap")
+    let plugin_source = parse_plugin_name(&req.source)?;
 
-    // Check if plugin already exists
-    let exists = state.db.has_plugin(&plugin_name).await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to check plugin: {}", e)))?;
+    // Clone, validate, and store plugin — returns generated UUID
+    let (plugin_id, plugin, commit_sha) = clone_and_validate_plugin(&state, &plugin_source).await?;
 
-    if exists {
-        return Err((
-            StatusCode::CONFLICT,
-            format!("Plugin '{}' is already installed. Use 'gap update {}' to update it.", plugin_name, plugin_name),
-        ));
-    }
-
-    // Clone, validate, and store plugin
-    let (plugin, commit_sha) = clone_and_validate_plugin(&state, &plugin_name).await?;
-
-    tracing::info!("Installed plugin: {} (matches: {:?}, commit: {})", plugin_name, plugin.match_patterns, commit_sha);
+    tracing::info!("Installed plugin: {} (id: {}, matches: {:?}, commit: {})", plugin_source, plugin_id, plugin.match_patterns, commit_sha);
 
     emit_management_log(&state, ManagementLogEntry {
         timestamp: chrono::Utc::now(),
         operation: "plugin_install".to_string(),
         resource_type: "plugin".to_string(),
-        resource_id: Some(plugin_name.clone()),
-        detail: Some(serde_json::json!({"repo": req.name}).to_string()),
+        resource_id: Some(plugin_id.clone()),
+        detail: Some(serde_json::json!({"repo": req.source}).to_string()),
         success: true,
         error_message: None,
     });
 
     Ok(Json(InstallResponse {
-        name: plugin_name,
+        id: plugin_id,
+        source: req.source,
         installed: true,
         commit_sha: Some(commit_sha),
     }))
@@ -516,13 +506,14 @@ async fn register_plugin(
         use gap_lib::plugin_runtime::PluginRuntime;
         let mut runtime = PluginRuntime::new()
             .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to create runtime: {}", e)))?;
-        runtime.load_plugin_from_code(&req.name, &transformed_code)
+        runtime.load_plugin_from_code("registering", &transformed_code)
             .map_err(|e| (StatusCode::BAD_REQUEST, format!("Invalid plugin code: {}", e)))?
     };
 
     // Store plugin metadata and source code in database
     let plugin_entry = PluginEntry {
-        name: plugin.name.clone(),
+        id: String::new(), // will be overwritten by DB-generated UUID
+        source: None,
         hosts: plugin.match_patterns.clone(),
         credential_schema: plugin.credential_schema.clone(),
         commit_sha: None,
@@ -530,121 +521,111 @@ async fn register_plugin(
         weight: 0,
         installed_at: None,
     };
-    state.db.add_plugin(&plugin_entry, &transformed_code).await
+    let plugin_id = state.db.add_plugin(&plugin_entry, &transformed_code).await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to store plugin: {}", e)))?;
 
-    let plugin_name = req.name.clone();
-    tracing::info!("Registered plugin: {} (matches: {:?})", plugin_name, plugin.match_patterns);
+    tracing::info!("Registered plugin: {} (matches: {:?})", plugin_id, plugin.match_patterns);
 
     emit_management_log(&state, ManagementLogEntry {
         timestamp: chrono::Utc::now(),
         operation: "plugin_register".to_string(),
         resource_type: "plugin".to_string(),
-        resource_id: Some(plugin_name.clone()),
+        resource_id: Some(plugin_id.clone()),
         detail: None,
         success: true,
         error_message: None,
     });
 
     Ok(Json(RegisterResponse {
-        name: plugin_name,
+        id: plugin_id,
         registered: true,
     }))
 }
 
-/// DELETE /plugins/{name} - Uninstall a plugin (requires auth)
+/// DELETE /plugins/{id} - Uninstall a plugin (requires auth)
 #[axum::debug_handler]
 async fn uninstall_plugin(
     State(state): State<ApiState>,
-    Path(name): Path<String>,
+    Path(id): Path<String>,
     headers: HeaderMap,
 ) -> std::result::Result<Json<UninstallResponse>, (StatusCode, String)> {
     verify_auth(&state, &headers).await?;
 
-    // URL-decode the name (handles owner/repo with %2F)
-    let plugin_name = urlencoding::decode(&name)
-        .map_err(|e| (StatusCode::BAD_REQUEST, format!("Invalid plugin name: {}", e)))?
-        .into_owned();
-
     // Check if plugin exists
-    let exists = state.db.has_plugin(&plugin_name).await
+    let exists = state.db.has_plugin(&id).await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to check plugin: {}", e)))?;
 
     if !exists {
         return Err((
             StatusCode::NOT_FOUND,
-            format!("Plugin '{}' is not installed.", plugin_name),
+            format!("Plugin '{}' is not installed.", id),
         ));
     }
 
     // Remove plugin from database (removes metadata + source, preserves credentials)
-    state.db.remove_plugin(&plugin_name).await
+    state.db.remove_plugin(&id).await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to remove plugin: {}", e)))?;
 
-    tracing::info!("Uninstalled plugin: {}", plugin_name);
+    tracing::info!("Uninstalled plugin: {}", id);
 
     emit_management_log(&state, ManagementLogEntry {
         timestamp: chrono::Utc::now(),
         operation: "plugin_uninstall".to_string(),
         resource_type: "plugin".to_string(),
-        resource_id: Some(plugin_name.clone()),
+        resource_id: Some(id.clone()),
         detail: None,
         success: true,
         error_message: None,
     });
 
     Ok(Json(UninstallResponse {
-        name: plugin_name,
+        id,
         uninstalled: true,
     }))
 }
 
-/// POST /plugins/{name}/update - Update a plugin from GitHub (requires auth)
+/// POST /plugins/{id}/update - Update a plugin from GitHub (requires auth)
 #[axum::debug_handler]
 async fn update_plugin_from_github(
     State(state): State<ApiState>,
-    Path(name): Path<String>,
+    Path(id): Path<String>,
     headers: HeaderMap,
 ) -> std::result::Result<Json<UpdateResponse>, (StatusCode, String)> {
     verify_auth(&state, &headers).await?;
 
-    // URL-decode the name
-    let plugin_name = urlencoding::decode(&name)
-        .map_err(|e| (StatusCode::BAD_REQUEST, format!("Invalid plugin name: {}", e)))?
-        .into_owned();
-
-    // Check if plugin exists
-    let exists = state.db.has_plugin(&plugin_name).await
+    // Look up existing plugin to get its source (GitHub slug)
+    let existing = state.db.get_plugin(&id).await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to check plugin: {}", e)))?;
 
-    if !exists {
-        return Err((
-            StatusCode::NOT_FOUND,
-            format!("Plugin '{}' is not installed. Use 'gap install {}' to install it.", plugin_name, plugin_name),
-        ));
-    }
+    let existing = existing.ok_or_else(|| {
+        (StatusCode::NOT_FOUND, format!("Plugin '{}' is not installed.", id))
+    })?;
+
+    let plugin_source = existing.source.ok_or_else(|| {
+        (StatusCode::BAD_REQUEST, "Plugin has no source (GitHub slug) — cannot update from GitHub.".to_string())
+    })?;
 
     // Remove old plugin from database (but keep credentials)
-    state.db.remove_plugin(&plugin_name).await
+    state.db.remove_plugin(&id).await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to remove old plugin: {}", e)))?;
 
     // Clone, validate, and store new version
-    let (plugin, commit_sha) = clone_and_validate_plugin(&state, &plugin_name).await?;
+    let (new_id, plugin, commit_sha) = clone_and_validate_plugin(&state, &plugin_source).await?;
 
-    tracing::info!("Updated plugin: {} (matches: {:?}, commit: {})", plugin_name, plugin.match_patterns, commit_sha);
+    tracing::info!("Updated plugin: {} -> {} (matches: {:?}, commit: {})", id, new_id, plugin.match_patterns, commit_sha);
 
     emit_management_log(&state, ManagementLogEntry {
         timestamp: chrono::Utc::now(),
         operation: "plugin_update".to_string(),
         resource_type: "plugin".to_string(),
-        resource_id: Some(plugin_name.clone()),
+        resource_id: Some(new_id.clone()),
         detail: None,
         success: true,
         error_message: None,
     });
 
     Ok(Json(UpdateResponse {
-        name: plugin_name,
+        id: new_id,
         updated: true,
         commit_sha: Some(commit_sha),
     }))
@@ -663,16 +644,16 @@ fn parse_plugin_name(name: &str) -> std::result::Result<String, (StatusCode, Str
 }
 
 /// Clone a plugin from GitHub, validate it, and store it
-/// Returns the validated plugin info and commit SHA
+/// Returns the generated UUID, validated plugin info, and commit SHA
 async fn clone_and_validate_plugin(
     state: &ApiState,
-    plugin_name: &str,
-) -> std::result::Result<(gap_lib::types::GAPPlugin, String), (StatusCode, String)> {
+    plugin_source: &str,
+) -> std::result::Result<(String, gap_lib::types::GAPPlugin, String), (StatusCode, String)> {
     use gap_lib::plugin_runtime::PluginRuntime;
     use git2::{build::RepoBuilder, Cred, FetchOptions, RemoteCallbacks};
     use tempfile::tempdir;
 
-    let parts: Vec<&str> = plugin_name.split('/').collect();
+    let parts: Vec<&str> = plugin_source.split('/').collect();
     let (owner, repo) = (parts[0], parts[1]);
     let repo_url = format!("https://github.com/{}/{}.git", owner, repo);
 
@@ -714,7 +695,7 @@ async fn clone_and_validate_plugin(
         let mut runtime = PluginRuntime::new()
             .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to create runtime: {}", e)))?;
 
-        let plugin = runtime.load_plugin_from_code(plugin_name, &transformed_code)
+        let plugin = runtime.load_plugin_from_code(plugin_source, &transformed_code)
             .map_err(|e| (StatusCode::BAD_REQUEST, format!("Invalid plugin code: {}", e)))?;
 
         (transformed_code, plugin, commit_sha)
@@ -722,7 +703,8 @@ async fn clone_and_validate_plugin(
 
     // Store plugin metadata and source code in database (single operation)
     let plugin_entry = PluginEntry {
-        name: plugin.name.clone(),
+        id: String::new(), // will be overwritten by DB-generated UUID
+        source: Some(plugin_source.to_string()),
         hosts: plugin.match_patterns.clone(),
         credential_schema: plugin.credential_schema.clone(),
         commit_sha: Some(commit_sha.clone()),
@@ -730,10 +712,10 @@ async fn clone_and_validate_plugin(
         weight: 0,
         installed_at: None,
     };
-    state.db.add_plugin(&plugin_entry, &transformed_code).await
+    let plugin_id = state.db.add_plugin(&plugin_entry, &transformed_code).await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to store plugin: {}", e)))?;
 
-    Ok((plugin, commit_sha))
+    Ok((plugin_id, plugin, commit_sha))
 }
 
 /// Transform ES6 export default to var plugin declaration
@@ -866,10 +848,10 @@ async fn delete_token(
     })))
 }
 
-/// POST /credentials/:plugin/:key - Set credential (requires auth)
+/// POST /credentials/:plugin_id/:key - Set credential (requires auth)
 async fn set_credential(
     State(state): State<ApiState>,
-    Path((plugin, key)): Path<(String, String)>,
+    Path((plugin_id, key)): Path<(String, String)>,
     headers: HeaderMap,
     body: Bytes,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
@@ -878,49 +860,49 @@ async fn set_credential(
         .map_err(|e| (StatusCode::BAD_REQUEST, format!("Invalid request body: {}", e)))?;
 
     // Store credential in database
-    state.db.set_credential(&plugin, &key, &req.value)
+    state.db.set_credential(&plugin_id, &key, &req.value)
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to set credential: {}", e)))?;
 
-    tracing::info!("Setting credential {}:{}", plugin, key);
+    tracing::info!("Setting credential {}:{}", plugin_id, key);
 
     emit_management_log(&state, ManagementLogEntry {
         timestamp: chrono::Utc::now(),
         operation: "credential_set".to_string(),
         resource_type: "credential".to_string(),
-        resource_id: Some(format!("{}/{}", plugin, key)),
+        resource_id: Some(format!("{}/{}", plugin_id, key)),
         detail: None, // NEVER log credential values
         success: true,
         error_message: None,
     });
 
     Ok(Json(serde_json::json!({
-        "plugin": plugin,
+        "plugin_id": plugin_id,
         "key": key,
         "set": true
     })))
 }
 
-/// DELETE /credentials/:plugin/:key - Delete credential (requires auth)
+/// DELETE /credentials/:plugin_id/:key - Delete credential (requires auth)
 async fn delete_credential(
     State(state): State<ApiState>,
-    Path((plugin, key)): Path<(String, String)>,
+    Path((plugin_id, key)): Path<(String, String)>,
     headers: HeaderMap,
 ) -> Result<StatusCode, (StatusCode, String)> {
     verify_auth(&state, &headers).await?;
 
     // Remove credential from database
-    state.db.remove_credential(&plugin, &key)
+    state.db.remove_credential(&plugin_id, &key)
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to remove credential: {}", e)))?;
 
-    tracing::info!("Deleting credential {}:{}", plugin, key);
+    tracing::info!("Deleting credential {}:{}", plugin_id, key);
 
     emit_management_log(&state, ManagementLogEntry {
         timestamp: chrono::Utc::now(),
         operation: "credential_delete".to_string(),
         resource_type: "credential".to_string(),
-        resource_id: Some(format!("{}/{}", plugin, key)),
+        resource_id: Some(format!("{}/{}", plugin_id, key)),
         detail: None,
         success: true,
         error_message: None,
@@ -934,7 +916,7 @@ fn query_to_filter(q: &ActivityQuery) -> gap_lib::ActivityFilter {
     gap_lib::ActivityFilter {
         domain: q.domain.clone(),
         path: q.path.clone(),
-        plugin: q.plugin.clone(),
+        plugin_id: q.plugin.clone(),
         agent: q.agent.clone(),
         method: q.method.clone(),
         since: q.since.as_ref().and_then(|s| {
@@ -995,7 +977,7 @@ fn matches_filter(entry: &ActivityEntry, filter: &ActivityStreamFilter) -> bool 
         }
     }
     if let Some(ref plugin) = filter.plugin {
-        if entry.plugin_name.as_deref() != Some(plugin.as_str()) {
+        if entry.plugin_id.as_deref() != Some(plugin.as_str()) {
             return false;
         }
     }
@@ -1167,7 +1149,6 @@ fn matches_management_filter(entry: &ManagementLogEntry, filter: &ManagementLogS
 
 #[derive(Debug, Deserialize)]
 struct CreateHeaderSetRequest {
-    name: String,
     match_patterns: Vec<String>,
     #[serde(default)]
     weight: i32,
@@ -1177,7 +1158,7 @@ struct CreateHeaderSetRequest {
 
 #[derive(Debug, Serialize)]
 struct CreateHeaderSetResponse {
-    name: String,
+    id: String,
     created: bool,
 }
 
@@ -1189,7 +1170,7 @@ struct UpdateHeaderSetRequest {
 
 #[derive(Debug, Serialize)]
 struct HeaderSetListItem {
-    name: String,
+    id: String,
     match_patterns: Vec<String>,
     weight: i32,
     headers: Vec<String>, // header names only, no values
@@ -1220,7 +1201,7 @@ struct UpdatePluginRequest {
 
 #[derive(Debug, Serialize, Deserialize)]
 struct UpdatePluginResponse {
-    name: String,
+    id: String,
     updated: bool,
 }
 
@@ -1240,27 +1221,26 @@ async fn create_header_set(
         return Err((StatusCode::BAD_REQUEST, "match_patterns must not be empty".to_string()));
     }
 
-    state.db.add_header_set(&req.name, &req.match_patterns, req.weight).await
+    let id = state.db.add_header_set(&req.match_patterns, req.weight).await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to create header set: {}", e)))?;
 
     for (header_name, header_value) in &req.headers {
-        state.db.set_header_set_header(&req.name, header_name, header_value)
+        state.db.set_header_set_header(&id, header_name, header_value)
             .await
             .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to set header: {}", e)))?;
     }
 
-    let name = req.name.clone();
     emit_management_log(&state, ManagementLogEntry {
         timestamp: chrono::Utc::now(),
         operation: "header_set_create".to_string(),
         resource_type: "header_set".to_string(),
-        resource_id: Some(name.clone()),
+        resource_id: Some(id.clone()),
         detail: None,
         success: true,
         error_message: None,
     });
 
-    Ok(Json(CreateHeaderSetResponse { name, created: true }))
+    Ok(Json(CreateHeaderSetResponse { id, created: true }))
 }
 
 /// GET /header-sets - List header sets (requires auth)
@@ -1275,10 +1255,10 @@ async fn list_header_sets(
 
     let mut items = Vec::new();
     for hs in header_sets {
-        let header_names = state.db.list_header_set_header_names(&hs.name).await
-            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to list headers for '{}': {}", hs.name, e)))?;
+        let header_names = state.db.list_header_set_header_names(&hs.id).await
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to list headers for '{}': {}", hs.id, e)))?;
         items.push(HeaderSetListItem {
-            name: hs.name,
+            id: hs.id,
             match_patterns: hs.match_patterns,
             weight: hs.weight,
             headers: header_names,
@@ -1288,10 +1268,10 @@ async fn list_header_sets(
     Ok(Json(HeaderSetListResponse { header_sets: items }))
 }
 
-/// PATCH /header-sets/:name - Update a header set (requires auth)
+/// PATCH /header-sets/:id - Update a header set (requires auth)
 async fn update_header_set(
     State(state): State<ApiState>,
-    Path(name): Path<String>,
+    Path(id): Path<String>,
     headers: HeaderMap,
     body: Bytes,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
@@ -1310,44 +1290,44 @@ async fn update_header_set(
     }
 
     // Verify exists first to return proper 404
-    let exists = state.db.get_header_set(&name).await
+    let exists = state.db.get_header_set(&id).await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to check header set: {}", e)))?;
     if exists.is_none() {
-        return Err((StatusCode::NOT_FOUND, format!("Header set '{}' not found", name)));
+        return Err((StatusCode::NOT_FOUND, format!("Header set '{}' not found", id)));
     }
 
-    state.db.update_header_set(&name, req.match_patterns.as_deref(), req.weight).await
+    state.db.update_header_set(&id, req.match_patterns.as_deref(), req.weight).await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to update header set: {}", e)))?;
 
     emit_management_log(&state, ManagementLogEntry {
         timestamp: chrono::Utc::now(),
         operation: "header_set_update".to_string(),
         resource_type: "header_set".to_string(),
-        resource_id: Some(name.clone()),
+        resource_id: Some(id.clone()),
         detail: None,
         success: true,
         error_message: None,
     });
 
-    Ok(Json(serde_json::json!({"name": name, "updated": true})))
+    Ok(Json(serde_json::json!({"id": id, "updated": true})))
 }
 
-/// DELETE /header-sets/:name - Delete a header set (requires auth)
+/// DELETE /header-sets/:id - Delete a header set (requires auth)
 async fn delete_header_set(
     State(state): State<ApiState>,
-    Path(name): Path<String>,
+    Path(id): Path<String>,
     headers: HeaderMap,
 ) -> Result<Json<DeleteResponse>, (StatusCode, String)> {
     verify_auth(&state, &headers).await?;
 
-    state.db.remove_header_set(&name).await
+    state.db.remove_header_set(&id).await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to delete header set: {}", e)))?;
 
     emit_management_log(&state, ManagementLogEntry {
         timestamp: chrono::Utc::now(),
         operation: "header_set_delete".to_string(),
         resource_type: "header_set".to_string(),
-        resource_id: Some(name.clone()),
+        resource_id: Some(id.clone()),
         detail: None,
         success: true,
         error_message: None,
@@ -1356,10 +1336,10 @@ async fn delete_header_set(
     Ok(Json(DeleteResponse { deleted: true }))
 }
 
-/// POST /header-sets/:name/headers - Set a header on a header set (requires auth)
+/// POST /header-sets/:id/headers - Set a header on a header set (requires auth)
 async fn set_header_set_header(
     State(state): State<ApiState>,
-    Path(name): Path<String>,
+    Path(id): Path<String>,
     headers: HeaderMap,
     body: Bytes,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
@@ -1368,13 +1348,13 @@ async fn set_header_set_header(
         .map_err(|e| (StatusCode::BAD_REQUEST, format!("Invalid request body: {}", e)))?;
 
     // Verify header set exists
-    let exists = state.db.get_header_set(&name).await
+    let exists = state.db.get_header_set(&id).await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to check header set: {}", e)))?;
     if exists.is_none() {
-        return Err((StatusCode::NOT_FOUND, format!("Header set '{}' not found", name)));
+        return Err((StatusCode::NOT_FOUND, format!("Header set '{}' not found", id)));
     }
 
-    state.db.set_header_set_header(&name, &req.name, &req.value).await
+    state.db.set_header_set_header(&id, &req.name, &req.value).await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to set header: {}", e)))?;
 
     let header_name = req.name.clone();
@@ -1382,43 +1362,43 @@ async fn set_header_set_header(
         timestamp: chrono::Utc::now(),
         operation: "header_set_header_set".to_string(),
         resource_type: "header_set".to_string(),
-        resource_id: Some(name.clone()),
+        resource_id: Some(id.clone()),
         detail: Some(header_name.clone()),
         success: true,
         error_message: None,
     });
 
-    Ok(Json(serde_json::json!({"header_set": name, "header": header_name, "set": true})))
+    Ok(Json(serde_json::json!({"header_set": id, "header": header_name, "set": true})))
 }
 
-/// DELETE /header-sets/:name/headers/:header_name - Delete a header from a header set (requires auth)
+/// DELETE /header-sets/:id/headers/:header_name - Delete a header from a header set (requires auth)
 async fn delete_header_set_header(
     State(state): State<ApiState>,
-    Path((name, header_name)): Path<(String, String)>,
+    Path((id, header_name)): Path<(String, String)>,
     headers: HeaderMap,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
     verify_auth(&state, &headers).await?;
 
-    state.db.remove_header_set_header(&name, &header_name).await
+    state.db.remove_header_set_header(&id, &header_name).await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to delete header: {}", e)))?;
 
     emit_management_log(&state, ManagementLogEntry {
         timestamp: chrono::Utc::now(),
         operation: "header_set_header_delete".to_string(),
         resource_type: "header_set".to_string(),
-        resource_id: Some(name.clone()),
+        resource_id: Some(id.clone()),
         detail: Some(header_name.clone()),
         success: true,
         error_message: None,
     });
 
-    Ok(Json(serde_json::json!({"header_set": name, "header": header_name, "deleted": true})))
+    Ok(Json(serde_json::json!({"header_set": id, "header": header_name, "deleted": true})))
 }
 
-/// PATCH /plugins/:name - Update plugin weight (requires auth)
+/// PATCH /plugins/:id - Update plugin weight (requires auth)
 async fn update_plugin(
     State(state): State<ApiState>,
-    Path(name): Path<String>,
+    Path(id): Path<String>,
     headers: HeaderMap,
     body: Bytes,
 ) -> Result<Json<UpdatePluginResponse>, (StatusCode, String)> {
@@ -1426,26 +1406,26 @@ async fn update_plugin(
     let req: UpdatePluginRequest = serde_json::from_slice(&body)
         .map_err(|e| (StatusCode::BAD_REQUEST, format!("Invalid request body: {}", e)))?;
 
-    let exists = state.db.has_plugin(&name).await
+    let exists = state.db.has_plugin(&id).await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to check plugin: {}", e)))?;
     if !exists {
-        return Err((StatusCode::NOT_FOUND, format!("Plugin '{}' is not installed.", name)));
+        return Err((StatusCode::NOT_FOUND, format!("Plugin '{}' is not installed.", id)));
     }
 
-    state.db.update_plugin_weight(&name, req.weight).await
+    state.db.update_plugin_weight(&id, req.weight).await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to update plugin weight: {}", e)))?;
 
     emit_management_log(&state, ManagementLogEntry {
         timestamp: chrono::Utc::now(),
         operation: "plugin_update".to_string(),
         resource_type: "plugin".to_string(),
-        resource_id: Some(name.clone()),
+        resource_id: Some(id.clone()),
         detail: Some(format!("weight={}", req.weight)),
         success: true,
         error_message: None,
     });
 
-    Ok(Json(UpdatePluginResponse { name, updated: true }))
+    Ok(Json(UpdatePluginResponse { id, updated: true }))
 }
 
 #[cfg(test)]
@@ -1740,7 +1720,7 @@ mod tests {
 
         // Install plugin from GitHub (mikekelly/test-plugin doesn't exist, so expect 502)
         let body = serde_json::json!({
-            "name": "mikekelly/test-plugin"
+            "source": "mikekelly/test-plugin"
         });
 
         let response = app
@@ -1785,7 +1765,7 @@ mod tests {
 
         // Try to install a real plugin from GitHub
         let body = serde_json::json!({
-            "name": "mikekelly/exa-gap"  // Real repo with plugin.js
+            "source": "mikekelly/exa-gap"  // Real repo with plugin.js
         });
 
         let response = app
@@ -1834,7 +1814,7 @@ mod tests {
 
         // Try to install a real plugin from GitHub
         let body = serde_json::json!({
-            "name": "mikekelly/exa-gap"  // Real repo with plugin.js
+            "source": "mikekelly/exa-gap"  // Real repo with plugin.js
         });
 
         let response = app
@@ -1852,12 +1832,16 @@ mod tests {
 
         // Only verify database if installation succeeded
         if response.status() == StatusCode::OK {
+            let body_bytes = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
+            let resp: serde_json::Value = serde_json::from_slice(&body_bytes).unwrap();
+            let plugin_id = resp["id"].as_str().unwrap();
+
             // Verify the plugin was added to the database
             let plugins = db.list_plugins().await.expect("list plugins from database");
 
-            // Find the installed plugin
+            // Find the installed plugin by its UUID
             let installed_plugin = plugins.iter()
-                .find(|p| p.name == "mikekelly/exa-gap")
+                .find(|p| p.id == plugin_id)
                 .expect("plugin should be in database");
 
             // Verify plugin metadata
@@ -1878,7 +1862,7 @@ mod tests {
 
         // Try to install without Authorization header
         let body = serde_json::json!({
-            "name": "mikekelly/test-plugin"
+            "source": "mikekelly/test-plugin"
         });
 
         let response = app
@@ -2071,7 +2055,7 @@ mod tests {
         let creds = db.list_credentials().await.expect("list should succeed");
         assert_eq!(creds.len(), 1);
         assert_eq!(creds[0], CredentialEntry {
-            plugin: "exa".to_string(),
+            plugin_id: "exa".to_string(),
             field: "api_key".to_string(),
         });
     }
@@ -2184,7 +2168,7 @@ mod tests {
         let creds = db.list_credentials().await.expect("list should succeed");
         assert_eq!(creds.len(), 1);
         assert_eq!(creds[0], CredentialEntry {
-            plugin: "exa".to_string(),
+            plugin_id: "exa".to_string(),
             field: "api_key".to_string(),
         });
     }
@@ -2487,7 +2471,7 @@ mod tests {
             url: "https://api.example.com/test".to_string(),
             agent_id: Some("test-agent".to_string()),
             status: 200,
-            plugin_name: Some("test-plugin".to_string()),
+            plugin_id: Some("test-plugin".to_string()),
             plugin_sha: None,
             source_hash: None,
             request_headers: None,
@@ -2556,7 +2540,7 @@ mod tests {
             url: "https://api.example.com/test".to_string(),
             agent_id: Some("test-agent".to_string()),
             status: 200,
-            plugin_name: None,
+            plugin_id: None,
             plugin_sha: None,
             source_hash: None,
             request_headers: None,
@@ -2571,7 +2555,7 @@ mod tests {
             url: "https://other-api.com/data".to_string(),
             agent_id: Some("test-agent".to_string()),
             status: 201,
-            plugin_name: None,
+            plugin_id: None,
             plugin_sha: None,
             source_hash: None,
             request_headers: None,
@@ -2630,7 +2614,7 @@ mod tests {
                 url: "https://api.openai.com/v1/models".to_string(),
                 agent_id: Some("agent-1".to_string()),
                 status: 200,
-                plugin_name: Some("openai".to_string()),
+                plugin_id: Some("openai".to_string()),
                 plugin_sha: None,
                 source_hash: None,
                 request_headers: None,
@@ -2645,7 +2629,7 @@ mod tests {
                 url: "https://api.openai.com/v1/chat/completions".to_string(),
                 agent_id: Some("agent-1".to_string()),
                 status: 200,
-                plugin_name: Some("openai".to_string()),
+                plugin_id: Some("openai".to_string()),
                 plugin_sha: None,
                 source_hash: None,
                 request_headers: None,
@@ -2660,7 +2644,7 @@ mod tests {
                 url: "https://api.anthropic.com/v1/messages".to_string(),
                 agent_id: Some("agent-2".to_string()),
                 status: 200,
-                plugin_name: Some("anthropic".to_string()),
+                plugin_id: Some("anthropic".to_string()),
                 plugin_sha: None,
                 source_hash: None,
                 request_headers: None,
@@ -2675,7 +2659,7 @@ mod tests {
                 url: "https://api.openai.com/v1/fine-tunes/ft-001".to_string(),
                 agent_id: Some("agent-2".to_string()),
                 status: 200,
-                plugin_name: None,
+                plugin_id: None,
                 plugin_sha: None,
                 source_hash: None,
                 request_headers: None,
@@ -2748,14 +2732,14 @@ mod tests {
 
         let result = get_activity_filtered(state, password, "?plugin=openai").await;
 
-        // 2 entries with plugin_name=openai
+        // 2 entries with plugin_id=openai
         assert_eq!(result.len(), 2, "expected 2 entries for plugin=openai");
         for entry in &result {
             assert_eq!(
-                entry.plugin_name.as_deref(),
+                entry.plugin_id.as_deref(),
                 Some("openai"),
                 "unexpected plugin: {:?}",
-                entry.plugin_name
+                entry.plugin_id
             );
         }
     }
@@ -2823,7 +2807,7 @@ mod tests {
             url: "https://old.example.com/data".to_string(),
             agent_id: None,
             status: 200,
-            plugin_name: None,
+            plugin_id: None,
             plugin_sha: None,
             source_hash: None,
             request_headers: None,
@@ -2838,7 +2822,7 @@ mod tests {
             url: "https://new.example.com/data".to_string(),
             agent_id: None,
             status: 201,
-            plugin_name: None,
+            plugin_id: None,
             plugin_sha: None,
             source_hash: None,
             request_headers: None,
@@ -3305,7 +3289,6 @@ mod tests {
         let plugin_code = "var plugin = { name: 'my-plugin', matchPatterns: ['example.com'], credentialSchema: [], transform: function(r) { return r; } };";
 
         let body = serde_json::json!({
-            "name": "my-plugin",
             "code": plugin_code
         });
 
@@ -3329,12 +3312,12 @@ mod tests {
         assert_eq!(status, StatusCode::OK, "Expected OK, got {}: {}", status, body_str);
 
         let register_response: RegisterResponse = serde_json::from_slice(&body_bytes).unwrap();
-        assert_eq!(register_response.name, "my-plugin");
+        assert!(!register_response.id.is_empty(), "should have a UUID id");
         assert!(register_response.registered);
 
         // Verify plugin was stored in the database
         let plugins = db.list_plugins().await.expect("list plugins");
-        assert!(plugins.iter().any(|p| p.name == "my-plugin"), "plugin should be in database");
+        assert!(plugins.iter().any(|p| p.id == register_response.id), "plugin should be in database");
     }
 
     #[tokio::test]
@@ -3345,7 +3328,6 @@ mod tests {
         let app = create_router(state);
 
         let body = serde_json::json!({
-            "name": "bad-plugin",
             "code": "this is not valid javascript }{{"
         });
 
@@ -3376,7 +3358,6 @@ mod tests {
         let plugin_code = "export default { name: 'es6-plugin', matchPatterns: ['api.example.com'], credentialSchema: [], transform: function(r) { return r; } };";
 
         let body = serde_json::json!({
-            "name": "es6-plugin",
             "code": plugin_code
         });
 
@@ -3404,7 +3385,7 @@ mod tests {
 
         // Verify plugin was stored in the database
         let plugins = db.list_plugins().await.expect("list plugins");
-        assert!(plugins.iter().any(|p| p.name == "es6-plugin"), "es6 plugin should be in database");
+        assert!(plugins.iter().any(|p| p.id == register_response.id), "es6 plugin should be in database");
     }
 
     // ── HeaderSet endpoint tests ──────────────────────────────────────────
@@ -3417,7 +3398,6 @@ mod tests {
         let app = create_router(state);
 
         let body = serde_json::json!({
-            "name": "my-headers",
             "match_patterns": ["api.example.com"],
             "weight": 10
         });
@@ -3439,11 +3419,12 @@ mod tests {
 
         let body_bytes = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
         let resp: serde_json::Value = serde_json::from_slice(&body_bytes).unwrap();
-        assert_eq!(resp["name"], "my-headers");
+        let hs_id = resp["id"].as_str().unwrap();
+        assert!(!hs_id.is_empty(), "should have a UUID id");
         assert_eq!(resp["created"], true);
 
         // Verify stored in DB
-        let hs = db.get_header_set("my-headers").await.unwrap().expect("header set should exist");
+        let hs = db.get_header_set(hs_id).await.unwrap().expect("header set should exist");
         assert_eq!(hs.match_patterns, vec!["api.example.com"]);
         assert_eq!(hs.weight, 10);
     }
@@ -3455,7 +3436,6 @@ mod tests {
         let app = create_router(state);
 
         let body = serde_json::json!({
-            "name": "my-headers",
             "match_patterns": ["api.example.com"]
         });
 
@@ -3485,7 +3465,6 @@ mod tests {
         let app = create_router(state);
 
         let body = serde_json::json!({
-            "name": "my-headers",
             "match_patterns": []
         });
 
@@ -3519,7 +3498,6 @@ mod tests {
         let app = create_router(state);
 
         let body = serde_json::json!({
-            "name": "my-headers",
             "match_patterns": ["api.example.com"],
             "weight": 5,
             "headers": {
@@ -3545,11 +3523,12 @@ mod tests {
 
         let body_bytes = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
         let resp: serde_json::Value = serde_json::from_slice(&body_bytes).unwrap();
-        assert_eq!(resp["name"], "my-headers");
+        let hs_id = resp["id"].as_str().unwrap();
+        assert!(!hs_id.is_empty(), "should have a UUID id");
         assert_eq!(resp["created"], true);
 
         // Verify headers were stored in the DB
-        let names = db.list_header_set_header_names("my-headers").await.unwrap();
+        let names = db.list_header_set_header_names(hs_id).await.unwrap();
         assert!(names.contains(&"Authorization".to_string()), "Authorization should be stored; got: {:?}", names);
         assert!(names.contains(&"X-Custom".to_string()), "X-Custom should be stored; got: {:?}", names);
     }
@@ -3561,7 +3540,7 @@ mod tests {
         let state = ApiState::new(9443, 9080, Arc::clone(&db), Arc::new(TokenCache::new()));
         let password = setup_auth(&state).await;
 
-        db.add_header_set("my-headers", &["api.example.com".to_string()], 0)
+        let hs_id = db.add_header_set(&["api.example.com".to_string()], 0)
             .await.unwrap();
 
         let app = create_router(state);
@@ -3572,7 +3551,7 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .method("PATCH")
-                    .uri("/header-sets/my-headers")
+                    .uri(format!("/header-sets/{}", hs_id))
                     .header("content-type", "application/json")
                     .header("Authorization", format!("Bearer {}", password))
                     .body(Body::from(serde_json::to_vec(&body).unwrap()))
@@ -3595,11 +3574,11 @@ mod tests {
         let password = setup_auth(&state).await;
 
         // Pre-populate via DB
-        db.add_header_set("auth-headers", &["api.example.com".to_string()], 5)
+        let hs_id = db.add_header_set(&["api.example.com".to_string()], 5)
             .await.unwrap();
-        db.set_header_set_header("auth-headers", "Authorization", "Bearer secret-value")
+        db.set_header_set_header(&hs_id, "Authorization", "Bearer secret-value")
             .await.unwrap();
-        db.set_header_set_header("auth-headers", "X-Custom", "some-value")
+        db.set_header_set_header(&hs_id, "X-Custom", "some-value")
             .await.unwrap();
 
         let app = create_router(state);
@@ -3624,7 +3603,7 @@ mod tests {
         assert_eq!(header_sets.len(), 1);
 
         let hs = &header_sets[0];
-        assert_eq!(hs["name"], "auth-headers");
+        assert_eq!(hs["id"], hs_id);
         assert_eq!(hs["weight"], 5);
 
         // Should include header names but NOT values
@@ -3646,7 +3625,7 @@ mod tests {
         let state = ApiState::new(9443, 9080, Arc::clone(&db), Arc::new(TokenCache::new()));
         let password = setup_auth(&state).await;
 
-        db.add_header_set("my-headers", &["api.example.com".to_string()], 0)
+        let hs_id = db.add_header_set(&["api.example.com".to_string()], 0)
             .await.unwrap();
 
         let app = create_router(state);
@@ -3657,7 +3636,7 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .method("PATCH")
-                    .uri("/header-sets/my-headers")
+                    .uri(format!("/header-sets/{}", hs_id))
                     .header("content-type", "application/json")
                     .header("Authorization", format!("Bearer {}", password))
                     .body(Body::from(serde_json::to_vec(&body).unwrap()))
@@ -3673,7 +3652,7 @@ mod tests {
         assert_eq!(resp["updated"], true);
 
         // Verify updated in DB
-        let hs = db.get_header_set("my-headers").await.unwrap().expect("should exist");
+        let hs = db.get_header_set(&hs_id).await.unwrap().expect("should exist");
         assert_eq!(hs.weight, 42);
     }
 
@@ -3683,7 +3662,7 @@ mod tests {
         let state = ApiState::new(9443, 9080, Arc::clone(&db), Arc::new(TokenCache::new()));
         let password = setup_auth(&state).await;
 
-        db.add_header_set("to-delete", &["api.example.com".to_string()], 0)
+        let hs_id = db.add_header_set(&["api.example.com".to_string()], 0)
             .await.unwrap();
 
         let app = create_router(state);
@@ -3692,7 +3671,7 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .method("DELETE")
-                    .uri("/header-sets/to-delete")
+                    .uri(format!("/header-sets/{}", hs_id))
                     .header("Authorization", format!("Bearer {}", password))
                     .body(Body::empty())
                     .unwrap(),
@@ -3707,12 +3686,12 @@ mod tests {
         assert_eq!(resp["deleted"], true);
 
         // Verify removed from DB
-        let hs = db.get_header_set("to-delete").await.unwrap();
+        let hs = db.get_header_set(&hs_id).await.unwrap();
         assert!(hs.is_none(), "header set should be deleted");
 
         // Verify not in list
         let all = db.list_header_sets().await.unwrap();
-        assert!(all.iter().all(|h| h.name != "to-delete"), "should not appear in list");
+        assert!(all.iter().all(|h| h.id != hs_id), "should not appear in list");
     }
 
     #[tokio::test]
@@ -3721,7 +3700,7 @@ mod tests {
         let state = ApiState::new(9443, 9080, Arc::clone(&db), Arc::new(TokenCache::new()));
         let password = setup_auth(&state).await;
 
-        db.add_header_set("my-headers", &["api.example.com".to_string()], 0)
+        let hs_id = db.add_header_set(&["api.example.com".to_string()], 0)
             .await.unwrap();
 
         let app = create_router(state);
@@ -3735,7 +3714,7 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .method("POST")
-                    .uri("/header-sets/my-headers/headers")
+                    .uri(format!("/header-sets/{}/headers", hs_id))
                     .header("content-type", "application/json")
                     .header("Authorization", format!("Bearer {}", password))
                     .body(Body::from(serde_json::to_vec(&body).unwrap()))
@@ -3752,7 +3731,7 @@ mod tests {
         assert_eq!(resp["header"], "Authorization");
 
         // Verify stored in DB (by listing names)
-        let names = db.list_header_set_header_names("my-headers").await.unwrap();
+        let names = db.list_header_set_header_names(&hs_id).await.unwrap();
         assert!(names.contains(&"Authorization".to_string()), "Authorization header should be stored");
     }
 
@@ -3762,11 +3741,11 @@ mod tests {
         let state = ApiState::new(9443, 9080, Arc::clone(&db), Arc::new(TokenCache::new()));
         let password = setup_auth(&state).await;
 
-        db.add_header_set("my-headers", &["api.example.com".to_string()], 0)
+        let hs_id = db.add_header_set(&["api.example.com".to_string()], 0)
             .await.unwrap();
-        db.set_header_set_header("my-headers", "Authorization", "Bearer token")
+        db.set_header_set_header(&hs_id, "Authorization", "Bearer token")
             .await.unwrap();
-        db.set_header_set_header("my-headers", "X-Custom", "value")
+        db.set_header_set_header(&hs_id, "X-Custom", "value")
             .await.unwrap();
 
         let app = create_router(state);
@@ -3775,7 +3754,7 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .method("DELETE")
-                    .uri("/header-sets/my-headers/headers/Authorization")
+                    .uri(format!("/header-sets/{}/headers/Authorization", hs_id))
                     .header("Authorization", format!("Bearer {}", password))
                     .body(Body::empty())
                     .unwrap(),
@@ -3791,7 +3770,7 @@ mod tests {
         assert_eq!(resp["header"], "Authorization");
 
         // Verify Authorization removed, X-Custom still there
-        let names = db.list_header_set_header_names("my-headers").await.unwrap();
+        let names = db.list_header_set_header_names(&hs_id).await.unwrap();
         assert!(!names.contains(&"Authorization".to_string()), "Authorization should be removed");
         assert!(names.contains(&"X-Custom".to_string()), "X-Custom should remain");
     }
@@ -3804,7 +3783,8 @@ mod tests {
 
         // Register a plugin first
         let plugin_entry = gap_lib::types::PluginEntry {
-            name: "test-plugin".to_string(),
+            id: String::new(),
+            source: None,
             hosts: vec!["api.example.com".to_string()],
             credential_schema: vec![],
             commit_sha: None,
@@ -3812,7 +3792,7 @@ mod tests {
             weight: 0,
             installed_at: None,
         };
-        db.add_plugin(&plugin_entry, "var plugin = {};").await.unwrap();
+        let plugin_id = db.add_plugin(&plugin_entry, "var plugin = {};").await.unwrap();
 
         let app = create_router(state);
 
@@ -3822,7 +3802,7 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .method("PATCH")
-                    .uri("/plugins/test-plugin")
+                    .uri(format!("/plugins/{}", plugin_id))
                     .header("content-type", "application/json")
                     .header("Authorization", format!("Bearer {}", password))
                     .body(Body::from(serde_json::to_vec(&body).unwrap()))
@@ -3837,12 +3817,12 @@ mod tests {
         assert_eq!(status, StatusCode::OK, "Expected OK, got {}: {}", status, body_str);
 
         let resp: UpdatePluginResponse = serde_json::from_slice(&body_bytes).unwrap();
-        assert_eq!(resp.name, "test-plugin");
+        assert_eq!(resp.id, plugin_id);
         assert!(resp.updated);
 
         // Verify weight updated in DB
         let plugins = db.list_plugins().await.unwrap();
-        let plugin = plugins.iter().find(|p| p.name == "test-plugin").unwrap();
+        let plugin = plugins.iter().find(|p| p.id == plugin_id).unwrap();
         assert_eq!(plugin.weight, 100);
     }
 }
