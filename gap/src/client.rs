@@ -10,19 +10,28 @@ pub struct ApiClient {
     base_url: String,
     client: reqwest::Client,
     signing_keypair: Option<Arc<Ed25519KeyPair>>,
+    namespace: Option<String>,
+    scope: Option<String>,
 }
 
 impl ApiClient {
-    pub fn new(base_url: &str) -> Self {
+    pub fn new(base_url: &str, namespace: Option<String>, scope: Option<String>) -> Self {
         Self {
             base_url: base_url.trim_end_matches('/').to_string(),
             client: reqwest::Client::new(),
             signing_keypair: None,
+            namespace,
+            scope,
         }
     }
 
     /// Create a new ApiClient with a custom CA certificate for HTTPS verification
-    pub fn with_ca_cert(base_url: &str, ca_cert_pem: &[u8]) -> Result<Self> {
+    pub fn with_ca_cert(
+        base_url: &str,
+        ca_cert_pem: &[u8],
+        namespace: Option<String>,
+        scope: Option<String>,
+    ) -> Result<Self> {
         // Parse the PEM certificate
         let cert = reqwest::Certificate::from_pem(ca_cert_pem)
             .context("Failed to parse CA certificate")?;
@@ -37,6 +46,8 @@ impl ApiClient {
             base_url: base_url.trim_end_matches('/').to_string(),
             client,
             signing_keypair: None,
+            namespace,
+            scope,
         })
     }
 
@@ -46,6 +57,8 @@ impl ApiClient {
             base_url: base_url.trim_end_matches('/').to_string(),
             client,
             signing_keypair: None,
+            namespace: None,
+            scope: None,
         }
     }
 
@@ -56,6 +69,14 @@ impl ApiClient {
     pub fn with_signing_key(mut self, key: Arc<Ed25519KeyPair>) -> Self {
         self.signing_keypair = Some(key);
         self
+    }
+
+    /// Build the full API path, prepending namespace/scope prefix when both are set.
+    pub fn build_path(&self, path: &str) -> String {
+        match (&self.namespace, &self.scope) {
+            (Some(ns), Some(sc)) => format!("/namespaces/{}/scopes/{}{}", ns, sc, path),
+            _ => path.to_string(),
+        }
     }
 
     /// GET request without authentication
@@ -97,7 +118,8 @@ impl ApiClient {
         password_hash: &str,
         body: serde_json::Value,
     ) -> Result<T> {
-        let url = format!("{}{}", self.base_url, path);
+        let full_path = self.build_path(path);
+        let url = format!("{}{}", self.base_url, full_path);
         let body_bytes = serde_json::to_vec(&body).context("Failed to serialize body")?;
 
         let mut request = self
@@ -107,7 +129,7 @@ impl ApiClient {
             .header("content-type", "application/json");
 
         if let Some(keypair) = &self.signing_keypair {
-            let signed = crate::signing::sign_request(keypair, "POST", path, &body_bytes);
+            let signed = crate::signing::sign_request(keypair, "POST", &full_path, &body_bytes);
             request = request
                 .header("x-gap-timestamp", &signed.timestamp)
                 .header("x-gap-nonce", &signed.nonce)
@@ -131,7 +153,8 @@ impl ApiClient {
         password_hash: &str,
         query_params: &[(&str, &str)],
     ) -> Result<T> {
-        let mut url = format!("{}{}", self.base_url, path);
+        let full_path = self.build_path(path);
+        let mut url = format!("{}{}", self.base_url, full_path);
         if !query_params.is_empty() {
             let params: Vec<String> = query_params
                 .iter()
@@ -146,7 +169,7 @@ impl ApiClient {
             .header("Authorization", format!("Bearer {}", password_hash));
 
         if let Some(keypair) = &self.signing_keypair {
-            let signed = crate::signing::sign_request(keypair, "GET", path, b"");
+            let signed = crate::signing::sign_request(keypair, "GET", &full_path, b"");
             request = request
                 .header("x-gap-timestamp", &signed.timestamp)
                 .header("x-gap-nonce", &signed.nonce)
@@ -167,7 +190,8 @@ impl ApiClient {
         path: &str,
         password_hash: &str,
     ) -> Result<T> {
-        let url = format!("{}{}", self.base_url, path);
+        let full_path = self.build_path(path);
+        let url = format!("{}{}", self.base_url, full_path);
 
         let mut request = self
             .client
@@ -175,7 +199,7 @@ impl ApiClient {
             .header("Authorization", format!("Bearer {}", password_hash));
 
         if let Some(keypair) = &self.signing_keypair {
-            let signed = crate::signing::sign_request(keypair, "DELETE", path, b"");
+            let signed = crate::signing::sign_request(keypair, "DELETE", &full_path, b"");
             request = request
                 .header("x-gap-timestamp", &signed.timestamp)
                 .header("x-gap-nonce", &signed.nonce)
@@ -340,31 +364,57 @@ mod tests {
     use super::*;
 
     #[test]
+    fn test_build_path_without_namespace() {
+        let client = ApiClient::new("https://localhost:9080", None, None);
+        assert_eq!(client.build_path("/plugins"), "/plugins");
+    }
+
+    #[test]
+    fn test_build_path_with_namespace() {
+        let client = ApiClient::new(
+            "https://localhost:9080",
+            Some("org1".to_string()),
+            Some("team1".to_string()),
+        );
+        assert_eq!(
+            client.build_path("/plugins"),
+            "/namespaces/org1/scopes/team1/plugins"
+        );
+    }
+
+    #[test]
+    fn test_build_path_namespace_without_scope() {
+        // Only namespace without scope should NOT prefix (both required)
+        let client = ApiClient::new("https://localhost:9080", Some("org1".to_string()), None);
+        assert_eq!(client.build_path("/plugins"), "/plugins");
+    }
+
+    #[test]
     fn test_client_with_signing_key() {
         let rng = ring::rand::SystemRandom::new();
         let pkcs8 = ring::signature::Ed25519KeyPair::generate_pkcs8(&rng).unwrap();
         let keypair = ring::signature::Ed25519KeyPair::from_pkcs8(pkcs8.as_ref()).unwrap();
 
-        let client = ApiClient::new("http://localhost:9080")
+        let client = ApiClient::new("http://localhost:9080", None, None)
             .with_signing_key(Arc::new(keypair));
         assert!(client.signing_keypair.is_some());
     }
 
     #[test]
     fn test_client_without_signing_key() {
-        let client = ApiClient::new("http://localhost:9080");
+        let client = ApiClient::new("http://localhost:9080", None, None);
         assert!(client.signing_keypair.is_none());
     }
 
     #[test]
     fn test_client_creation() {
-        let client = ApiClient::new("http://localhost:9080");
+        let client = ApiClient::new("http://localhost:9080", None, None);
         assert_eq!(client.base_url, "http://localhost:9080");
     }
 
     #[test]
     fn test_client_strips_trailing_slash() {
-        let client = ApiClient::new("http://localhost:9080/");
+        let client = ApiClient::new("http://localhost:9080/", None, None);
         assert_eq!(client.base_url, "http://localhost:9080");
     }
 
@@ -375,7 +425,7 @@ mod tests {
         let ca_pem = ca.ca_cert_pem();
 
         // This should create a client with custom CA cert
-        let result = ApiClient::with_ca_cert("https://localhost:9080", ca_pem.as_bytes());
+        let result = ApiClient::with_ca_cert("https://localhost:9080", ca_pem.as_bytes(), None, None);
         assert!(result.is_ok(), "Failed to create client with CA cert: {:?}", result.err());
 
         let client = result.unwrap();
@@ -389,7 +439,7 @@ mod tests {
         // So we just test that the method doesn't panic
         let invalid_pem = b"not a valid certificate";
 
-        let _result = ApiClient::with_ca_cert("https://localhost:9080", invalid_pem);
+        let _result = ApiClient::with_ca_cert("https://localhost:9080", invalid_pem, None, None);
         // The method may or may not return an error depending on reqwest's validation
         // The important thing is that it doesn't panic
     }
@@ -397,7 +447,7 @@ mod tests {
     #[test]
     fn test_get_auth_url_construction_no_params() {
         // Verify that get_auth builds the URL correctly with no query params
-        let client = ApiClient::new("http://localhost:9080");
+        let client = ApiClient::new("http://localhost:9080", None, None);
         // We can't easily test the network call, but we can verify the base_url is set
         assert_eq!(client.base_url, "http://localhost:9080");
     }

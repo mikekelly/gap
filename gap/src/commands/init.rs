@@ -23,9 +23,9 @@ pub async fn run(server_url: &str, ca_path: Option<&str>, management_sans: Optio
                 ca_cert_path.display(), e
             ))?;
 
-        ApiClient::with_ca_cert(server_url, &ca_cert)?
+        ApiClient::with_ca_cert(server_url, &ca_cert, None, None)?
     } else {
-        ApiClient::new(server_url)
+        ApiClient::new(server_url, None, None)
     };
 
     // Parse management SANs if provided
@@ -110,7 +110,7 @@ mod tests {
         let ca_pem = ca.ca_cert_pem();
 
         // Verify we can create an ApiClient with this CA cert
-        let result = ApiClient::with_ca_cert("https://localhost:9080", ca_pem.as_bytes());
+        let result = ApiClient::with_ca_cert("https://localhost:9080", ca_pem.as_bytes(), None, None);
         assert!(result.is_ok(), "Should be able to create ApiClient with CA cert from bytes");
     }
 }

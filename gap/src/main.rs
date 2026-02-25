@@ -11,6 +11,12 @@ use std::sync::{Arc, OnceLock};
 /// Global signing keypair, set once at startup from --signing-key / GAP_SIGNING_KEY.
 static SIGNING_KEYPAIR: OnceLock<Arc<ring::signature::Ed25519KeyPair>> = OnceLock::new();
 
+/// Global namespace, set once at startup from --namespace / GAP_NAMESPACE.
+static NAMESPACE: OnceLock<String> = OnceLock::new();
+
+/// Global scope, set once at startup from --scope / GAP_SCOPE.
+static SCOPE: OnceLock<String> = OnceLock::new();
+
 mod auth;
 mod client;
 mod commands;
@@ -27,6 +33,14 @@ struct Cli {
     /// Path to Ed25519 private key PEM for signing management API requests
     #[arg(long, env = "GAP_SIGNING_KEY")]
     signing_key: Option<String>,
+
+    /// Namespace for scoped API routing
+    #[arg(long, global = true, env = "GAP_NAMESPACE")]
+    namespace: Option<String>,
+
+    /// Scope within a namespace for scoped API routing
+    #[arg(long, global = true, env = "GAP_SCOPE")]
+    scope: Option<String>,
 
     #[command(subcommand)]
     command: Commands,
@@ -154,13 +168,16 @@ pub fn create_api_client(server_url: &str) -> anyhow::Result<client::ApiClient> 
 
     let ca_path = get_default_ca_path();
 
+    let namespace = NAMESPACE.get().cloned();
+    let scope = SCOPE.get().cloned();
+
     // For init command, the CA doesn't exist yet, so we'll handle that specially
     // in the init command itself. For all other commands, we require the CA cert.
     if ca_path.exists() {
         let ca_pem = std::fs::read(&ca_path)
             .map_err(|e| anyhow::anyhow!("Failed to read CA certificate from {}: {}", ca_path.display(), e))?;
 
-        let mut client = client::ApiClient::with_ca_cert(server_url, &ca_pem)
+        let mut client = client::ApiClient::with_ca_cert(server_url, &ca_pem, namespace, scope)
             .map_err(|e| anyhow::anyhow!("Failed to create HTTPS client: {}. Ensure the CA certificate at {} is valid.", e, ca_path.display()))?;
 
         if let Some(keypair) = SIGNING_KEYPAIR.get() {
@@ -185,6 +202,14 @@ async fn main() {
     tracing_subscriber::fmt::init();
 
     let cli = Cli::parse();
+
+    // Store namespace/scope in globals for create_api_client
+    if let Some(ns) = &cli.namespace {
+        let _ = NAMESPACE.set(ns.clone());
+    }
+    if let Some(sc) = &cli.scope {
+        let _ = SCOPE.set(sc.clone());
+    }
 
     // Load signing key if configured
     if let Some(key_path) = &cli.signing_key {
@@ -234,6 +259,20 @@ async fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_args_namespace_scope_flags() {
+        let cli = Cli::parse_from(["gap", "--namespace", "org1", "--scope", "team1", "status"]);
+        assert_eq!(cli.namespace, Some("org1".to_string()));
+        assert_eq!(cli.scope, Some("team1".to_string()));
+    }
+
+    #[test]
+    fn test_args_namespace_scope_default_none() {
+        let cli = Cli::parse_from(["gap", "status"]);
+        assert_eq!(cli.namespace, None);
+        assert_eq!(cli.scope, None);
+    }
 
     #[test]
     fn test_cli_init_parses() {
