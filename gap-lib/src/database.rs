@@ -9,6 +9,7 @@ use crate::types::{ActivityEntry, ManagementLogEntry};
 use chrono::{DateTime, Utc};
 use sha2::{Sha256, Digest};
 use std::collections::HashMap;
+use uuid::Uuid;
 
 /// Schema DDL applied on every database open (idempotent via IF NOT EXISTS).
 const SCHEMA: &str = "
@@ -36,10 +37,10 @@ CREATE TABLE IF NOT EXISTS token_scopes (
 CREATE INDEX IF NOT EXISTS idx_token_scopes_token ON token_scopes(token_value);
 
 CREATE TABLE IF NOT EXISTS credentials (
-    plugin TEXT NOT NULL,
+    plugin_id TEXT NOT NULL,
     field TEXT NOT NULL,
     value TEXT NOT NULL,
-    PRIMARY KEY (plugin, field)
+    PRIMARY KEY (plugin_id, field)
 );
 
 CREATE TABLE IF NOT EXISTS access_logs (
@@ -50,7 +51,7 @@ CREATE TABLE IF NOT EXISTS access_logs (
     url TEXT NOT NULL,
     agent_id TEXT,
     status INTEGER NOT NULL,
-    plugin_name TEXT,
+    plugin_id TEXT,
     plugin_sha TEXT,
     source_hash TEXT,
     request_headers TEXT
@@ -61,7 +62,7 @@ CREATE INDEX IF NOT EXISTS idx_access_logs_url ON access_logs(url);
 
 CREATE TABLE IF NOT EXISTS plugin_versions (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
-    plugin_name TEXT NOT NULL,
+    plugin_id TEXT NOT NULL,
     hosts TEXT NOT NULL DEFAULT '[]',
     credential_schema TEXT NOT NULL DEFAULT '[]',
     commit_sha TEXT,
@@ -71,7 +72,7 @@ CREATE TABLE IF NOT EXISTS plugin_versions (
     deleted INTEGER NOT NULL DEFAULT 0
 );
 
-CREATE INDEX IF NOT EXISTS idx_plugin_versions_plugin ON plugin_versions(plugin_name);
+CREATE INDEX IF NOT EXISTS idx_plugin_versions_plugin ON plugin_versions(plugin_id);
 CREATE INDEX IF NOT EXISTS idx_plugin_versions_hash ON plugin_versions(source_hash);
 
 CREATE TABLE IF NOT EXISTS management_logs (
@@ -102,8 +103,7 @@ CREATE TABLE IF NOT EXISTS request_details (
 );
 
 CREATE TABLE IF NOT EXISTS header_sets (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    name TEXT NOT NULL UNIQUE,
+    id TEXT PRIMARY KEY,
     match_patterns TEXT NOT NULL DEFAULT '[]',
     weight INTEGER NOT NULL DEFAULT 0,
     created_at TEXT NOT NULL,
@@ -111,10 +111,10 @@ CREATE TABLE IF NOT EXISTS header_sets (
 );
 
 CREATE TABLE IF NOT EXISTS header_set_headers (
-    header_set_name TEXT NOT NULL,
+    header_set_id TEXT NOT NULL,
     header_name TEXT NOT NULL,
     header_value TEXT NOT NULL,
-    PRIMARY KEY (header_set_name, header_name)
+    PRIMARY KEY (header_set_id, header_name)
 );
 ";
 
@@ -255,7 +255,7 @@ impl GapDatabase {
 
         // Migration for existing DBs — ignore error if columns already exist
         let alter_migrations = [
-            "ALTER TABLE access_logs ADD COLUMN plugin_name TEXT",
+            "ALTER TABLE access_logs ADD COLUMN plugin_id TEXT",
             "ALTER TABLE access_logs ADD COLUMN plugin_sha TEXT",
             "ALTER TABLE access_logs ADD COLUMN source_hash TEXT",
             "ALTER TABLE access_logs ADD COLUMN request_headers TEXT",
@@ -487,11 +487,13 @@ impl GapDatabase {
     // ── Plugin CRUD ─────────────────────────────────────────────────
     //
     // All plugin state lives in the append-only `plugin_versions` table.
-    // The "current" plugin is the latest non-deleted entry for a given name.
+    // The "current" plugin is the latest non-deleted entry for a given ID.
     // "Deleting" a plugin appends a tombstone row (deleted=1).
 
     /// Add a plugin by appending a new entry to plugin_versions.
-    pub async fn add_plugin(&self, plugin: &PluginEntry, source_code: &str) -> Result<()> {
+    /// Returns the generated UUID for the new plugin.
+    pub async fn add_plugin(&self, plugin: &PluginEntry, source_code: &str) -> Result<String> {
+        let id = Uuid::new_v4().to_string();
         let hosts_json =
             serde_json::to_string(&plugin.hosts).map_err(|e| GapError::database(e.to_string()))?;
         let schema_json = serde_json::to_string(&plugin.credential_schema)
@@ -505,9 +507,9 @@ impl GapDatabase {
 
         self.conn
             .execute(
-                "INSERT INTO plugin_versions (plugin_name, hosts, credential_schema, commit_sha, source_hash, source_code, installed_at, deleted, dangerously_permit_http, weight) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 0, ?8, ?9)",
+                "INSERT INTO plugin_versions (plugin_id, hosts, credential_schema, commit_sha, source_hash, source_code, installed_at, deleted, dangerously_permit_http, weight) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 0, ?8, ?9)",
                 libsql::params![
-                    plugin.name.as_str(),
+                    id.as_str(),
                     hosts_json,
                     schema_json,
                     plugin.commit_sha.as_deref().unwrap_or(""),
@@ -521,17 +523,17 @@ impl GapDatabase {
             .await
             .map_err(|e| GapError::database(e.to_string()))?;
 
-        Ok(())
+        Ok(id)
     }
 
-    /// Get a plugin entry by name (latest version, None if deleted or absent).
-    pub async fn get_plugin(&self, name: &str) -> Result<Option<PluginEntry>> {
+    /// Get a plugin entry by ID (latest version, None if deleted or absent).
+    pub async fn get_plugin(&self, id: &str) -> Result<Option<PluginEntry>> {
         // Get the absolute latest entry; if it's a tombstone, the plugin is "deleted".
         let mut rows = self
             .conn
             .query(
-                "SELECT plugin_name, hosts, credential_schema, commit_sha, deleted, dangerously_permit_http, weight, installed_at FROM plugin_versions WHERE plugin_name = ?1 ORDER BY id DESC LIMIT 1",
-                libsql::params![name],
+                "SELECT plugin_id, hosts, credential_schema, commit_sha, deleted, dangerously_permit_http, weight, installed_at FROM plugin_versions WHERE plugin_id = ?1 ORDER BY id DESC LIMIT 1",
+                libsql::params![id],
             )
             .await
             .map_err(|e| GapError::database(e.to_string()))?;
@@ -548,13 +550,13 @@ impl GapDatabase {
     }
 
     /// Get only the source code for a plugin (latest version, None if deleted or absent).
-    pub async fn get_plugin_source(&self, name: &str) -> Result<Option<String>> {
+    pub async fn get_plugin_source(&self, id: &str) -> Result<Option<String>> {
         // Get the absolute latest entry; if it's a tombstone, the plugin is "deleted".
         let mut rows = self
             .conn
             .query(
-                "SELECT source_code, deleted FROM plugin_versions WHERE plugin_name = ?1 ORDER BY id DESC LIMIT 1",
-                libsql::params![name],
+                "SELECT source_code, deleted FROM plugin_versions WHERE plugin_id = ?1 ORDER BY id DESC LIMIT 1",
+                libsql::params![id],
             )
             .await
             .map_err(|e| GapError::database(e.to_string()))?;
@@ -576,12 +578,12 @@ impl GapDatabase {
         let mut rows = self
             .conn
             .query(
-                "SELECT pv.plugin_name, pv.hosts, pv.credential_schema, pv.commit_sha, pv.dangerously_permit_http, pv.weight, pv.installed_at \
+                "SELECT pv.plugin_id, pv.hosts, pv.credential_schema, pv.commit_sha, pv.dangerously_permit_http, pv.weight, pv.installed_at \
                  FROM plugin_versions pv \
                  INNER JOIN ( \
-                     SELECT plugin_name, MAX(id) as max_id \
+                     SELECT plugin_id, MAX(id) as max_id \
                      FROM plugin_versions \
-                     GROUP BY plugin_name \
+                     GROUP BY plugin_id \
                  ) latest ON pv.id = latest.max_id \
                  WHERE pv.deleted = 0",
                 (),
@@ -596,12 +598,12 @@ impl GapDatabase {
     }
 
     /// Remove a plugin by appending a tombstone. Does NOT delete credentials (preserves across reinstalls).
-    pub async fn remove_plugin(&self, name: &str) -> Result<()> {
+    pub async fn remove_plugin(&self, id: &str) -> Result<()> {
         let now = Utc::now().to_rfc3339();
         self.conn
             .execute(
-                "INSERT INTO plugin_versions (plugin_name, hosts, credential_schema, commit_sha, source_hash, source_code, installed_at, deleted) VALUES (?1, '[]', '[]', '', '', '', ?2, 1)",
-                libsql::params![name, now],
+                "INSERT INTO plugin_versions (plugin_id, hosts, credential_schema, commit_sha, source_hash, source_code, installed_at, deleted) VALUES (?1, '[]', '[]', '', '', '', ?2, 1)",
+                libsql::params![id, now],
             )
             .await
             .map_err(|e| GapError::database(e.to_string()))?;
@@ -609,17 +611,17 @@ impl GapDatabase {
     }
 
     /// Check whether a plugin exists (latest entry is non-deleted).
-    pub async fn has_plugin(&self, name: &str) -> Result<bool> {
-        Ok(self.get_plugin(name).await?.is_some())
+    pub async fn has_plugin(&self, id: &str) -> Result<bool> {
+        Ok(self.get_plugin(id).await?.is_some())
     }
 
     /// Parse a `Row` into a `PluginEntry`.
     ///
-    /// Columns expected at positions 0-3: plugin_name, hosts, credential_schema, commit_sha.
+    /// Columns expected at positions 0-3: plugin_id, hosts, credential_schema, commit_sha.
     /// The `dangerously_permit_http` column index varies by query and is passed explicitly.
     /// Weight is at `permit_http_col + 1`, installed_at at `permit_http_col + 2`.
     fn row_to_plugin_entry(&self, row: &libsql::Row, permit_http_col: usize) -> Result<PluginEntry> {
-        let name: String = row.get(0).map_err(|e| GapError::database(e.to_string()))?;
+        let id: String = row.get(0).map_err(|e| GapError::database(e.to_string()))?;
         let hosts_json: String = row.get(1).map_err(|e| GapError::database(e.to_string()))?;
         let schema_json: String = row.get(2).map_err(|e| GapError::database(e.to_string()))?;
         let commit_sha_raw: String = row.get(3).map_err(|e| GapError::database(e.to_string()))?;
@@ -648,7 +650,8 @@ impl GapDatabase {
         };
 
         Ok(PluginEntry {
-            name,
+            id,
+            source: None,
             hosts,
             credential_schema,
             commit_sha,
@@ -663,14 +666,14 @@ impl GapDatabase {
         let mut rows = self
             .conn
             .query(
-                "SELECT plugin_name, commit_sha, source_hash, source_code, installed_at FROM plugin_versions WHERE source_hash = ?1 LIMIT 1",
+                "SELECT plugin_id, commit_sha, source_hash, source_code, installed_at FROM plugin_versions WHERE source_hash = ?1 LIMIT 1",
                 libsql::params![source_hash],
             )
             .await
             .map_err(|e| GapError::database(e.to_string()))?;
 
         if let Some(row) = rows.next().await.map_err(|e| GapError::database(e.to_string()))? {
-            let plugin_name: String = row.get(0).map_err(|e| GapError::database(e.to_string()))?;
+            let plugin_id: String = row.get(0).map_err(|e| GapError::database(e.to_string()))?;
             let commit_sha_raw: String = row.get(1).map_err(|e| GapError::database(e.to_string()))?;
             let source_hash: String = row.get(2).map_err(|e| GapError::database(e.to_string()))?;
             let source_code: String = row.get(3).map_err(|e| GapError::database(e.to_string()))?;
@@ -682,7 +685,7 @@ impl GapDatabase {
                 .with_timezone(&Utc);
 
             Ok(Some(PluginVersion {
-                plugin_name,
+                plugin_id,
                 commit_sha,
                 source_hash,
                 source_code,
@@ -696,11 +699,11 @@ impl GapDatabase {
     // ── Credential CRUD ─────────────────────────────────────────────
 
     /// Set (upsert) a credential value.
-    pub async fn set_credential(&self, plugin: &str, field: &str, value: &str) -> Result<()> {
+    pub async fn set_credential(&self, plugin_id: &str, field: &str, value: &str) -> Result<()> {
         self.conn
             .execute(
-                "INSERT OR REPLACE INTO credentials (plugin, field, value) VALUES (?1, ?2, ?3)",
-                libsql::params![plugin, field, value],
+                "INSERT OR REPLACE INTO credentials (plugin_id, field, value) VALUES (?1, ?2, ?3)",
+                libsql::params![plugin_id, field, value],
             )
             .await
             .map_err(|e| GapError::database(e.to_string()))?;
@@ -708,12 +711,12 @@ impl GapDatabase {
     }
 
     /// Get a single credential value.
-    pub async fn get_credential(&self, plugin: &str, field: &str) -> Result<Option<String>> {
+    pub async fn get_credential(&self, plugin_id: &str, field: &str) -> Result<Option<String>> {
         let mut rows = self
             .conn
             .query(
-                "SELECT value FROM credentials WHERE plugin = ?1 AND field = ?2",
-                libsql::params![plugin, field],
+                "SELECT value FROM credentials WHERE plugin_id = ?1 AND field = ?2",
+                libsql::params![plugin_id, field],
             )
             .await
             .map_err(|e| GapError::database(e.to_string()))?;
@@ -729,13 +732,13 @@ impl GapDatabase {
     /// Get all credentials for a plugin as a field->value map.
     pub async fn get_plugin_credentials(
         &self,
-        plugin: &str,
+        plugin_id: &str,
     ) -> Result<Option<HashMap<String, String>>> {
         let mut rows = self
             .conn
             .query(
-                "SELECT field, value FROM credentials WHERE plugin = ?1",
-                libsql::params![plugin],
+                "SELECT field, value FROM credentials WHERE plugin_id = ?1",
+                libsql::params![plugin_id],
             )
             .await
             .map_err(|e| GapError::database(e.to_string()))?;
@@ -754,28 +757,28 @@ impl GapDatabase {
         }
     }
 
-    /// List all credentials as `CredentialEntry` (plugin + field, no value).
+    /// List all credentials as `CredentialEntry` (plugin_id + field, no value).
     pub async fn list_credentials(&self) -> Result<Vec<CredentialEntry>> {
         let mut rows = self
             .conn
-            .query("SELECT plugin, field FROM credentials", ())
+            .query("SELECT plugin_id, field FROM credentials", ())
             .await
             .map_err(|e| GapError::database(e.to_string()))?;
         let mut result = Vec::new();
         while let Some(row) = rows.next().await.map_err(|e| GapError::database(e.to_string()))? {
-            let plugin: String = row.get(0).map_err(|e| GapError::database(e.to_string()))?;
+            let plugin_id: String = row.get(0).map_err(|e| GapError::database(e.to_string()))?;
             let field: String = row.get(1).map_err(|e| GapError::database(e.to_string()))?;
-            result.push(CredentialEntry { plugin, field });
+            result.push(CredentialEntry { plugin_id, field });
         }
         Ok(result)
     }
 
     /// Remove a single credential.
-    pub async fn remove_credential(&self, plugin: &str, field: &str) -> Result<()> {
+    pub async fn remove_credential(&self, plugin_id: &str, field: &str) -> Result<()> {
         self.conn
             .execute(
-                "DELETE FROM credentials WHERE plugin = ?1 AND field = ?2",
-                libsql::params![plugin, field],
+                "DELETE FROM credentials WHERE plugin_id = ?1 AND field = ?2",
+                libsql::params![plugin_id, field],
             )
             .await
             .map_err(|e| GapError::database(e.to_string()))?;
@@ -862,7 +865,7 @@ impl GapDatabase {
     pub async fn log_activity(&self, entry: &ActivityEntry) -> Result<()> {
         self.conn
             .execute(
-                "INSERT INTO access_logs (timestamp, request_id, method, url, agent_id, status, plugin_name, plugin_sha, source_hash, request_headers, rejection_stage, rejection_reason) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+                "INSERT INTO access_logs (timestamp, request_id, method, url, agent_id, status, plugin_id, plugin_sha, source_hash, request_headers, rejection_stage, rejection_reason) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
                 libsql::params![
                     entry.timestamp.to_rfc3339(),
                     entry.request_id.as_deref().unwrap_or(""),
@@ -870,7 +873,7 @@ impl GapDatabase {
                     entry.url.as_str(),
                     entry.agent_id.as_deref().unwrap_or(""),
                     entry.status as i64,
-                    entry.plugin_name.as_deref().unwrap_or(""),
+                    entry.plugin_id.as_deref().unwrap_or(""),
                     entry.plugin_sha.as_deref().unwrap_or(""),
                     entry.source_hash.as_deref().unwrap_or(""),
                     entry.request_headers.as_deref().unwrap_or(""),
@@ -906,7 +909,7 @@ impl GapDatabase {
     /// All filter fields are optional. When not set, that filter is skipped.
     /// Results are ordered by id DESC (newest first). Default limit is 100.
     pub async fn query_activity(&self, filter: &crate::types::ActivityFilter) -> Result<Vec<ActivityEntry>> {
-        let select = "SELECT timestamp, request_id, method, url, agent_id, status, plugin_name, plugin_sha, source_hash, request_headers, rejection_stage, rejection_reason FROM access_logs";
+        let select = "SELECT timestamp, request_id, method, url, agent_id, status, plugin_id, plugin_sha, source_hash, request_headers, rejection_stage, rejection_reason FROM access_logs";
 
         let mut conditions: Vec<String> = Vec::new();
         let mut params: Vec<libsql::Value> = Vec::new();
@@ -922,9 +925,9 @@ impl GapDatabase {
             params.push(libsql::Value::Text(format!("%{}%", path)));
             idx += 1;
         }
-        if let Some(ref plugin) = filter.plugin {
-            conditions.push(format!("plugin_name = ?{}", idx));
-            params.push(libsql::Value::Text(plugin.clone()));
+        if let Some(ref plugin_id) = filter.plugin_id {
+            conditions.push(format!("plugin_id = ?{}", idx));
+            params.push(libsql::Value::Text(plugin_id.clone()));
             idx += 1;
         }
         if let Some(ref agent) = filter.agent {
@@ -968,7 +971,7 @@ impl GapDatabase {
     /// Helper: convert activity rows into `Vec<ActivityEntry>`.
     ///
     /// Columns expected: timestamp, request_id, method, url, agent_id, status,
-    ///                   plugin_name, plugin_sha, source_hash, request_headers,
+    ///                   plugin_id, plugin_sha, source_hash, request_headers,
     ///                   rejection_stage, rejection_reason
     async fn rows_to_activity(&self, rows: &mut libsql::Rows) -> Result<Vec<ActivityEntry>> {
         let mut result = Vec::new();
@@ -981,7 +984,7 @@ impl GapDatabase {
             let agent_id_raw: String =
                 row.get(4).map_err(|e| GapError::database(e.to_string()))?;
             let status_i64: i64 = row.get(5).map_err(|e| GapError::database(e.to_string()))?;
-            let plugin_name_raw: String =
+            let plugin_id_raw: String =
                 row.get(6).map_err(|e| GapError::database(e.to_string()))?;
             let plugin_sha_raw: String =
                 row.get(7).map_err(|e| GapError::database(e.to_string()))?;
@@ -1009,7 +1012,7 @@ impl GapDatabase {
                 url,
                 agent_id: empty_to_none(agent_id_raw),
                 status: status_i64 as u16,
-                plugin_name: empty_to_none(plugin_name_raw),
+                plugin_id: empty_to_none(plugin_id_raw),
                 plugin_sha: empty_to_none(plugin_sha_raw),
                 source_hash: empty_to_none(source_hash_raw),
                 request_headers: empty_to_none(request_headers_raw),
@@ -1211,47 +1214,48 @@ impl GapDatabase {
     // ── Plugin Weight ──────────────────────────────────────────────
 
     /// Update the weight of the latest version of a plugin.
-    pub async fn update_plugin_weight(&self, name: &str, weight: i32) -> Result<()> {
+    pub async fn update_plugin_weight(&self, id: &str, weight: i32) -> Result<()> {
         let rows_affected = self
             .conn
             .execute(
-                "UPDATE plugin_versions SET weight = ?1 WHERE id = (SELECT MAX(id) FROM plugin_versions WHERE plugin_name = ?2 AND deleted = 0)",
-                libsql::params![weight, name],
+                "UPDATE plugin_versions SET weight = ?1 WHERE id = (SELECT MAX(id) FROM plugin_versions WHERE plugin_id = ?2 AND deleted = 0)",
+                libsql::params![weight, id],
             )
             .await
             .map_err(|e| GapError::database(e.to_string()))?;
 
         if rows_affected == 0 {
-            return Err(GapError::database(format!("Plugin '{}' not found", name)));
+            return Err(GapError::database(format!("Plugin '{}' not found", id)));
         }
         Ok(())
     }
 
     // ── Header Set CRUD ────────────────────────────────────────────
 
-    /// Add or re-activate a header set (idempotent upsert).
-    pub async fn add_header_set(&self, name: &str, match_patterns: &[String], weight: i32) -> Result<()> {
+    /// Add a header set with a generated UUID. Returns the new ID.
+    pub async fn add_header_set(&self, match_patterns: &[String], weight: i32) -> Result<String> {
+        let id = Uuid::new_v4().to_string();
         let patterns_json = serde_json::to_string(match_patterns)
             .map_err(|e| GapError::database(e.to_string()))?;
         let now = Utc::now().to_rfc3339();
 
         self.conn
             .execute(
-                "INSERT INTO header_sets (name, match_patterns, weight, created_at, deleted) VALUES (?1, ?2, ?3, ?4, 0) ON CONFLICT(name) DO UPDATE SET match_patterns = ?2, weight = ?3, deleted = 0",
-                libsql::params![name, patterns_json, weight, now],
+                "INSERT INTO header_sets (id, match_patterns, weight, created_at, deleted) VALUES (?1, ?2, ?3, ?4, 0)",
+                libsql::params![id.as_str(), patterns_json, weight, now],
             )
             .await
             .map_err(|e| GapError::database(e.to_string()))?;
-        Ok(())
+        Ok(id)
     }
 
-    /// Get a header set by name (None if deleted or absent).
-    pub async fn get_header_set(&self, name: &str) -> Result<Option<HeaderSet>> {
+    /// Get a header set by ID (None if deleted or absent).
+    pub async fn get_header_set(&self, id: &str) -> Result<Option<HeaderSet>> {
         let mut rows = self
             .conn
             .query(
-                "SELECT name, match_patterns, weight, created_at FROM header_sets WHERE name = ?1 AND deleted = 0",
-                libsql::params![name],
+                "SELECT id, match_patterns, weight, created_at FROM header_sets WHERE id = ?1 AND deleted = 0",
+                libsql::params![id],
             )
             .await
             .map_err(|e| GapError::database(e.to_string()))?;
@@ -1263,12 +1267,12 @@ impl GapDatabase {
         }
     }
 
-    /// List all non-deleted header sets, ordered by name.
+    /// List all non-deleted header sets, ordered by id.
     pub async fn list_header_sets(&self) -> Result<Vec<HeaderSet>> {
         let mut rows = self
             .conn
             .query(
-                "SELECT name, match_patterns, weight, created_at FROM header_sets WHERE deleted = 0 ORDER BY name",
+                "SELECT id, match_patterns, weight, created_at FROM header_sets WHERE deleted = 0 ORDER BY id",
                 (),
             )
             .await
@@ -1284,7 +1288,7 @@ impl GapDatabase {
     /// Update a header set (partial update). Error if not found.
     pub async fn update_header_set(
         &self,
-        name: &str,
+        id: &str,
         match_patterns: Option<&[String]>,
         weight: Option<i32>,
     ) -> Result<()> {
@@ -1310,11 +1314,11 @@ impl GapDatabase {
         }
 
         let sql = format!(
-            "UPDATE header_sets SET {} WHERE name = ?{} AND deleted = 0",
+            "UPDATE header_sets SET {} WHERE id = ?{} AND deleted = 0",
             sets.join(", "),
             idx
         );
-        params.push(libsql::Value::Text(name.to_string()));
+        params.push(libsql::Value::Text(id.to_string()));
 
         let rows_affected = self
             .conn
@@ -1323,25 +1327,25 @@ impl GapDatabase {
             .map_err(|e| GapError::database(e.to_string()))?;
 
         if rows_affected == 0 {
-            return Err(GapError::database(format!("Header set '{}' not found", name)));
+            return Err(GapError::database(format!("Header set '{}' not found", id)));
         }
         Ok(())
     }
 
     /// Soft-delete a header set and remove its headers.
-    pub async fn remove_header_set(&self, name: &str) -> Result<()> {
+    pub async fn remove_header_set(&self, id: &str) -> Result<()> {
         self.conn
             .execute(
-                "UPDATE header_sets SET deleted = 1 WHERE name = ?1 AND deleted = 0",
-                libsql::params![name],
+                "UPDATE header_sets SET deleted = 1 WHERE id = ?1 AND deleted = 0",
+                libsql::params![id],
             )
             .await
             .map_err(|e| GapError::database(e.to_string()))?;
 
         self.conn
             .execute(
-                "DELETE FROM header_set_headers WHERE header_set_name = ?1",
-                libsql::params![name],
+                "DELETE FROM header_set_headers WHERE header_set_id = ?1",
+                libsql::params![id],
             )
             .await
             .map_err(|e| GapError::database(e.to_string()))?;
@@ -1352,14 +1356,14 @@ impl GapDatabase {
     /// Set (upsert) a header in a header set.
     pub async fn set_header_set_header(
         &self,
-        header_set_name: &str,
+        header_set_id: &str,
         header_name: &str,
         header_value: &str,
     ) -> Result<()> {
         self.conn
             .execute(
-                "INSERT OR REPLACE INTO header_set_headers (header_set_name, header_name, header_value) VALUES (?1, ?2, ?3)",
-                libsql::params![header_set_name, header_name, header_value],
+                "INSERT OR REPLACE INTO header_set_headers (header_set_id, header_name, header_value) VALUES (?1, ?2, ?3)",
+                libsql::params![header_set_id, header_name, header_value],
             )
             .await
             .map_err(|e| GapError::database(e.to_string()))?;
@@ -1367,12 +1371,12 @@ impl GapDatabase {
     }
 
     /// Get all headers for a header set as a name->value map.
-    pub async fn get_header_set_headers(&self, header_set_name: &str) -> Result<HashMap<String, String>> {
+    pub async fn get_header_set_headers(&self, header_set_id: &str) -> Result<HashMap<String, String>> {
         let mut rows = self
             .conn
             .query(
-                "SELECT header_name, header_value FROM header_set_headers WHERE header_set_name = ?1",
-                libsql::params![header_set_name],
+                "SELECT header_name, header_value FROM header_set_headers WHERE header_set_id = ?1",
+                libsql::params![header_set_id],
             )
             .await
             .map_err(|e| GapError::database(e.to_string()))?;
@@ -1387,12 +1391,12 @@ impl GapDatabase {
     }
 
     /// List header names for a header set (names only, no values).
-    pub async fn list_header_set_header_names(&self, header_set_name: &str) -> Result<Vec<String>> {
+    pub async fn list_header_set_header_names(&self, header_set_id: &str) -> Result<Vec<String>> {
         let mut rows = self
             .conn
             .query(
-                "SELECT header_name FROM header_set_headers WHERE header_set_name = ?1",
-                libsql::params![header_set_name],
+                "SELECT header_name FROM header_set_headers WHERE header_set_id = ?1",
+                libsql::params![header_set_id],
             )
             .await
             .map_err(|e| GapError::database(e.to_string()))?;
@@ -1406,11 +1410,11 @@ impl GapDatabase {
     }
 
     /// Remove a single header from a header set.
-    pub async fn remove_header_set_header(&self, header_set_name: &str, header_name: &str) -> Result<()> {
+    pub async fn remove_header_set_header(&self, header_set_id: &str, header_name: &str) -> Result<()> {
         self.conn
             .execute(
-                "DELETE FROM header_set_headers WHERE header_set_name = ?1 AND header_name = ?2",
-                libsql::params![header_set_name, header_name],
+                "DELETE FROM header_set_headers WHERE header_set_id = ?1 AND header_name = ?2",
+                libsql::params![header_set_id, header_name],
             )
             .await
             .map_err(|e| GapError::database(e.to_string()))?;
@@ -1418,9 +1422,9 @@ impl GapDatabase {
     }
 
     /// Parse a row from header_sets into a HeaderSet.
-    /// Columns expected: name, match_patterns, weight, created_at.
+    /// Columns expected: id, match_patterns, weight, created_at.
     fn row_to_header_set(&self, row: &libsql::Row) -> Result<HeaderSet> {
-        let name: String = row.get(0).map_err(|e| GapError::database(e.to_string()))?;
+        let id: String = row.get(0).map_err(|e| GapError::database(e.to_string()))?;
         let patterns_json: String = row.get(1).map_err(|e| GapError::database(e.to_string()))?;
         let weight: i32 = row.get(2).map_err(|e| GapError::database(e.to_string()))?;
         let created_at_str: String = row.get(3).map_err(|e| GapError::database(e.to_string()))?;
@@ -1432,7 +1436,7 @@ impl GapDatabase {
             .with_timezone(&Utc);
 
         Ok(HeaderSet {
-            name,
+            id,
             match_patterns,
             weight,
             created_at,
@@ -1575,9 +1579,10 @@ mod tests {
 
     // ── Plugin CRUD ─────────────────────────────────────────────────
 
-    fn sample_plugin(name: &str) -> PluginEntry {
+    fn sample_plugin(id: &str) -> PluginEntry {
         PluginEntry {
-            name: name.to_string(),
+            id: id.to_string(),
+            source: None,
             hosts: vec!["api.example.com".to_string()],
             credential_schema: vec!["api_key".to_string()],
             commit_sha: None,
@@ -1590,34 +1595,35 @@ mod tests {
     #[tokio::test]
     async fn test_plugin_add_and_get() {
         let db = GapDatabase::in_memory().await.unwrap();
-        let plugin = sample_plugin("exa");
+        let plugin = sample_plugin("placeholder");
 
-        db.add_plugin(&plugin, "function transform() {}").await.unwrap();
+        let id = db.add_plugin(&plugin, "function transform() {}").await.unwrap();
 
-        let got = db.get_plugin("exa").await.unwrap().unwrap();
-        assert_eq!(got.name, "exa");
+        let got = db.get_plugin(&id).await.unwrap().unwrap();
+        assert_eq!(got.id, id);
         assert_eq!(got.hosts, vec!["api.example.com"]);
         assert_eq!(got.credential_schema, vec!["api_key"]);
+        assert!(got.source.is_none());
     }
 
     #[tokio::test]
     async fn test_plugin_get_source() {
         let db = GapDatabase::in_memory().await.unwrap();
-        let plugin = sample_plugin("exa");
+        let plugin = sample_plugin("placeholder");
 
-        db.add_plugin(&plugin, "// source code here")
+        let id = db.add_plugin(&plugin, "// source code here")
             .await
             .unwrap();
 
-        let src = db.get_plugin_source("exa").await.unwrap().unwrap();
+        let src = db.get_plugin_source(&id).await.unwrap().unwrap();
         assert_eq!(src, "// source code here");
     }
 
     #[tokio::test]
     async fn test_plugin_get_nonexistent() {
         let db = GapDatabase::in_memory().await.unwrap();
-        assert!(db.get_plugin("nope").await.unwrap().is_none());
-        assert!(db.get_plugin_source("nope").await.unwrap().is_none());
+        assert!(db.get_plugin("nonexistent-id").await.unwrap().is_none());
+        assert!(db.get_plugin_source("nonexistent-id").await.unwrap().is_none());
     }
 
     #[tokio::test]
@@ -1626,8 +1632,8 @@ mod tests {
 
         assert_eq!(db.list_plugins().await.unwrap().len(), 0);
 
-        db.add_plugin(&sample_plugin("exa"), "src1").await.unwrap();
-        db.add_plugin(&sample_plugin("github"), "src2")
+        db.add_plugin(&sample_plugin("placeholder1"), "src1").await.unwrap();
+        db.add_plugin(&sample_plugin("placeholder2"), "src2")
             .await
             .unwrap();
 
@@ -1639,35 +1645,36 @@ mod tests {
     async fn test_plugin_remove_preserves_credentials() {
         let db = GapDatabase::in_memory().await.unwrap();
 
-        db.add_plugin(&sample_plugin("exa"), "src").await.unwrap();
-        db.set_credential("exa", "api_key", "secret")
+        let id = db.add_plugin(&sample_plugin("placeholder"), "src").await.unwrap();
+        db.set_credential(&id, "api_key", "secret")
             .await
             .unwrap();
 
         // Remove plugin
-        db.remove_plugin("exa").await.unwrap();
+        db.remove_plugin(&id).await.unwrap();
 
         // Plugin is gone
-        assert!(db.get_plugin("exa").await.unwrap().is_none());
+        assert!(db.get_plugin(&id).await.unwrap().is_none());
         // Credentials are preserved
-        let cred = db.get_credential("exa", "api_key").await.unwrap();
+        let cred = db.get_credential(&id, "api_key").await.unwrap();
         assert_eq!(cred, Some("secret".to_string()));
     }
 
     #[tokio::test]
     async fn test_plugin_has() {
         let db = GapDatabase::in_memory().await.unwrap();
-        assert!(!db.has_plugin("exa").await.unwrap());
+        assert!(!db.has_plugin("nonexistent-id").await.unwrap());
 
-        db.add_plugin(&sample_plugin("exa"), "src").await.unwrap();
-        assert!(db.has_plugin("exa").await.unwrap());
+        let id = db.add_plugin(&sample_plugin("placeholder"), "src").await.unwrap();
+        assert!(db.has_plugin(&id).await.unwrap());
     }
 
     #[tokio::test]
     async fn test_plugin_with_commit_sha() {
         let db = GapDatabase::in_memory().await.unwrap();
         let plugin = PluginEntry {
-            name: "exa".to_string(),
+            id: "placeholder".to_string(),
+            source: None,
             hosts: vec!["api.exa.ai".to_string()],
             credential_schema: vec!["api_key".to_string()],
             commit_sha: Some("abc1234".to_string()),
@@ -1676,9 +1683,9 @@ mod tests {
             installed_at: None,
         };
 
-        db.add_plugin(&plugin, "src").await.unwrap();
+        let id = db.add_plugin(&plugin, "src").await.unwrap();
 
-        let got = db.get_plugin("exa").await.unwrap().unwrap();
+        let got = db.get_plugin(&id).await.unwrap().unwrap();
         assert_eq!(got.commit_sha, Some("abc1234".to_string()));
     }
 
@@ -1688,11 +1695,11 @@ mod tests {
     async fn test_credential_set_and_get() {
         let db = GapDatabase::in_memory().await.unwrap();
 
-        db.set_credential("exa", "api_key", "secret")
+        db.set_credential("plugin-id-1", "api_key", "secret")
             .await
             .unwrap();
 
-        let val = db.get_credential("exa", "api_key").await.unwrap();
+        let val = db.get_credential("plugin-id-1", "api_key").await.unwrap();
         assert_eq!(val, Some("secret".to_string()));
     }
 
@@ -1706,14 +1713,14 @@ mod tests {
     async fn test_credential_get_plugin_credentials() {
         let db = GapDatabase::in_memory().await.unwrap();
 
-        db.set_credential("exa", "api_key", "key-val")
+        db.set_credential("plugin-id-1", "api_key", "key-val")
             .await
             .unwrap();
-        db.set_credential("exa", "secret", "secret-val")
+        db.set_credential("plugin-id-1", "secret", "secret-val")
             .await
             .unwrap();
 
-        let creds = db.get_plugin_credentials("exa").await.unwrap().unwrap();
+        let creds = db.get_plugin_credentials("plugin-id-1").await.unwrap().unwrap();
         assert_eq!(creds.len(), 2);
         assert_eq!(creds.get("api_key").unwrap(), "key-val");
         assert_eq!(creds.get("secret").unwrap(), "secret-val");
@@ -1728,27 +1735,27 @@ mod tests {
 
         assert_eq!(db.list_credentials().await.unwrap().len(), 0);
 
-        db.set_credential("exa", "api_key", "v1").await.unwrap();
-        db.set_credential("github", "token", "v2").await.unwrap();
+        db.set_credential("plugin-id-1", "api_key", "v1").await.unwrap();
+        db.set_credential("plugin-id-2", "token", "v2").await.unwrap();
 
         let creds = db.list_credentials().await.unwrap();
         assert_eq!(creds.len(), 2);
-        assert!(creds.iter().any(|c| c.plugin == "exa" && c.field == "api_key"));
-        assert!(creds.iter().any(|c| c.plugin == "github" && c.field == "token"));
+        assert!(creds.iter().any(|c| c.plugin_id == "plugin-id-1" && c.field == "api_key"));
+        assert!(creds.iter().any(|c| c.plugin_id == "plugin-id-2" && c.field == "token"));
     }
 
     #[tokio::test]
     async fn test_credential_remove() {
         let db = GapDatabase::in_memory().await.unwrap();
 
-        db.set_credential("exa", "api_key", "v1").await.unwrap();
-        db.set_credential("exa", "secret", "v2").await.unwrap();
+        db.set_credential("plugin-id-1", "api_key", "v1").await.unwrap();
+        db.set_credential("plugin-id-1", "secret", "v2").await.unwrap();
 
-        db.remove_credential("exa", "api_key").await.unwrap();
+        db.remove_credential("plugin-id-1", "api_key").await.unwrap();
 
-        assert!(db.get_credential("exa", "api_key").await.unwrap().is_none());
+        assert!(db.get_credential("plugin-id-1", "api_key").await.unwrap().is_none());
         assert_eq!(
-            db.get_credential("exa", "secret").await.unwrap(),
+            db.get_credential("plugin-id-1", "secret").await.unwrap(),
             Some("v2".to_string())
         );
     }
@@ -1809,7 +1816,7 @@ mod tests {
             url: "https://api.example.com/users".to_string(),
             agent_id: Some("agent-1".to_string()),
             status: 200,
-            plugin_name: None,
+            plugin_id: None,
             plugin_sha: None,
             source_hash: None,
             request_headers: None,
@@ -1838,7 +1845,7 @@ mod tests {
                 url: format!("https://api.example.com/{}", i),
                 agent_id: None,
                 status: 200,
-                plugin_name: None,
+                plugin_id: None,
                 plugin_sha: None,
                 source_hash: None,
                 request_headers: None,
@@ -1870,7 +1877,7 @@ mod tests {
             url: "https://old.example.com".to_string(),
             agent_id: None,
             status: 200,
-            plugin_name: None,
+            plugin_id: None,
             plugin_sha: None,
             source_hash: None,
             request_headers: None,
@@ -1888,7 +1895,7 @@ mod tests {
             url: "https://new.example.com".to_string(),
             agent_id: Some("agent-2".to_string()),
             status: 201,
-            plugin_name: None,
+            plugin_id: None,
             plugin_sha: None,
             source_hash: None,
             request_headers: None,
@@ -1914,7 +1921,7 @@ mod tests {
             url: "https://api.example.com/resource".to_string(),
             agent_id: None,
             status: 204,
-            plugin_name: None,
+            plugin_id: None,
             plugin_sha: None,
             source_hash: None,
             request_headers: None,
@@ -1939,7 +1946,7 @@ mod tests {
             url: "https://api.example.com/data".to_string(),
             agent_id: Some("agent-1".to_string()),
             status: 200,
-            plugin_name: Some("exa".to_string()),
+            plugin_id: Some("exa".to_string()),
             plugin_sha: Some("abc1234".to_string()),
             source_hash: None,
             request_headers: None,
@@ -1950,7 +1957,7 @@ mod tests {
 
         let logs = db.get_activity(None).await.unwrap();
         assert_eq!(logs.len(), 1);
-        assert_eq!(logs[0].plugin_name, Some("exa".to_string()));
+        assert_eq!(logs[0].plugin_id, Some("exa".to_string()));
         assert_eq!(logs[0].plugin_sha, Some("abc1234".to_string()));
     }
 
@@ -1965,7 +1972,7 @@ mod tests {
             url: "https://api.example.com/data".to_string(),
             agent_id: None,
             status: 200,
-            plugin_name: None,
+            plugin_id: None,
             plugin_sha: None,
             source_hash: None,
             request_headers: None,
@@ -1976,7 +1983,7 @@ mod tests {
 
         let logs = db.get_activity(None).await.unwrap();
         assert_eq!(logs.len(), 1);
-        assert_eq!(logs[0].plugin_name, None);
+        assert_eq!(logs[0].plugin_id, None);
         assert_eq!(logs[0].plugin_sha, None);
     }
 
@@ -1991,7 +1998,7 @@ mod tests {
             url: "https://api.example.com/data".to_string(),
             agent_id: Some("agent-1".to_string()),
             status: 200,
-            plugin_name: Some("exa".to_string()),
+            plugin_id: Some("exa".to_string()),
             plugin_sha: Some("abc1234".to_string()),
             source_hash: Some("deadbeef1234".to_string()),
             request_headers: None,
@@ -2017,7 +2024,7 @@ mod tests {
             url: "https://api.example.com/data".to_string(),
             agent_id: Some("agent-1".to_string()),
             status: 200,
-            plugin_name: Some("exa".to_string()),
+            plugin_id: Some("exa".to_string()),
             plugin_sha: None,
             source_hash: None,
             request_headers: Some(headers_json.to_string()),
@@ -2045,7 +2052,7 @@ mod tests {
             url: "https://api.example.com/data".to_string(),
             agent_id: None,
             status: 200,
-            plugin_name: None,
+            plugin_id: None,
             plugin_sha: None,
             source_hash: None,
             request_headers: None,
@@ -2071,7 +2078,7 @@ mod tests {
                 url: "https://api.example.com/users".to_string(),
                 agent_id: Some("agent-1".to_string()),
                 status: 200,
-                plugin_name: Some("exa".to_string()),
+                plugin_id: Some("exa".to_string()),
                 plugin_sha: None,
                 source_hash: None,
                 request_headers: None,
@@ -2085,7 +2092,7 @@ mod tests {
                 url: "https://api.example.com/data".to_string(),
                 agent_id: Some("agent-1".to_string()),
                 status: 201,
-                plugin_name: Some("exa".to_string()),
+                plugin_id: Some("exa".to_string()),
                 plugin_sha: None,
                 source_hash: None,
                 request_headers: None,
@@ -2099,7 +2106,7 @@ mod tests {
                 url: "https://other.service.io/health".to_string(),
                 agent_id: Some("agent-2".to_string()),
                 status: 200,
-                plugin_name: Some("github".to_string()),
+                plugin_id: Some("github".to_string()),
                 plugin_sha: None,
                 source_hash: None,
                 request_headers: None,
@@ -2113,7 +2120,7 @@ mod tests {
                 url: "https://api.example.com/items/42".to_string(),
                 agent_id: Some("agent-2".to_string()),
                 status: 204,
-                plugin_name: None,
+                plugin_id: None,
                 plugin_sha: None,
                 source_hash: None,
                 request_headers: None,
@@ -2157,11 +2164,11 @@ mod tests {
         seed_activity(&db).await;
 
         let filter = crate::types::ActivityFilter {
-            plugin: Some("exa".to_string()),
+            plugin_id: Some("exa".to_string()),
             ..Default::default()
         };
         let results = db.query_activity(&filter).await.unwrap();
-        assert_eq!(results.len(), 2); // 2 entries with plugin "exa"
+        assert_eq!(results.len(), 2); // 2 entries with plugin_id "exa"
     }
 
     #[tokio::test]
@@ -2262,7 +2269,7 @@ mod tests {
             url: "https://old.example.com".to_string(),
             agent_id: None,
             status: 200,
-            plugin_name: None,
+            plugin_id: None,
             plugin_sha: None,
             source_hash: None,
             request_headers: None,
@@ -2278,7 +2285,7 @@ mod tests {
             url: "https://new.example.com".to_string(),
             agent_id: None,
             status: 201,
-            plugin_name: None,
+            plugin_id: None,
             plugin_sha: None,
             source_hash: None,
             request_headers: None,
@@ -2306,7 +2313,7 @@ mod tests {
             url: "https://api.example.com/test".to_string(),
             agent_id: Some("agent-1".to_string()),
             status: 200,
-            plugin_name: None,
+            plugin_id: None,
             plugin_sha: None,
             source_hash: None,
             request_headers: None,
@@ -2326,7 +2333,7 @@ mod tests {
         seed_activity(&db).await;
 
         let filter = crate::types::ActivityFilter {
-            plugin: Some("nonexistent".to_string()),
+            plugin_id: Some("nonexistent".to_string()),
             ..Default::default()
         };
         let results = db.query_activity(&filter).await.unwrap();
@@ -2343,7 +2350,8 @@ mod tests {
         let source_hash = format!("{:x}", sha2::Sha256::digest(source_code.as_bytes()));
 
         let plugin = PluginEntry {
-            name: "my-plugin".to_string(),
+            id: "placeholder".to_string(),
+            source: None,
             hosts: vec!["api.example.com".to_string()],
             credential_schema: vec!["api_key".to_string()],
             commit_sha: Some("abc1234".to_string()),
@@ -2351,12 +2359,12 @@ mod tests {
             weight: 0,
             installed_at: None,
         };
-        db.add_plugin(&plugin, source_code).await.unwrap();
+        let id = db.add_plugin(&plugin, source_code).await.unwrap();
 
         let version = db.get_plugin_version_by_hash(&source_hash).await.unwrap();
         assert!(version.is_some());
         let version = version.unwrap();
-        assert_eq!(version.plugin_name, "my-plugin");
+        assert_eq!(version.plugin_id, id);
         assert_eq!(version.commit_sha, Some("abc1234".to_string()));
         assert_eq!(version.source_hash, source_hash);
         assert_eq!(version.source_code, source_code);
@@ -2373,9 +2381,9 @@ mod tests {
     async fn test_add_plugin_creates_version_entry() {
         let db = GapDatabase::in_memory().await.unwrap();
 
-        let plugin = sample_plugin("test-versioned");
+        let plugin = sample_plugin("placeholder");
         let source_code = "function transform() { return request; }";
-        db.add_plugin(&plugin, source_code).await.unwrap();
+        let id = db.add_plugin(&plugin, source_code).await.unwrap();
 
         // Compute expected hash
         let expected_hash = format!("{:x}", sha2::Sha256::digest(source_code.as_bytes()));
@@ -2384,7 +2392,7 @@ mod tests {
         let version = db.get_plugin_version_by_hash(&expected_hash).await.unwrap();
         assert!(version.is_some());
         let version = version.unwrap();
-        assert_eq!(version.plugin_name, "test-versioned");
+        assert_eq!(version.plugin_id, id);
         assert_eq!(version.source_code, source_code);
     }
 
@@ -2392,13 +2400,13 @@ mod tests {
     async fn test_plugin_versions_are_append_only() {
         let db = GapDatabase::in_memory().await.unwrap();
 
-        let plugin = sample_plugin("versioned-plugin");
+        let plugin = sample_plugin("placeholder");
 
         // Install v1
         let code_v1 = "// version 1";
         db.add_plugin(&plugin, code_v1).await.unwrap();
 
-        // Install v2 (same plugin name, different code)
+        // Install v2 (different code, gets a new UUID)
         let code_v2 = "// version 2";
         db.add_plugin(&plugin, code_v2).await.unwrap();
 
@@ -2420,14 +2428,14 @@ mod tests {
     async fn test_remove_plugin_creates_tombstone() {
         let db = GapDatabase::in_memory().await.unwrap();
 
-        db.add_plugin(&sample_plugin("exa"), "src").await.unwrap();
-        db.remove_plugin("exa").await.unwrap();
+        let id = db.add_plugin(&sample_plugin("placeholder"), "src").await.unwrap();
+        db.remove_plugin(&id).await.unwrap();
 
         // Plugin should be invisible via get/has/list
-        assert!(db.get_plugin("exa").await.unwrap().is_none());
-        assert!(!db.has_plugin("exa").await.unwrap());
+        assert!(db.get_plugin(&id).await.unwrap().is_none());
+        assert!(!db.has_plugin(&id).await.unwrap());
         assert_eq!(db.list_plugins().await.unwrap().len(), 0);
-        assert!(db.get_plugin_source("exa").await.unwrap().is_none());
+        assert!(db.get_plugin_source(&id).await.unwrap().is_none());
     }
 
     #[tokio::test]
@@ -2435,15 +2443,15 @@ mod tests {
         let db = GapDatabase::in_memory().await.unwrap();
 
         // Install, delete, reinstall
-        db.add_plugin(&sample_plugin("exa"), "v1 src").await.unwrap();
-        db.remove_plugin("exa").await.unwrap();
-        assert!(db.get_plugin("exa").await.unwrap().is_none());
+        let id1 = db.add_plugin(&sample_plugin("placeholder"), "v1 src").await.unwrap();
+        db.remove_plugin(&id1).await.unwrap();
+        assert!(db.get_plugin(&id1).await.unwrap().is_none());
 
-        db.add_plugin(&sample_plugin("exa"), "v2 src").await.unwrap();
-        let got = db.get_plugin("exa").await.unwrap().unwrap();
-        assert_eq!(got.name, "exa");
+        let id2 = db.add_plugin(&sample_plugin("placeholder"), "v2 src").await.unwrap();
+        let got = db.get_plugin(&id2).await.unwrap().unwrap();
+        assert_eq!(got.id, id2);
 
-        let src = db.get_plugin_source("exa").await.unwrap().unwrap();
+        let src = db.get_plugin_source(&id2).await.unwrap().unwrap();
         assert_eq!(src, "v2 src");
     }
 
@@ -2452,15 +2460,15 @@ mod tests {
         let db = GapDatabase::in_memory().await.unwrap();
 
         // Install two plugins
-        db.add_plugin(&sample_plugin("exa"), "src1").await.unwrap();
-        db.add_plugin(&sample_plugin("github"), "src2").await.unwrap();
+        let id1 = db.add_plugin(&sample_plugin("placeholder1"), "src1").await.unwrap();
+        let id2 = db.add_plugin(&sample_plugin("placeholder2"), "src2").await.unwrap();
 
         // Delete one
-        db.remove_plugin("exa").await.unwrap();
+        db.remove_plugin(&id1).await.unwrap();
 
         let plugins = db.list_plugins().await.unwrap();
         assert_eq!(plugins.len(), 1);
-        assert_eq!(plugins[0].name, "github");
+        assert_eq!(plugins[0].id, id2);
     }
 
     #[tokio::test]
@@ -2468,7 +2476,8 @@ mod tests {
         let db = GapDatabase::in_memory().await.unwrap();
 
         let plugin_v1 = PluginEntry {
-            name: "exa".to_string(),
+            id: "placeholder".to_string(),
+            source: None,
             hosts: vec!["api.exa.ai".to_string()],
             credential_schema: vec!["api_key".to_string()],
             commit_sha: Some("aaa1111".to_string()),
@@ -2476,10 +2485,11 @@ mod tests {
             weight: 0,
             installed_at: None,
         };
-        db.add_plugin(&plugin_v1, "v1 code").await.unwrap();
+        let id1 = db.add_plugin(&plugin_v1, "v1 code").await.unwrap();
 
         let plugin_v2 = PluginEntry {
-            name: "exa".to_string(),
+            id: "placeholder".to_string(),
+            source: None,
             hosts: vec!["api.exa.ai".to_string(), "new.exa.ai".to_string()],
             credential_schema: vec!["api_key".to_string(), "secret".to_string()],
             commit_sha: Some("bbb2222".to_string()),
@@ -2487,21 +2497,25 @@ mod tests {
             weight: 0,
             installed_at: None,
         };
-        db.add_plugin(&plugin_v2, "v2 code").await.unwrap();
+        let id2 = db.add_plugin(&plugin_v2, "v2 code").await.unwrap();
 
-        // get_plugin should return v2 metadata
-        let got = db.get_plugin("exa").await.unwrap().unwrap();
-        assert_eq!(got.hosts, vec!["api.exa.ai", "new.exa.ai"]);
-        assert_eq!(got.credential_schema, vec!["api_key", "secret"]);
-        assert_eq!(got.commit_sha, Some("bbb2222".to_string()));
+        // Each add_plugin generates a unique UUID, so both plugins exist independently
+        let got1 = db.get_plugin(&id1).await.unwrap().unwrap();
+        assert_eq!(got1.hosts, vec!["api.exa.ai"]);
+        assert_eq!(got1.commit_sha, Some("aaa1111".to_string()));
 
-        // get_plugin_source should return v2 code
-        let src = db.get_plugin_source("exa").await.unwrap().unwrap();
-        assert_eq!(src, "v2 code");
+        let got2 = db.get_plugin(&id2).await.unwrap().unwrap();
+        assert_eq!(got2.hosts, vec!["api.exa.ai", "new.exa.ai"]);
+        assert_eq!(got2.credential_schema, vec!["api_key", "secret"]);
+        assert_eq!(got2.commit_sha, Some("bbb2222".to_string()));
 
-        // list should still show only one entry for "exa"
+        // get_plugin_source should return respective code
+        let src2 = db.get_plugin_source(&id2).await.unwrap().unwrap();
+        assert_eq!(src2, "v2 code");
+
+        // list should show both plugins (each has a unique ID)
         let plugins = db.list_plugins().await.unwrap();
-        assert_eq!(plugins.len(), 1);
+        assert_eq!(plugins.len(), 2);
     }
 
     #[tokio::test]
@@ -2510,7 +2524,8 @@ mod tests {
 
         // Plugin with dangerously_permit_http = true
         let plugin = PluginEntry {
-            name: "http-plugin".to_string(),
+            id: "placeholder".to_string(),
+            source: None,
             hosts: vec!["api.example.com".to_string()],
             credential_schema: vec!["api_key".to_string()],
             commit_sha: None,
@@ -2518,9 +2533,9 @@ mod tests {
             weight: 0,
             installed_at: None,
         };
-        db.add_plugin(&plugin, "src").await.unwrap();
+        let id = db.add_plugin(&plugin, "src").await.unwrap();
 
-        let got = db.get_plugin("http-plugin").await.unwrap().unwrap();
+        let got = db.get_plugin(&id).await.unwrap().unwrap();
         assert!(got.dangerously_permit_http, "dangerously_permit_http should be true");
     }
 
@@ -2529,10 +2544,10 @@ mod tests {
         let db = GapDatabase::in_memory().await.unwrap();
 
         // Plugin without dangerously_permit_http (default false)
-        let plugin = sample_plugin("safe-plugin");
-        db.add_plugin(&plugin, "src").await.unwrap();
+        let plugin = sample_plugin("placeholder");
+        let id = db.add_plugin(&plugin, "src").await.unwrap();
 
-        let got = db.get_plugin("safe-plugin").await.unwrap().unwrap();
+        let got = db.get_plugin(&id).await.unwrap().unwrap();
         assert!(!got.dangerously_permit_http, "dangerously_permit_http should default to false");
     }
 
@@ -2541,7 +2556,8 @@ mod tests {
         let db = GapDatabase::in_memory().await.unwrap();
 
         let plugin = PluginEntry {
-            name: "http-list-test".to_string(),
+            id: "placeholder".to_string(),
+            source: None,
             hosts: vec!["api.example.com".to_string()],
             credential_schema: vec!["api_key".to_string()],
             commit_sha: None,
@@ -2569,7 +2585,7 @@ mod tests {
             url: "https://unknown.host.com/data".to_string(),
             agent_id: Some("agent-1".to_string()),
             status: 0,
-            plugin_name: None,
+            plugin_id: None,
             plugin_sha: None,
             source_hash: None,
             request_headers: None,
@@ -2887,49 +2903,49 @@ mod tests {
         let db = GapDatabase::in_memory().await.unwrap();
 
         // Create a header set
-        db.add_header_set("my-headers", &["api.example.com".to_string()], 10)
+        let id = db.add_header_set(&["api.example.com".to_string()], 10)
             .await
             .unwrap();
 
         // Get it back
-        let hs = db.get_header_set("my-headers").await.unwrap().unwrap();
-        assert_eq!(hs.name, "my-headers");
+        let hs = db.get_header_set(&id).await.unwrap().unwrap();
+        assert_eq!(hs.id, id);
         assert_eq!(hs.match_patterns, vec!["api.example.com".to_string()]);
         assert_eq!(hs.weight, 10);
 
         // List should contain it
         let all = db.list_header_sets().await.unwrap();
         assert_eq!(all.len(), 1);
-        assert_eq!(all[0].name, "my-headers");
+        assert_eq!(all[0].id, id);
 
         // Update patterns
         db.update_header_set(
-            "my-headers",
+            &id,
             Some(&["api.example.com".to_string(), "*.example.org".to_string()]),
             None,
         )
         .await
         .unwrap();
-        let hs = db.get_header_set("my-headers").await.unwrap().unwrap();
+        let hs = db.get_header_set(&id).await.unwrap().unwrap();
         assert_eq!(hs.match_patterns.len(), 2);
 
         // Update weight
-        db.update_header_set("my-headers", None, Some(20))
+        db.update_header_set(&id, None, Some(20))
             .await
             .unwrap();
-        let hs = db.get_header_set("my-headers").await.unwrap().unwrap();
+        let hs = db.get_header_set(&id).await.unwrap().unwrap();
         assert_eq!(hs.weight, 20);
 
         // Soft delete
-        db.remove_header_set("my-headers").await.unwrap();
-        assert!(db.get_header_set("my-headers").await.unwrap().is_none());
+        db.remove_header_set(&id).await.unwrap();
+        assert!(db.get_header_set(&id).await.unwrap().is_none());
         assert_eq!(db.list_header_sets().await.unwrap().len(), 0);
 
-        // Re-create (upsert revives deleted set)
-        db.add_header_set("my-headers", &["new.example.com".to_string()], 5)
+        // Re-create gets a new UUID (no upsert with UUIDs)
+        let id2 = db.add_header_set(&["new.example.com".to_string()], 5)
             .await
             .unwrap();
-        let hs = db.get_header_set("my-headers").await.unwrap().unwrap();
+        let hs = db.get_header_set(&id2).await.unwrap().unwrap();
         assert_eq!(hs.match_patterns, vec!["new.example.com".to_string()]);
         assert_eq!(hs.weight, 5);
     }
@@ -2939,27 +2955,27 @@ mod tests {
         let db = GapDatabase::in_memory().await.unwrap();
 
         // Create a header set
-        db.add_header_set("auth-headers", &["api.example.com".to_string()], 0)
+        let id = db.add_header_set(&["api.example.com".to_string()], 0)
             .await
             .unwrap();
 
         // Set some headers
-        db.set_header_set_header("auth-headers", "Authorization", "Bearer token123")
+        db.set_header_set_header(&id, "Authorization", "Bearer token123")
             .await
             .unwrap();
-        db.set_header_set_header("auth-headers", "X-Custom", "value1")
+        db.set_header_set_header(&id, "X-Custom", "value1")
             .await
             .unwrap();
 
         // Get headers with values
-        let headers = db.get_header_set_headers("auth-headers").await.unwrap();
+        let headers = db.get_header_set_headers(&id).await.unwrap();
         assert_eq!(headers.len(), 2);
         assert_eq!(headers.get("Authorization").unwrap(), "Bearer token123");
         assert_eq!(headers.get("X-Custom").unwrap(), "value1");
 
         // List header names
         let names = db
-            .list_header_set_header_names("auth-headers")
+            .list_header_set_header_names(&id)
             .await
             .unwrap();
         assert_eq!(names.len(), 2);
@@ -2967,19 +2983,19 @@ mod tests {
         assert!(names.contains(&"X-Custom".to_string()));
 
         // Remove one header
-        db.remove_header_set_header("auth-headers", "X-Custom")
+        db.remove_header_set_header(&id, "X-Custom")
             .await
             .unwrap();
         let names = db
-            .list_header_set_header_names("auth-headers")
+            .list_header_set_header_names(&id)
             .await
             .unwrap();
         assert_eq!(names.len(), 1);
         assert_eq!(names[0], "Authorization");
 
         // Cascade on header set delete: removing the header set should also remove headers
-        db.remove_header_set("auth-headers").await.unwrap();
-        let headers = db.get_header_set_headers("auth-headers").await.unwrap();
+        db.remove_header_set(&id).await.unwrap();
+        let headers = db.get_header_set_headers(&id).await.unwrap();
         assert!(headers.is_empty());
     }
 
@@ -2988,18 +3004,18 @@ mod tests {
         let db = GapDatabase::in_memory().await.unwrap();
 
         // Add plugin with default weight=0
-        let plugin = sample_plugin("weighted-plugin");
-        db.add_plugin(&plugin, "src").await.unwrap();
+        let plugin = sample_plugin("placeholder");
+        let id = db.add_plugin(&plugin, "src").await.unwrap();
 
-        let got = db.get_plugin("weighted-plugin").await.unwrap().unwrap();
+        let got = db.get_plugin(&id).await.unwrap().unwrap();
         assert_eq!(got.weight, 0);
 
         // Update weight
-        db.update_plugin_weight("weighted-plugin", 42).await.unwrap();
+        db.update_plugin_weight(&id, 42).await.unwrap();
 
         // Verify via list_plugins
         let plugins = db.list_plugins().await.unwrap();
-        let p = plugins.iter().find(|p| p.name == "weighted-plugin").unwrap();
+        let p = plugins.iter().find(|p| p.id == id).unwrap();
         assert_eq!(p.weight, 42);
     }
 
@@ -3007,10 +3023,10 @@ mod tests {
     async fn test_plugin_installed_at() {
         let db = GapDatabase::in_memory().await.unwrap();
 
-        let plugin = sample_plugin("timestamped-plugin");
-        db.add_plugin(&plugin, "src").await.unwrap();
+        let plugin = sample_plugin("placeholder");
+        let id = db.add_plugin(&plugin, "src").await.unwrap();
 
-        let got = db.get_plugin("timestamped-plugin").await.unwrap().unwrap();
+        let got = db.get_plugin(&id).await.unwrap().unwrap();
         assert!(
             got.installed_at.is_some(),
             "installed_at should be populated from DB"
