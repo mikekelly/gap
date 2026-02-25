@@ -710,7 +710,7 @@ where
                                 url: url_err,
                                 agent_id: Some(token_prefix_err),
                                 status: 0,
-                                plugin_name: None,
+                                plugin_id: None,
                                 plugin_sha: None,
                                 source_hash: None,
                                 request_headers: None,
@@ -790,7 +790,7 @@ where
                         url,
                         agent_id: Some(token_prefix_log),
                         status,
-                        plugin_name: Some(plugin_info.name),
+                        plugin_id: Some(plugin_info.id),
                         plugin_sha: plugin_info.commit_sha,
                         source_hash: plugin_info.source_hash,
                         request_headers: plugin_info.scrubbed_headers.clone(),
@@ -913,7 +913,7 @@ where
                                 url: url_err,
                                 agent_id: Some(token_prefix_err),
                                 status: 0,
-                                plugin_name: None,
+                                plugin_id: None,
                                 plugin_sha: None,
                                 source_hash: None,
                                 request_headers: None,
@@ -994,7 +994,7 @@ where
                         url,
                         agent_id: Some(token_prefix_log),
                         status,
-                        plugin_name: Some(plugin_info.name),
+                        plugin_id: Some(plugin_info.id),
                         plugin_sha: plugin_info.commit_sha,
                         source_hash: plugin_info.source_hash,
                         request_headers: plugin_info.scrubbed_headers.clone(),
@@ -1373,7 +1373,8 @@ mod tests {
         };
         "#;
         let plugin_entry = PluginEntry {
-            name: "test-hyper".to_string(),
+            id: "test-hyper".to_string(),
+            source: None,
             hosts: vec!["api.test.com".to_string()],
             credential_schema: vec!["api_key".to_string()],
             commit_sha: None,
@@ -1381,8 +1382,8 @@ mod tests {
             weight: 0,
             installed_at: None,
         };
-        db.add_plugin(&plugin_entry, plugin_code).await.unwrap();
-        db.set_credential("test-hyper", "api_key", "my-secret-key").await.unwrap();
+        let plugin_id = db.add_plugin(&plugin_entry, plugin_code).await.unwrap();
+        db.set_credential(&plugin_id, "api_key", "my-secret-key").await.unwrap();
 
         // -- Create paired DuplexStreams --
         // Agent side: agent_client writes HTTP requests, proxy reads them
@@ -1468,7 +1469,7 @@ mod tests {
         assert_eq!(activity[0].url, "https://api.test.com/data?q=test");
         assert_eq!(activity[0].agent_id, Some("test-agent".to_string()));
         assert_eq!(activity[0].status, 200);
-        assert_eq!(activity[0].plugin_name, Some("test-hyper".to_string()));
+        assert_eq!(activity[0].plugin_id, Some(plugin_id));
         assert_eq!(activity[0].plugin_sha, None);
 
         // Verify scrubbed request headers were logged
@@ -1529,7 +1530,8 @@ mod tests {
         };
         "#;
         let plugin_entry = PluginEntry {
-            name: "test-http".to_string(),
+            id: "test-http".to_string(),
+            source: None,
             hosts: vec!["api.httptest.com".to_string()],
             credential_schema: vec!["api_key".to_string()],
             commit_sha: None,
@@ -1537,8 +1539,8 @@ mod tests {
             weight: 0,
             installed_at: None,
         };
-        db.add_plugin(&plugin_entry, plugin_code).await.unwrap();
-        db.set_credential("test-http", "api_key", "http-secret").await.unwrap();
+        let plugin_id_http = db.add_plugin(&plugin_entry, plugin_code).await.unwrap();
+        db.set_credential(&plugin_id_http, "api_key", "http-secret").await.unwrap();
 
         // -- Create paired DuplexStreams --
         let (agent_client, agent_proxy) = tokio::io::duplex(8192);
@@ -1646,7 +1648,8 @@ mod tests {
         };
         "#;
         let plugin_entry = PluginEntry {
-            name: "test-details".to_string(),
+            id: "test-details".to_string(),
+            source: None,
             hosts: vec!["api.details.com".to_string()],
             credential_schema: vec!["api_key".to_string()],
             commit_sha: None,
@@ -1654,8 +1657,8 @@ mod tests {
             weight: 0,
             installed_at: None,
         };
-        db.add_plugin(&plugin_entry, plugin_code).await.unwrap();
-        db.set_credential("test-details", "api_key", "secret-key-456").await.unwrap();
+        let plugin_id_details = db.add_plugin(&plugin_entry, plugin_code).await.unwrap();
+        db.set_credential(&plugin_id_details, "api_key", "secret-key-456").await.unwrap();
 
         let (agent_client, agent_proxy) = tokio::io::duplex(8192);
         let (upstream_proxy, upstream_server) = tokio::io::duplex(8192);
