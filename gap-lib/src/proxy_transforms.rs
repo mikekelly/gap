@@ -33,7 +33,7 @@ async fn load_plugin_credentials(
 /// Plugin info returned alongside the transformed request
 #[derive(Debug)]
 pub struct PluginInfo {
-    pub name: String,
+    pub id: String,
     pub commit_sha: Option<String>,
     pub source_hash: Option<String>,
     /// JSON string of post-transform request headers with credential values scrubbed
@@ -242,7 +242,7 @@ pub async fn transform_request(
         MatchResult::Plugin(plugin) => {
             debug!(
                 "Found matching plugin: {} (sha: {})",
-                plugin.name,
+                plugin.id,
                 plugin.commit_sha.as_deref().unwrap_or("unknown")
             );
 
@@ -251,42 +251,42 @@ pub async fn transform_request(
                 warn!(
                     "BLOCKED: Plugin {} does not permit HTTP - credentials would be sent in plaintext. \
                      Set dangerously_permit_http: true in plugin manifest to allow.",
-                    plugin.name
+                    plugin.id
                 );
                 return Err(GapError::auth(format!(
                     "Plugin '{}' does not permit credential injection over plain HTTP. \
                      Set dangerously_permit_http: true in the plugin manifest to allow.",
-                    plugin.name
+                    plugin.id
                 )));
             }
 
             // Load credentials for the plugin
-            let credentials = load_plugin_credentials(&plugin.name, db).await?;
+            let credentials = load_plugin_credentials(&plugin.id, db).await?;
 
             // SECURITY: Only allow connections when credentials are configured
             if credentials.credentials.is_empty() {
                 warn!(
                     "BLOCKED: Plugin {} has no credentials configured - not allowed",
-                    plugin.name
+                    plugin.id
                 );
                 return Err(GapError::auth(format!(
                     "Host '{}' is not allowed: plugin '{}' has no credentials configured",
-                    hostname, plugin.name
+                    hostname, plugin.id
                 )));
             }
 
-            debug!("Loaded {} credential fields for plugin {}", credentials.credentials.len(), plugin.name);
+            debug!("Loaded {} credential fields for plugin {}", credentials.credentials.len(), plugin.id);
 
             // Load plugin code from database
-            let plugin_code = db.get_plugin_source(&plugin.name).await?
-                .ok_or_else(|| GapError::plugin(format!("Plugin code not found for {}", plugin.name)))?;
+            let plugin_code = db.get_plugin_source(&plugin.id).await?
+                .ok_or_else(|| GapError::plugin(format!("Plugin code not found for {}", plugin.id)))?;
 
             // Execute transform
             // CRITICAL: Scope the PluginRuntime to ensure it's dropped before any await
             let transformed_request = {
                 let mut runtime = PluginRuntime::new()?;
-                runtime.load_plugin_from_code(&plugin.name, &plugin_code)?;
-                runtime.execute_transform(&plugin.name, request, &credentials)?
+                runtime.load_plugin_from_code(&plugin.id, &plugin_code)?;
+                runtime.execute_transform(&plugin.id, request, &credentials)?
             };
 
             debug!("Transform executed successfully");
@@ -295,7 +295,7 @@ pub async fn transform_request(
             let scrubbed = scrub_headers(&transformed_request, &credentials.credentials);
 
             let plugin_info = PluginInfo {
-                name: plugin.name.clone(),
+                id: plugin.id.clone(),
                 commit_sha: plugin.commit_sha.clone(),
                 source_hash: plugin.source_hash.clone(),
                 scrubbed_headers: Some(scrubbed),
@@ -305,35 +305,35 @@ pub async fn transform_request(
             Ok((transformed_request, plugin_info))
         }
         MatchResult::HeaderSet(header_set) => {
-            debug!("Found matching header set: {}", header_set.name);
+            debug!("Found matching header set: {}", header_set.id);
 
             // SECURITY: HeaderSets always require TLS.
             if !use_tls {
                 warn!(
                     "BLOCKED: Header set '{}' does not permit header injection over plain HTTP",
-                    header_set.name
+                    header_set.id
                 );
                 return Err(GapError::auth(format!(
                     "Header set '{}' does not permit header injection over plain HTTP",
-                    header_set.name
+                    header_set.id
                 )));
             }
 
             // Load headers for this set
-            let header_values = db.get_header_set_headers(&header_set.name).await?;
+            let header_values = db.get_header_set_headers(&header_set.id).await?;
 
             if header_values.is_empty() {
                 warn!(
                     "BLOCKED: Header set '{}' has no headers configured",
-                    header_set.name
+                    header_set.id
                 );
                 return Err(GapError::auth(format!(
                     "header set '{}' has no headers configured",
-                    header_set.name
+                    header_set.id
                 )));
             }
 
-            debug!("Loaded {} headers for header set {}", header_values.len(), header_set.name);
+            debug!("Loaded {} headers for header set {}", header_values.len(), header_set.id);
 
             // Inject headers into request (overwrite if exists)
             let mut modified_request = request;
@@ -345,7 +345,7 @@ pub async fn transform_request(
             let scrubbed = scrub_headers(&modified_request, &header_values);
 
             let plugin_info = PluginInfo {
-                name: header_set.name,
+                id: header_set.id,
                 commit_sha: None,
                 source_hash: None,
                 scrubbed_headers: Some(scrubbed),
@@ -434,7 +434,8 @@ mod tests {
         };
         "#;
         let plugin_entry = PluginEntry {
-            name: "test-api".to_string(),
+            id: "test-api".to_string(),
+            source: None,
             hosts: vec!["api.test.com".to_string()],
             credential_schema: vec!["api_key".to_string()],
             commit_sha: None,
@@ -467,7 +468,7 @@ mod tests {
         assert_eq!(result.method, "GET");
         assert_eq!(result.url, "https://api.test.com/data");
         // Plugin info should be populated
-        assert_eq!(plugin_info.name, "test-api");
+        assert_eq!(plugin_info.id, "test-api");
     }
 
     #[tokio::test]
@@ -496,7 +497,8 @@ mod tests {
         };
         "#;
         let plugin_entry = PluginEntry {
-            name: "no-creds".to_string(),
+            id: "no-creds".to_string(),
+            source: None,
             hosts: vec!["api.nocreds.com".to_string()],
             credential_schema: vec!["api_key".to_string()],
             commit_sha: None,
@@ -709,7 +711,8 @@ mod tests {
         };
         "#;
         let plugin_entry = PluginEntry {
-            name: "http-ok".to_string(),
+            id: "http-ok".to_string(),
+            source: None,
             hosts: vec!["api.httpok.com".to_string()],
             credential_schema: vec!["api_key".to_string()],
             commit_sha: None,
@@ -732,7 +735,7 @@ mod tests {
             result.get_header("Authorization"),
             Some(&"Bearer http-secret".to_string())
         );
-        assert_eq!(plugin_info.name, "http-ok");
+        assert_eq!(plugin_info.id, "http-ok");
     }
 
     #[tokio::test]
@@ -910,7 +913,7 @@ mod tests {
         // Original headers preserved
         assert_eq!(result.get_header("Host"), Some(&"api.hs.com".to_string()));
         // Plugin info should identify the header set
-        assert_eq!(plugin_info.name, "test-hs");
+        assert_eq!(plugin_info.id, "test-hs");
         assert!(plugin_info.commit_sha.is_none());
         assert!(plugin_info.source_hash.is_none());
     }

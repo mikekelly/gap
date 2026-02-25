@@ -1363,6 +1363,7 @@ dependencies = [
  "tokio",
  "tokio-rustls 0.26.4",
  "tracing",
+ "uuid",
  "webpki-roots 0.26.11",
  "x509-parser",
 ]

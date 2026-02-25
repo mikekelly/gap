@@ -100,8 +100,8 @@ impl GAPCredentials {
 /// Describes a JavaScript plugin that transforms requests for specific hosts.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct GAPPlugin {
-    /// Unique plugin name (e.g., "exa", "aws-s3")
-    pub name: String,
+    /// Unique plugin identifier (e.g., "exa", "aws-s3")
+    pub id: String,
     /// Host patterns to match (supports wildcards like "*.s3.amazonaws.com")
     pub match_patterns: Vec<String>,
     /// Required credential keys (e.g., ["api_key"], ["access_key_id", "secret_access_key"])
@@ -125,13 +125,13 @@ pub struct GAPPlugin {
 impl GAPPlugin {
     /// Create a new plugin
     pub fn new(
-        name: impl Into<String>,
+        id: impl Into<String>,
         match_patterns: Vec<String>,
         credential_schema: Vec<String>,
         transform: impl Into<String>,
     ) -> Self {
         Self {
-            name: name.into(),
+            id: id.into(),
             match_patterns,
             credential_schema,
             transform: transform.into(),
@@ -407,8 +407,8 @@ pub struct ActivityEntry {
     pub url: String,
     pub agent_id: Option<String>,
     pub status: u16,
-    /// Name of the plugin that handled this request
-    pub plugin_name: Option<String>,
+    /// ID of the plugin that handled this request
+    pub plugin_id: Option<String>,
     /// Git commit SHA of the plugin that handled this request
     pub plugin_sha: Option<String>,
     /// SHA-256 hash of the plugin source code that handled this request
@@ -448,8 +448,8 @@ pub struct ActivityFilter {
     pub domain: Option<String>,
     /// Filter by URL path prefix (LIKE match)
     pub path: Option<String>,
-    /// Filter by plugin name (exact match)
-    pub plugin: Option<String>,
+    /// Filter by plugin ID (exact match)
+    pub plugin_id: Option<String>,
     /// Filter by agent ID (exact match)
     pub agent: Option<String>,
     /// Filter by HTTP method (exact match)
@@ -512,10 +512,12 @@ pub struct TokenEntry {
     pub revoked_at: Option<DateTime<Utc>>,
 }
 
-/// Plugin metadata entry (name, hosts, credential schema, optional commit SHA)
+/// Plugin metadata entry (id, hosts, credential schema, optional commit SHA)
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct PluginEntry {
-    pub name: String,
+    pub id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<String>,
     pub hosts: Vec<String>,
     pub credential_schema: Vec<String>,
     /// Git commit SHA (short) of the installed version
@@ -532,10 +534,10 @@ pub struct PluginEntry {
     pub installed_at: Option<DateTime<Utc>>,
 }
 
-/// Credential metadata entry (plugin + field name, no value)
+/// Credential metadata entry (plugin_id + field name, no value)
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct CredentialEntry {
-    pub plugin: String,
+    pub plugin_id: String,
     pub field: String,
 }
 
@@ -545,7 +547,7 @@ pub struct CredentialEntry {
 /// useful for simple API-key-in-header patterns.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct HeaderSet {
-    pub name: String,
+    pub id: String,
     pub match_patterns: Vec<String>,
     pub weight: i32,
     pub created_at: DateTime<Utc>,
@@ -554,7 +556,7 @@ pub struct HeaderSet {
 /// Append-only record of every plugin version ever installed
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PluginVersion {
-    pub plugin_name: String,
+    pub plugin_id: String,
     pub commit_sha: Option<String>,
     pub source_hash: String,
     pub source_code: String,
