@@ -32,7 +32,8 @@ async fn test_parse_and_transform_with_multi_field_credentials() {
     "#;
 
     let plugin_entry = PluginEntry {
-        name: "multi-cred-api".to_string(),
+        id: "multi-cred-api".to_string(),
+        source: None,
         hosts: vec!["api.multicred.com".to_string()],
         credential_schema: vec!["access_key".to_string(), "secret_key".to_string(), "region".to_string()],
         commit_sha: None,
@@ -40,12 +41,12 @@ async fn test_parse_and_transform_with_multi_field_credentials() {
         weight: 0,
         installed_at: None,
     };
-    db.add_plugin(&plugin_entry, plugin_code).await.unwrap();
+    let plugin_id = db.add_plugin(&plugin_entry, plugin_code).await.unwrap();
 
     // Set credentials directly in database
-    db.set_credential("multi-cred-api", "access_key", "AKIAIOSFODNN7EXAMPLE").await.unwrap();
-    db.set_credential("multi-cred-api", "secret_key", "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY").await.unwrap();
-    db.set_credential("multi-cred-api", "region", "us-west-2").await.unwrap();
+    db.set_credential(&plugin_id, "access_key", "AKIAIOSFODNN7EXAMPLE").await.unwrap();
+    db.set_credential(&plugin_id, "secret_key", "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY").await.unwrap();
+    db.set_credential(&plugin_id, "region", "us-west-2").await.unwrap();
 
     // Simulate an incoming HTTP request
     let raw_http = b"GET /api/data HTTP/1.1\r\nHost: api.multicred.com\r\nUser-Agent: TestAgent/1.0\r\n\r\n";
@@ -83,7 +84,8 @@ async fn test_parse_and_transform_with_single_field_credential() {
     "#;
 
     let plugin_entry = PluginEntry {
-        name: "simple-api".to_string(),
+        id: "simple-api".to_string(),
+        source: None,
         hosts: vec!["api.simple.com".to_string()],
         credential_schema: vec!["api_key".to_string()],
         commit_sha: None,
@@ -91,10 +93,10 @@ async fn test_parse_and_transform_with_single_field_credential() {
         weight: 0,
         installed_at: None,
     };
-    db.add_plugin(&plugin_entry, plugin_code).await.unwrap();
+    let plugin_id = db.add_plugin(&plugin_entry, plugin_code).await.unwrap();
 
     // Set credential directly in database
-    db.set_credential("simple-api", "api_key", "secret-api-key-123").await.unwrap();
+    db.set_credential(&plugin_id, "api_key", "secret-api-key-123").await.unwrap();
 
     // Simulate an incoming HTTP request
     let raw_http = b"GET /api/data HTTP/1.1\r\nHost: api.simple.com\r\n\r\n";
@@ -153,7 +155,8 @@ async fn test_parse_and_transform_rejects_missing_credentials() {
     "#;
 
     let plugin_entry = PluginEntry {
-        name: "no-creds-api".to_string(),
+        id: "no-creds-api".to_string(),
+        source: None,
         hosts: vec!["api.nocreds.com".to_string()],
         credential_schema: vec!["api_key".to_string()],
         commit_sha: None,

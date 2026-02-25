@@ -241,7 +241,8 @@ async fn test_plugin_installation_flow() {
 
     // Install plugin to database
     let plugin_entry = PluginEntry {
-        name: "test-service".to_string(),
+        id: "test-service".to_string(),
+        source: None,
         hosts: vec!["api.test.com".to_string()],
         credential_schema: vec!["api_key".to_string()],
         commit_sha: None,
@@ -249,24 +250,24 @@ async fn test_plugin_installation_flow() {
         weight: 0,
         installed_at: None,
     };
-    db.add_plugin(&plugin_entry, plugin_code)
+    let plugin_id = db.add_plugin(&plugin_entry, plugin_code)
         .await
         .expect("Failed to install plugin");
 
     // Verify plugin can be loaded
     let mut runtime = PluginRuntime::new().expect("Failed to create runtime");
     let plugin = runtime
-        .load_plugin("test-service", &db)
+        .load_plugin(&plugin_id, &db)
         .await
         .expect("Failed to load plugin");
 
     // Verify plugin metadata
-    assert_eq!(plugin.name, "test-service");
+    assert_eq!(plugin.id, plugin_id);
     assert_eq!(plugin.match_patterns, vec!["api.test.com"]);
     assert_eq!(plugin.credential_schema, vec!["api_key"]);
 
     // Verify plugin can be retrieved from database
-    let retrieved = db.get_plugin_source("test-service").await.expect("Failed to get plugin");
+    let retrieved = db.get_plugin_source(&plugin_id).await.expect("Failed to get plugin");
     assert!(retrieved.is_some());
 }
 

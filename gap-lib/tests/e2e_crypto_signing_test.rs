@@ -106,7 +106,8 @@ async fn setup_test_db(pkcs8_b64: &str, key_id: &str) -> (Arc<GapDatabase>, Stri
     );
 
     let plugin_entry = PluginEntry {
-        name: "signing-test".to_string(),
+        id: "signing-test".to_string(),
+        source: None,
         hosts: vec!["localhost".to_string()],
         credential_schema: vec!["private_key".to_string(), "key_id".to_string()],
         commit_sha: None,
@@ -114,14 +115,14 @@ async fn setup_test_db(pkcs8_b64: &str, key_id: &str) -> (Arc<GapDatabase>, Stri
         weight: 0,
         installed_at: None,
     };
-    db.add_plugin(&plugin_entry, SIGNING_PLUGIN_CODE)
+    let plugin_id = db.add_plugin(&plugin_entry, SIGNING_PLUGIN_CODE)
         .await
         .expect("store plugin");
 
-    db.set_credential("signing-test", "private_key", pkcs8_b64)
+    db.set_credential(&plugin_id, "private_key", pkcs8_b64)
         .await
         .expect("set private_key credential");
-    db.set_credential("signing-test", "key_id", key_id)
+    db.set_credential(&plugin_id, "key_id", key_id)
         .await
         .expect("set key_id credential");
 

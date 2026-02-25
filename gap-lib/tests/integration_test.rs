@@ -33,7 +33,8 @@ async fn test_full_plugin_pipeline() {
 
     // Store the plugin in the database
     let plugin_entry = PluginEntry {
-        name: "test-api".to_string(),
+        id: "test-api".to_string(),
+        source: None,
         hosts: vec!["api.example.com".to_string()],
         credential_schema: vec!["api_key".to_string()],
         commit_sha: None,
@@ -41,16 +42,16 @@ async fn test_full_plugin_pipeline() {
         weight: 0,
         installed_at: None,
     };
-    db.add_plugin(&plugin_entry, &plugin_code).await.unwrap();
+    let plugin_id = db.add_plugin(&plugin_entry, &plugin_code).await.unwrap();
 
     // Create PluginRuntime
     let mut runtime = PluginRuntime::new().unwrap();
 
     // Load the plugin
-    let plugin = runtime.load_plugin("test-api", &db).await.unwrap();
+    let plugin = runtime.load_plugin(&plugin_id, &db).await.unwrap();
 
     // Verify plugin metadata
-    assert_eq!(plugin.name, "test-api");
+    assert_eq!(plugin.id, plugin_id);
     assert_eq!(plugin.match_patterns, vec!["api.example.com"]);
     assert_eq!(plugin.credential_schema, vec!["api_key"]);
     assert!(plugin.matches_host("api.example.com"));
@@ -66,7 +67,7 @@ async fn test_full_plugin_pipeline() {
 
     // Execute the transform
     let transformed = runtime
-        .execute_transform("test-api", request.clone(), &credentials)
+        .execute_transform(&plugin_id, request.clone(), &credentials)
         .unwrap();
 
     // Verify the transform worked
@@ -114,7 +115,8 @@ async fn test_multiple_plugins() {
     "#;
 
     let entry_a = PluginEntry {
-        name: "service-a".to_string(),
+        id: "service-a".to_string(),
+        source: None,
         hosts: vec!["service-a.example.com".to_string()],
         credential_schema: vec!["token".to_string()],
         commit_sha: None,
@@ -122,10 +124,11 @@ async fn test_multiple_plugins() {
         weight: 0,
         installed_at: None,
     };
-    db.add_plugin(&entry_a, plugin1_code).await.unwrap();
+    let plugin_a_id = db.add_plugin(&entry_a, plugin1_code).await.unwrap();
 
     let entry_b = PluginEntry {
-        name: "service-b".to_string(),
+        id: "service-b".to_string(),
+        source: None,
         hosts: vec!["service-b.example.com".to_string()],
         credential_schema: vec!["api_key".to_string(), "secret".to_string()],
         commit_sha: None,
@@ -133,16 +136,16 @@ async fn test_multiple_plugins() {
         weight: 0,
         installed_at: None,
     };
-    db.add_plugin(&entry_b, plugin2_code).await.unwrap();
+    let plugin_b_id = db.add_plugin(&entry_b, plugin2_code).await.unwrap();
 
     let mut runtime = PluginRuntime::new().unwrap();
 
     // Load both plugins
-    let plugin_a = runtime.load_plugin("service-a", &db).await.unwrap();
-    let plugin_b = runtime.load_plugin("service-b", &db).await.unwrap();
+    let plugin_a = runtime.load_plugin(&plugin_a_id, &db).await.unwrap();
+    let plugin_b = runtime.load_plugin(&plugin_b_id, &db).await.unwrap();
 
-    assert_eq!(plugin_a.name, "service-a");
-    assert_eq!(plugin_b.name, "service-b");
+    assert_eq!(plugin_a.id, plugin_a_id);
+    assert_eq!(plugin_b.id, plugin_b_id);
     assert_eq!(plugin_a.credential_schema, vec!["token"]);
     assert_eq!(plugin_b.credential_schema, vec!["api_key", "secret"]);
 
@@ -155,7 +158,7 @@ async fn test_multiple_plugins() {
     creds_b.set("secret", "secret_789");
 
     let transformed_b = runtime
-        .execute_transform("service-b", request_b, &creds_b)
+        .execute_transform(&plugin_b_id, request_b, &creds_b)
         .unwrap();
     assert_eq!(
         transformed_b.get_header("X-API-Key"),
@@ -192,7 +195,8 @@ async fn test_plugin_with_multiple_credentials() {
     "#;
 
     let plugin_entry = PluginEntry {
-        name: "aws-like".to_string(),
+        id: "aws-like".to_string(),
+        source: None,
         hosts: vec!["*.s3.amazonaws.com".to_string()],
         credential_schema: vec![
             "access_key_id".to_string(),
@@ -204,10 +208,10 @@ async fn test_plugin_with_multiple_credentials() {
         weight: 0,
         installed_at: None,
     };
-    db.add_plugin(&plugin_entry, plugin_code).await.unwrap();
+    let plugin_id = db.add_plugin(&plugin_entry, plugin_code).await.unwrap();
 
     let mut runtime = PluginRuntime::new().unwrap();
-    let plugin = runtime.load_plugin("aws-like", &db).await.unwrap();
+    let plugin = runtime.load_plugin(&plugin_id, &db).await.unwrap();
 
     assert_eq!(plugin.credential_schema.len(), 3);
     assert!(plugin.credential_schema.contains(&"access_key_id".to_string()));
@@ -225,7 +229,7 @@ async fn test_plugin_with_multiple_credentials() {
     creds.set("secret_access_key", "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY");
     creds.set("region", "us-west-2");
 
-    let transformed = runtime.execute_transform("aws-like", request, &creds).unwrap();
+    let transformed = runtime.execute_transform(&plugin_id, request, &creds).unwrap();
 
     assert!(transformed
         .get_header("Authorization")

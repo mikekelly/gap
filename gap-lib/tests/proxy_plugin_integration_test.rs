@@ -105,7 +105,8 @@ async fn test_find_matching_plugin() {
     "#;
 
     let entry1 = PluginEntry {
-        name: "exa-plugin".to_string(),
+        id: "exa-plugin".to_string(),
+        source: None,
         hosts: vec!["api.exa.ai".to_string()],
         credential_schema: vec!["api_key".to_string()],
         commit_sha: None,
@@ -113,10 +114,11 @@ async fn test_find_matching_plugin() {
         weight: 0,
         installed_at: None,
     };
-    db.add_plugin(&entry1, plugin1_code).await.unwrap();
+    let exa_plugin_id = db.add_plugin(&entry1, plugin1_code).await.unwrap();
 
     let entry2 = PluginEntry {
-        name: "s3-plugin".to_string(),
+        id: "s3-plugin".to_string(),
+        source: None,
         hosts: vec!["*.s3.amazonaws.com".to_string()],
         credential_schema: vec!["access_key".to_string(), "secret_key".to_string()],
         commit_sha: None,
@@ -124,17 +126,17 @@ async fn test_find_matching_plugin() {
         weight: 0,
         installed_at: None,
     };
-    db.add_plugin(&entry2, plugin2_code).await.unwrap();
+    let s3_plugin_id = db.add_plugin(&entry2, plugin2_code).await.unwrap();
 
     // Find matching plugin for api.exa.ai
     let matching_plugin = find_matching_plugin("api.exa.ai", &db).await.unwrap();
     assert!(matching_plugin.is_some());
-    assert_eq!(matching_plugin.unwrap().name, "exa-plugin");
+    assert_eq!(matching_plugin.unwrap().id, exa_plugin_id);
 
     // Find matching plugin for bucket.s3.amazonaws.com
     let matching_plugin = find_matching_plugin("bucket.s3.amazonaws.com", &db).await.unwrap();
     assert!(matching_plugin.is_some());
-    assert_eq!(matching_plugin.unwrap().name, "s3-plugin");
+    assert_eq!(matching_plugin.unwrap().id, s3_plugin_id);
 
     // No match for unknown host
     let matching_plugin = find_matching_plugin("api.unknown.com", &db).await.unwrap();
@@ -160,7 +162,8 @@ async fn test_proxy_plugin_execution_flow() {
     "#;
 
     let plugin_entry = PluginEntry {
-        name: "test-api".to_string(),
+        id: "test-api".to_string(),
+        source: None,
         hosts: vec!["api.example.com".to_string()],
         credential_schema: vec!["api_key".to_string()],
         commit_sha: None,
@@ -168,10 +171,10 @@ async fn test_proxy_plugin_execution_flow() {
         weight: 0,
         installed_at: None,
     };
-    db.add_plugin(&plugin_entry, plugin_code).await.unwrap();
+    let plugin_id = db.add_plugin(&plugin_entry, plugin_code).await.unwrap();
 
     // Store credentials
-    db.set_credential("test-api", "api_key", "secret123").await.unwrap();
+    db.set_credential(&plugin_id, "api_key", "secret123").await.unwrap();
 
     // Parse incoming HTTP request
     let raw_request = b"GET /v1/users HTTP/1.1\r\nHost: api.example.com\r\nContent-Type: application/json\r\n\r\n";
@@ -183,7 +186,7 @@ async fn test_proxy_plugin_execution_flow() {
     let plugin = plugin.unwrap();
 
     // Load credentials for the plugin
-    let creds_map = db.get_plugin_credentials(&plugin.name).await.unwrap().unwrap();
+    let creds_map = db.get_plugin_credentials(&plugin.id).await.unwrap().unwrap();
     let mut creds = GAPCredentials::new();
     for (field, value) in &creds_map {
         creds.set(field, value);
@@ -191,8 +194,8 @@ async fn test_proxy_plugin_execution_flow() {
 
     // Execute transform
     let mut runtime = PluginRuntime::new().unwrap();
-    runtime.load_plugin(&plugin.name, &db).await.unwrap();
-    let transformed = runtime.execute_transform(&plugin.name, request, &creds).unwrap();
+    runtime.load_plugin(&plugin.id, &db).await.unwrap();
+    let transformed = runtime.execute_transform(&plugin.id, request, &creds).unwrap();
 
     // Verify transformation
     assert_eq!(transformed.get_header("Authorization"), Some(&"Bearer secret123".to_string()));
@@ -228,7 +231,8 @@ async fn test_complete_proxy_transform_pipeline() {
     "#;
 
     let plugin_entry = PluginEntry {
-        name: "test-transform".to_string(),
+        id: "test-transform".to_string(),
+        source: None,
         hosts: vec!["api.test.com".to_string()],
         credential_schema: vec!["secret".to_string()],
         commit_sha: None,
@@ -236,10 +240,10 @@ async fn test_complete_proxy_transform_pipeline() {
         weight: 0,
         installed_at: None,
     };
-    db.add_plugin(&plugin_entry, plugin_code).await.unwrap();
+    let plugin_id = db.add_plugin(&plugin_entry, plugin_code).await.unwrap();
 
     // Set credentials directly in database
-    db.set_credential("test-transform", "secret", "my-secret-value")
+    db.set_credential(&plugin_id, "secret", "my-secret-value")
         .await
         .unwrap();
 

@@ -171,7 +171,8 @@ async fn setup_scoped_db(scopes: Option<&[TokenScope]>) -> (Arc<GapDatabase>, St
 
     // Store plugin
     let plugin_entry = PluginEntry {
-        name: "test-server-gap".to_string(),
+        id: "test-server-gap".to_string(),
+        source: None,
         hosts: vec!["localhost".to_string()],
         credential_schema: vec!["test_credential_one".to_string()],
         commit_sha: None,
@@ -179,12 +180,12 @@ async fn setup_scoped_db(scopes: Option<&[TokenScope]>) -> (Arc<GapDatabase>, St
         weight: 0,
         installed_at: None,
     };
-    db.add_plugin(&plugin_entry, PLUGIN_CODE)
+    let plugin_id = db.add_plugin(&plugin_entry, PLUGIN_CODE)
         .await
         .expect("store plugin");
 
     // Store credential
-    db.set_credential("test-server-gap", "test_credential_one", "secret-value")
+    db.set_credential(&plugin_id, "test_credential_one", "secret-value")
         .await
         .expect("set credential");
 

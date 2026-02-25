@@ -111,7 +111,8 @@ async fn setup_test_db(
     let db = Arc::new(GapDatabase::in_memory().await.expect("create in-memory db"));
 
     let plugin_entry = PluginEntry {
-        name: plugin_name.to_string(),
+        id: plugin_name.to_string(),
+        source: None,
         hosts: vec![match_host.to_string()],
         credential_schema: vec!["api_key".to_string()],
         commit_sha: None,
@@ -119,11 +120,11 @@ async fn setup_test_db(
         weight: 0,
         installed_at: None,
     };
-    db.add_plugin(&plugin_entry, plugin_code)
+    let plugin_id = db.add_plugin(&plugin_entry, plugin_code)
         .await
         .expect("store plugin");
 
-    db.set_credential(plugin_name, "api_key", "test-secret-42")
+    db.set_credential(&plugin_id, "api_key", "test-secret-42")
         .await
         .expect("set credential");
 

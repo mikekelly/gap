@@ -304,13 +304,13 @@ async fn test_e2e_header_set_injection() {
     // Set up DB with header set
     let db = Arc::new(GapDatabase::in_memory().await.expect("create in-memory db"));
 
-    db.add_header_set("test-hs", &["localhost".to_string()], 0)
+    let hs_id = db.add_header_set(&["localhost".to_string()], 0)
         .await
         .expect("add header set");
-    db.set_header_set_header("test-hs", "Authorization", "Bearer test-secret-key")
+    db.set_header_set_header(&hs_id, "Authorization", "Bearer test-secret-key")
         .await
         .expect("set Authorization header");
-    db.set_header_set_header("test-hs", "X-Custom", "my-value")
+    db.set_header_set_header(&hs_id, "X-Custom", "my-value")
         .await
         .expect("set X-Custom header");
 
@@ -377,7 +377,8 @@ async fn test_e2e_header_set_vs_plugin_weight() {
     }
 };"#;
     let plugin_entry = PluginEntry {
-        name: "test-plugin".to_string(),
+        id: "test-plugin".to_string(),
+        source: None,
         hosts: vec!["localhost".to_string()],
         credential_schema: vec!["api_key".to_string()],
         commit_sha: None,
@@ -385,18 +386,18 @@ async fn test_e2e_header_set_vs_plugin_weight() {
         weight: 5,
         installed_at: None,
     };
-    db.add_plugin(&plugin_entry, plugin_code)
+    let plugin_id = db.add_plugin(&plugin_entry, plugin_code)
         .await
         .expect("store plugin");
-    db.set_credential("test-plugin", "api_key", "dummy-key")
+    db.set_credential(&plugin_id, "api_key", "dummy-key")
         .await
         .expect("set credential");
 
     // Add header set with weight=10 (higher priority)
-    db.add_header_set("high-weight-hs", &["localhost".to_string()], 10)
+    let hs_id = db.add_header_set(&["localhost".to_string()], 10)
         .await
         .expect("add header set");
-    db.set_header_set_header("high-weight-hs", "X-Source", "header-set")
+    db.set_header_set_header(&hs_id, "X-Source", "header-set")
         .await
         .expect("set X-Source header");
 
@@ -440,10 +441,10 @@ async fn test_e2e_header_set_path_matching() {
     let db = Arc::new(GapDatabase::in_memory().await.expect("create in-memory db"));
 
     // Header set matching only /api/* paths
-    db.add_header_set("api-hs", &["localhost/api/*".to_string()], 0)
+    let hs_id = db.add_header_set(&["localhost/api/*".to_string()], 0)
         .await
         .expect("add header set");
-    db.set_header_set_header("api-hs", "X-Api-Key", "secret")
+    db.set_header_set_header(&hs_id, "X-Api-Key", "secret")
         .await
         .expect("set X-Api-Key header");
 
@@ -521,7 +522,8 @@ async fn test_e2e_plugin_beats_header_set_by_weight() {
     }
 };"#;
     let plugin_entry = PluginEntry {
-        name: "weighted-plugin".to_string(),
+        id: "weighted-plugin".to_string(),
+        source: None,
         hosts: vec!["localhost".to_string()],
         credential_schema: vec!["api_key".to_string()],
         commit_sha: None,
@@ -529,18 +531,18 @@ async fn test_e2e_plugin_beats_header_set_by_weight() {
         weight: 10,
         installed_at: None,
     };
-    db.add_plugin(&plugin_entry, plugin_code)
+    let plugin_id = db.add_plugin(&plugin_entry, plugin_code)
         .await
         .expect("store plugin");
-    db.set_credential("weighted-plugin", "api_key", "dummy-key")
+    db.set_credential(&plugin_id, "api_key", "dummy-key")
         .await
         .expect("set credential");
 
     // Add header set with weight=5 (lower priority)
-    db.add_header_set("low-weight-hs", &["localhost".to_string()], 5)
+    let hs_id = db.add_header_set(&["localhost".to_string()], 5)
         .await
         .expect("add header set");
-    db.set_header_set_header("low-weight-hs", "X-Source", "header-set")
+    db.set_header_set_header(&hs_id, "X-Source", "header-set")
         .await
         .expect("set X-Source header");
 
@@ -583,18 +585,18 @@ async fn test_e2e_header_set_vs_header_set_weight() {
     let db = Arc::new(GapDatabase::in_memory().await.expect("create in-memory db"));
 
     // Header set A with weight=5
-    db.add_header_set("hs-a", &["localhost".to_string()], 5)
+    let hs_a_id = db.add_header_set(&["localhost".to_string()], 5)
         .await
         .expect("add header set A");
-    db.set_header_set_header("hs-a", "X-Source", "hs-a")
+    db.set_header_set_header(&hs_a_id, "X-Source", "hs-a")
         .await
         .expect("set X-Source for hs-a");
 
     // Header set B with weight=10
-    db.add_header_set("hs-b", &["localhost".to_string()], 10)
+    let hs_b_id = db.add_header_set(&["localhost".to_string()], 10)
         .await
         .expect("add header set B");
-    db.set_header_set_header("hs-b", "X-Source", "hs-b")
+    db.set_header_set_header(&hs_b_id, "X-Source", "hs-b")
         .await
         .expect("set X-Source for hs-b");
 
@@ -638,10 +640,10 @@ async fn test_e2e_same_weight_oldest_wins() {
     let db = Arc::new(GapDatabase::in_memory().await.expect("create in-memory db"));
 
     // Header set A (created first) with weight=0
-    db.add_header_set("hs-older", &["localhost".to_string()], 0)
+    let hs_older_id = db.add_header_set(&["localhost".to_string()], 0)
         .await
         .expect("add older header set");
-    db.set_header_set_header("hs-older", "X-Source", "older")
+    db.set_header_set_header(&hs_older_id, "X-Source", "older")
         .await
         .expect("set X-Source for older hs");
 
@@ -649,10 +651,10 @@ async fn test_e2e_same_weight_oldest_wins() {
     tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
 
     // Header set B (created second) with weight=0
-    db.add_header_set("hs-newer", &["localhost".to_string()], 0)
+    let hs_newer_id = db.add_header_set(&["localhost".to_string()], 0)
         .await
         .expect("add newer header set");
-    db.set_header_set_header("hs-newer", "X-Source", "newer")
+    db.set_header_set_header(&hs_newer_id, "X-Source", "newer")
         .await
         .expect("set X-Source for newer hs");
 
@@ -696,18 +698,18 @@ async fn test_e2e_path_specific_header_set_wins_by_weight() {
     let db = Arc::new(GapDatabase::in_memory().await.expect("create in-memory db"));
 
     // Header set A: path-specific with higher weight
-    db.add_header_set("specific-hs", &["localhost/api/v1/*".to_string()], 10)
+    let hs_specific_id = db.add_header_set(&["localhost/api/v1/*".to_string()], 10)
         .await
         .expect("add specific header set");
-    db.set_header_set_header("specific-hs", "X-Source", "specific")
+    db.set_header_set_header(&hs_specific_id, "X-Source", "specific")
         .await
         .expect("set X-Source for specific hs");
 
     // Header set B: catch-all with lower weight
-    db.add_header_set("catchall-hs", &["localhost".to_string()], 5)
+    let hs_catchall_id = db.add_header_set(&["localhost".to_string()], 5)
         .await
         .expect("add catchall header set");
-    db.set_header_set_header("catchall-hs", "X-Source", "catchall")
+    db.set_header_set_header(&hs_catchall_id, "X-Source", "catchall")
         .await
         .expect("set X-Source for catchall hs");
 

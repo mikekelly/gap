@@ -211,7 +211,8 @@ async fn setup_test_db(
 
     // Store plugin
     let plugin_entry = PluginEntry {
-        name: "test-server-gap".to_string(),
+        id: "test-server-gap".to_string(),
+        source: None,
         hosts: vec!["localhost".to_string()],
         credential_schema: vec!["test_credential_one".to_string(), "test_credential_two".to_string()],
         commit_sha: None,
@@ -219,14 +220,14 @@ async fn setup_test_db(
         weight: 0,
         installed_at: None,
     };
-    db.add_plugin(&plugin_entry, PLUGIN_CODE).await.expect("store plugin");
+    let plugin_id = db.add_plugin(&plugin_entry, PLUGIN_CODE).await.expect("store plugin");
 
     // Store credentials
-    db.set_credential("test-server-gap", "test_credential_one", "super-secret-42")
+    db.set_credential(&plugin_id, "test_credential_one", "super-secret-42")
         .await
         .expect("set credential one");
     if include_cred_two {
-        db.set_credential("test-server-gap", "test_credential_two", "another-secret-99")
+        db.set_credential(&plugin_id, "test_credential_two", "another-secret-99")
             .await
             .expect("set credential two");
     }
