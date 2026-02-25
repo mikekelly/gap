@@ -122,11 +122,11 @@ async fn setup_test_db(
         namespace_id: "default".to_string(),
         scope_id: "default".to_string(),
     };
-    let plugin_id = db.add_plugin(&plugin_entry, plugin_code)
+    let plugin_id = db.add_plugin(&plugin_entry, plugin_code, "default", "default")
         .await
         .expect("store plugin");
 
-    db.set_credential(&plugin_id, "api_key", "test-secret-42")
+    db.set_credential(&plugin_id, "api_key", "test-secret-42", "default", "default")
         .await
         .expect("set credential");
 

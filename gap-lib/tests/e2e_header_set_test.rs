@@ -388,10 +388,10 @@ async fn test_e2e_header_set_vs_plugin_weight() {
         namespace_id: "default".to_string(),
         scope_id: "default".to_string(),
     };
-    let plugin_id = db.add_plugin(&plugin_entry, plugin_code)
+    let plugin_id = db.add_plugin(&plugin_entry, plugin_code, "default", "default")
         .await
         .expect("store plugin");
-    db.set_credential(&plugin_id, "api_key", "dummy-key")
+    db.set_credential(&plugin_id, "api_key", "dummy-key", "default", "default")
         .await
         .expect("set credential");
 
@@ -535,10 +535,10 @@ async fn test_e2e_plugin_beats_header_set_by_weight() {
         namespace_id: "default".to_string(),
         scope_id: "default".to_string(),
     };
-    let plugin_id = db.add_plugin(&plugin_entry, plugin_code)
+    let plugin_id = db.add_plugin(&plugin_entry, plugin_code, "default", "default")
         .await
         .expect("store plugin");
-    db.set_credential(&plugin_id, "api_key", "dummy-key")
+    db.set_credential(&plugin_id, "api_key", "dummy-key", "default", "default")
         .await
         .expect("set credential");
 

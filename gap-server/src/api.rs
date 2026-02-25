@@ -460,7 +460,7 @@ async fn get_plugins(
     verify_auth(&state, &headers).await?;
 
     // Get plugins from database
-    let plugin_entries = state.db.list_plugins().await
+    let plugin_entries = state.db.list_plugins("default", "default").await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to list plugins: {}", e)))?;
 
     // Convert PluginEntry to PluginInfo
@@ -484,7 +484,7 @@ async fn post_plugins(
     verify_auth(&state, &headers).await?;
 
     // Get plugins from database
-    let plugin_entries = state.db.list_plugins().await
+    let plugin_entries = state.db.list_plugins("default", "default").await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to list plugins: {}", e)))?;
 
     // Convert PluginEntry to PluginInfo
@@ -576,7 +576,7 @@ async fn register_plugin(
         namespace_id: "default".to_string(),
         scope_id: "default".to_string(),
     };
-    let plugin_id = state.db.add_plugin(&plugin_entry, &transformed_code).await
+    let plugin_id = state.db.add_plugin(&plugin_entry, &transformed_code, "default", "default").await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to store plugin: {}", e)))?;
 
     tracing::info!("Registered plugin: {} (matches: {:?})", plugin_id, plugin.match_patterns);
@@ -609,7 +609,7 @@ async fn uninstall_plugin(
     verify_auth(&state, &headers).await?;
 
     // Check if plugin exists
-    let exists = state.db.has_plugin(&id).await
+    let exists = state.db.has_plugin(&id, "default", "default").await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to check plugin: {}", e)))?;
 
     if !exists {
@@ -620,7 +620,7 @@ async fn uninstall_plugin(
     }
 
     // Remove plugin from database (removes metadata + source, preserves credentials)
-    state.db.remove_plugin(&id).await
+    state.db.remove_plugin(&id, "default", "default").await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to remove plugin: {}", e)))?;
 
     tracing::info!("Uninstalled plugin: {}", id);
@@ -653,7 +653,7 @@ async fn update_plugin_from_github(
     verify_auth(&state, &headers).await?;
 
     // Look up existing plugin to get its source (GitHub slug)
-    let existing = state.db.get_plugin(&id).await
+    let existing = state.db.get_plugin(&id, "default", "default").await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to check plugin: {}", e)))?;
 
     let existing = existing.ok_or_else(|| {
@@ -665,7 +665,7 @@ async fn update_plugin_from_github(
     })?;
 
     // Remove old plugin from database (but keep credentials)
-    state.db.remove_plugin(&id).await
+    state.db.remove_plugin(&id, "default", "default").await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to remove old plugin: {}", e)))?;
 
     // Clone, validate, and store new version
@@ -775,7 +775,7 @@ async fn clone_and_validate_plugin(
         namespace_id: "default".to_string(),
         scope_id: "default".to_string(),
     };
-    let plugin_id = state.db.add_plugin(&plugin_entry, &transformed_code).await
+    let plugin_id = state.db.add_plugin(&plugin_entry, &transformed_code, "default", "default").await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to store plugin: {}", e)))?;
 
     Ok((plugin_id, plugin, commit_sha))
@@ -927,7 +927,7 @@ async fn set_credential(
         .map_err(|e| (StatusCode::BAD_REQUEST, format!("Invalid request body: {}", e)))?;
 
     // Store credential in database
-    state.db.set_credential(&plugin_id, &key, &req.value)
+    state.db.set_credential(&plugin_id, &key, &req.value, "default", "default")
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to set credential: {}", e)))?;
 
@@ -961,7 +961,7 @@ async fn delete_credential(
     verify_auth(&state, &headers).await?;
 
     // Remove credential from database
-    state.db.remove_credential(&plugin_id, &key)
+    state.db.remove_credential(&plugin_id, &key, "default", "default")
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to remove credential: {}", e)))?;
 
@@ -1491,13 +1491,13 @@ async fn update_plugin(
     let req: UpdatePluginRequest = serde_json::from_slice(&body)
         .map_err(|e| (StatusCode::BAD_REQUEST, format!("Invalid request body: {}", e)))?;
 
-    let exists = state.db.has_plugin(&id).await
+    let exists = state.db.has_plugin(&id, "default", "default").await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to check plugin: {}", e)))?;
     if !exists {
         return Err((StatusCode::NOT_FOUND, format!("Plugin '{}' is not installed.", id)));
     }
 
-    state.db.update_plugin_weight(&id, req.weight).await
+    state.db.update_plugin_weight(&id, req.weight, "default", "default").await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to update plugin weight: {}", e)))?;
 
     emit_management_log(&state, ManagementLogEntry {
@@ -1924,7 +1924,7 @@ mod tests {
             let plugin_id = resp["id"].as_str().unwrap();
 
             // Verify the plugin was added to the database
-            let plugins = db.list_plugins().await.expect("list plugins from database");
+            let plugins = db.list_plugins("default", "default").await.expect("list plugins from database");
 
             // Find the installed plugin by its UUID
             let installed_plugin = plugins.iter()
@@ -2086,7 +2086,7 @@ mod tests {
         assert_eq!(response.status(), StatusCode::OK);
 
         // Verify the credential was written to the database
-        let credential = db.get_credential("test-plugin", "api_key")
+        let credential = db.get_credential("test-plugin", "api_key", "default", "default")
             .await
             .expect("read from database");
         assert_eq!(
@@ -2139,7 +2139,7 @@ mod tests {
         assert_eq!(response.status(), StatusCode::OK);
 
         // Verify the credential was added to the database
-        let creds = db.list_credentials().await.expect("list should succeed");
+        let creds = db.list_credentials("default", "default").await.expect("list should succeed");
         assert_eq!(creds.len(), 1);
         assert_eq!(creds[0], CredentialEntry {
             plugin_id: "exa".to_string(),
@@ -2169,7 +2169,7 @@ mod tests {
         state.set_password_hash(password_hash).await;
 
         // Pre-populate database with a credential
-        db.set_credential("exa", "api_key", "some_value").await.expect("add should succeed");
+        db.set_credential("exa", "api_key", "some_value", "default", "default").await.expect("add should succeed");
 
         let app = create_router(state);
 
@@ -2188,7 +2188,7 @@ mod tests {
         assert_eq!(response.status(), StatusCode::OK);
 
         // Verify the credential was removed from the database
-        let creds = db.list_credentials().await.expect("list should succeed");
+        let creds = db.list_credentials("default", "default").await.expect("list should succeed");
         assert_eq!(creds.len(), 0);
     }
 
@@ -2254,7 +2254,7 @@ mod tests {
         assert_eq!(response2.status(), StatusCode::OK);
 
         // Verify the database only has ONE entry for this credential (no duplicates)
-        let creds = db.list_credentials().await.expect("list should succeed");
+        let creds = db.list_credentials("default", "default").await.expect("list should succeed");
         assert_eq!(creds.len(), 1);
         assert_eq!(creds[0], CredentialEntry {
             plugin_id: "exa".to_string(),
@@ -3429,7 +3429,7 @@ mod tests {
         assert!(register_response.registered);
 
         // Verify plugin was stored in the database
-        let plugins = db.list_plugins().await.expect("list plugins");
+        let plugins = db.list_plugins("default", "default").await.expect("list plugins");
         assert!(plugins.iter().any(|p| p.id == register_response.id), "plugin should be in database");
     }
 
@@ -3497,7 +3497,7 @@ mod tests {
         assert!(register_response.registered);
 
         // Verify plugin was stored in the database
-        let plugins = db.list_plugins().await.expect("list plugins");
+        let plugins = db.list_plugins("default", "default").await.expect("list plugins");
         assert!(plugins.iter().any(|p| p.id == register_response.id), "es6 plugin should be in database");
     }
 
@@ -3907,7 +3907,7 @@ mod tests {
             namespace_id: "default".to_string(),
             scope_id: "default".to_string(),
         };
-        let plugin_id = db.add_plugin(&plugin_entry, "var plugin = {};").await.unwrap();
+        let plugin_id = db.add_plugin(&plugin_entry, "var plugin = {};", "default", "default").await.unwrap();
 
         let app = create_router(state);
 
@@ -3936,7 +3936,7 @@ mod tests {
         assert!(resp.updated);
 
         // Verify weight updated in DB
-        let plugins = db.list_plugins().await.unwrap();
+        let plugins = db.list_plugins("default", "default").await.unwrap();
         let plugin = plugins.iter().find(|p| p.id == plugin_id).unwrap();
         assert_eq!(plugin.weight, 100);
     }

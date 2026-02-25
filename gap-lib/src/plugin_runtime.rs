@@ -780,7 +780,7 @@ impl PluginRuntime {
     /// # Returns
     /// The loaded GAPPlugin with metadata
     pub async fn load_plugin(&mut self, name: &str, db: &GapDatabase) -> Result<GAPPlugin> {
-        let code = db.get_plugin_source(name).await?
+        let code = db.get_plugin_source(name, "default", "default").await?
             .ok_or_else(|| GapError::not_found(format!("Plugin '{}' not found", name)))?;
 
         self.load_plugin_from_code(name, &code)
@@ -1357,7 +1357,7 @@ mod tests {
             namespace_id: "default".to_string(),
             scope_id: "default".to_string(),
         };
-        let plugin_id = db.add_plugin(&entry, plugin_code).await.unwrap();
+        let plugin_id = db.add_plugin(&entry, plugin_code, "default", "default").await.unwrap();
 
         let mut runtime = PluginRuntime::new().unwrap();
         let plugin = runtime.load_plugin(&plugin_id, &db).await.unwrap();

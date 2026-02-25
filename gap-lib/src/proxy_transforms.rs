@@ -21,7 +21,7 @@ async fn load_plugin_credentials(
 ) -> Result<GAPCredentials> {
     let mut credentials = GAPCredentials::new();
 
-    if let Some(plugin_creds) = db.get_plugin_credentials(plugin_name).await? {
+    if let Some(plugin_creds) = db.get_plugin_credentials(plugin_name, "default", "default").await? {
         for (field, value) in plugin_creds {
             credentials.set(&field, &value);
         }
@@ -278,7 +278,7 @@ pub async fn transform_request(
             debug!("Loaded {} credential fields for plugin {}", credentials.credentials.len(), plugin.id);
 
             // Load plugin code from database
-            let plugin_code = db.get_plugin_source(&plugin.id).await?
+            let plugin_code = db.get_plugin_source(&plugin.id, "default", "default").await?
                 .ok_or_else(|| GapError::plugin(format!("Plugin code not found for {}", plugin.id)))?;
 
             // Execute transform
@@ -404,10 +404,10 @@ mod tests {
         let db = GapDatabase::in_memory().await.unwrap();
 
         // Set credentials
-        db.set_credential("exa", "api_key", "test-api-key-value")
+        db.set_credential("exa", "api_key", "test-api-key-value", "default", "default")
             .await
             .expect("set credential");
-        db.set_credential("exa", "secret", "test-secret-value")
+        db.set_credential("exa", "secret", "test-secret-value", "default", "default")
             .await
             .expect("set credential");
 
@@ -446,8 +446,8 @@ mod tests {
             namespace_id: "default".to_string(),
             scope_id: "default".to_string(),
         };
-        let plugin_id = db.add_plugin(&plugin_entry, plugin_code).await.unwrap();
-        db.set_credential(&plugin_id, "api_key", "secret-key-123").await.unwrap();
+        let plugin_id = db.add_plugin(&plugin_entry, plugin_code, "default", "default").await.unwrap();
+        db.set_credential(&plugin_id, "api_key", "secret-key-123", "default", "default").await.unwrap();
         plugin_id
     }
 
@@ -512,7 +512,7 @@ mod tests {
             namespace_id: "default".to_string(),
             scope_id: "default".to_string(),
         };
-        db.add_plugin(&plugin_entry, plugin_code).await.unwrap();
+        db.add_plugin(&plugin_entry, plugin_code, "default", "default").await.unwrap();
 
         let request = GAPRequest::new("GET", "https://api.nocreds.com/data")
             .with_header("Host", "api.nocreds.com");
@@ -728,8 +728,8 @@ mod tests {
             namespace_id: "default".to_string(),
             scope_id: "default".to_string(),
         };
-        let plugin_id = db.add_plugin(&plugin_entry, plugin_code).await.unwrap();
-        db.set_credential(&plugin_id, "api_key", "http-secret").await.unwrap();
+        let plugin_id = db.add_plugin(&plugin_entry, plugin_code, "default", "default").await.unwrap();
+        db.set_credential(&plugin_id, "api_key", "http-secret", "default", "default").await.unwrap();
 
         let request = GAPRequest::new("GET", "http://api.httpok.com/data")
             .with_header("Host", "api.httpok.com");

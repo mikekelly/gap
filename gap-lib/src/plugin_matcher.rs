@@ -121,7 +121,7 @@ pub async fn find_matching_handler(
     path: &str,
     db: &GapDatabase,
 ) -> Result<Option<MatchResult>> {
-    let plugin_entries = db.list_plugins().await?;
+    let plugin_entries = db.list_plugins("default", "default").await?;
     let header_sets = db.list_header_sets().await?;
 
     let mut candidates: Vec<MatchCandidate> = Vec::new();
@@ -175,7 +175,7 @@ pub async fn find_matching_handler(
     match winner.kind {
         CandidateKind::Plugin { id, entry } => {
             // Load plugin source only for the winner
-            let plugin_code = db.get_plugin_source(&id).await?;
+            let plugin_code = db.get_plugin_source(&id, "default", "default").await?;
             if let Some(code) = plugin_code {
                 let mut runtime = PluginRuntime::new()?;
                 if let Ok(mut plugin) = runtime.load_plugin_from_code(&id, &code) {
@@ -310,7 +310,7 @@ mod tests {
             namespace_id: "default".to_string(),
             scope_id: "default".to_string(),
         };
-        let plugin_id = db.add_plugin(&entry, plugin_code).await.unwrap();
+        let plugin_id = db.add_plugin(&entry, plugin_code, "default", "default").await.unwrap();
 
         let result = find_matching_plugin("api.example.com", &db).await.unwrap();
         assert!(result.is_some());
@@ -342,7 +342,7 @@ mod tests {
             namespace_id: "default".to_string(),
             scope_id: "default".to_string(),
         };
-        let plugin_id = db.add_plugin(&entry, plugin_code).await.unwrap();
+        let plugin_id = db.add_plugin(&entry, plugin_code, "default", "default").await.unwrap();
 
         let result = find_matching_plugin("bucket.s3.amazonaws.com", &db).await.unwrap();
         assert!(result.is_some());
@@ -374,7 +374,7 @@ mod tests {
             namespace_id: "default".to_string(),
             scope_id: "default".to_string(),
         };
-        db.add_plugin(&entry, plugin_code).await.unwrap();
+        db.add_plugin(&entry, plugin_code, "default", "default").await.unwrap();
 
         let result = find_matching_plugin("api.other.com", &db).await.unwrap();
         assert!(result.is_none());
@@ -397,7 +397,7 @@ mod tests {
             scope_id: "default".to_string(),
         };
         let invalid_code = "THIS IS NOT VALID JAVASCRIPT!!! { syntax error }";
-        db.add_plugin(&entry1, invalid_code).await.unwrap();
+        db.add_plugin(&entry1, invalid_code, "default", "default").await.unwrap();
 
         let entry2 = PluginEntry {
             id: "nomatch2".to_string(),
@@ -411,7 +411,7 @@ mod tests {
             namespace_id: "default".to_string(),
             scope_id: "default".to_string(),
         };
-        db.add_plugin(&entry2, invalid_code).await.unwrap();
+        db.add_plugin(&entry2, invalid_code, "default", "default").await.unwrap();
 
         let valid_code = r#"
         var plugin = {
@@ -433,7 +433,7 @@ mod tests {
             namespace_id: "default".to_string(),
             scope_id: "default".to_string(),
         };
-        let match_plugin_id = db.add_plugin(&entry3, valid_code).await.unwrap();
+        let match_plugin_id = db.add_plugin(&entry3, valid_code, "default", "default").await.unwrap();
 
         let result = find_matching_plugin("api.example.com", &db).await.unwrap();
         assert!(result.is_some());
@@ -467,7 +467,7 @@ mod tests {
             namespace_id: "default".to_string(),
             scope_id: "default".to_string(),
         };
-        let plugin_id = db.add_plugin(&entry, plugin_code).await.unwrap();
+        let plugin_id = db.add_plugin(&entry, plugin_code, "default", "default").await.unwrap();
 
         db.add_header_set(&["api.example.com".to_string()], 5)
             .await
@@ -516,7 +516,7 @@ mod tests {
             namespace_id: "default".to_string(),
             scope_id: "default".to_string(),
         };
-        db.add_plugin(&entry, plugin_code).await.unwrap();
+        db.add_plugin(&entry, plugin_code, "default", "default").await.unwrap();
 
         let result = find_matching_handler("api.example.com", None, "/", &db)
             .await

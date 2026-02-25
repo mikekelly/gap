@@ -117,14 +117,14 @@ async fn setup_test_db(pkcs8_b64: &str, key_id: &str) -> (Arc<GapDatabase>, Stri
         namespace_id: "default".to_string(),
         scope_id: "default".to_string(),
     };
-    let plugin_id = db.add_plugin(&plugin_entry, SIGNING_PLUGIN_CODE)
+    let plugin_id = db.add_plugin(&plugin_entry, SIGNING_PLUGIN_CODE, "default", "default")
         .await
         .expect("store plugin");
 
-    db.set_credential(&plugin_id, "private_key", pkcs8_b64)
+    db.set_credential(&plugin_id, "private_key", pkcs8_b64, "default", "default")
         .await
         .expect("set private_key credential");
-    db.set_credential(&plugin_id, "key_id", key_id)
+    db.set_credential(&plugin_id, "key_id", key_id, "default", "default")
         .await
         .expect("set key_id credential");
 

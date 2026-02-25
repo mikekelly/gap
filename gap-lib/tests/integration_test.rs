@@ -44,7 +44,7 @@ async fn test_full_plugin_pipeline() {
         namespace_id: "default".to_string(),
         scope_id: "default".to_string(),
     };
-    let plugin_id = db.add_plugin(&plugin_entry, &plugin_code).await.unwrap();
+    let plugin_id = db.add_plugin(&plugin_entry, &plugin_code, "default", "default").await.unwrap();
 
     // Create PluginRuntime
     let mut runtime = PluginRuntime::new().unwrap();
@@ -128,7 +128,7 @@ async fn test_multiple_plugins() {
         namespace_id: "default".to_string(),
         scope_id: "default".to_string(),
     };
-    let plugin_a_id = db.add_plugin(&entry_a, plugin1_code).await.unwrap();
+    let plugin_a_id = db.add_plugin(&entry_a, plugin1_code, "default", "default").await.unwrap();
 
     let entry_b = PluginEntry {
         id: "service-b".to_string(),
@@ -142,7 +142,7 @@ async fn test_multiple_plugins() {
         namespace_id: "default".to_string(),
         scope_id: "default".to_string(),
     };
-    let plugin_b_id = db.add_plugin(&entry_b, plugin2_code).await.unwrap();
+    let plugin_b_id = db.add_plugin(&entry_b, plugin2_code, "default", "default").await.unwrap();
 
     let mut runtime = PluginRuntime::new().unwrap();
 
@@ -216,7 +216,7 @@ async fn test_plugin_with_multiple_credentials() {
         namespace_id: "default".to_string(),
         scope_id: "default".to_string(),
     };
-    let plugin_id = db.add_plugin(&plugin_entry, plugin_code).await.unwrap();
+    let plugin_id = db.add_plugin(&plugin_entry, plugin_code, "default", "default").await.unwrap();
 
     let mut runtime = PluginRuntime::new().unwrap();
     let plugin = runtime.load_plugin(&plugin_id, &db).await.unwrap();

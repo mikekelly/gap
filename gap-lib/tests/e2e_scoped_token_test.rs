@@ -182,12 +182,12 @@ async fn setup_scoped_db(scopes: Option<&[TokenScope]>) -> (Arc<GapDatabase>, St
         namespace_id: "default".to_string(),
         scope_id: "default".to_string(),
     };
-    let plugin_id = db.add_plugin(&plugin_entry, PLUGIN_CODE)
+    let plugin_id = db.add_plugin(&plugin_entry, PLUGIN_CODE, "default", "default")
         .await
         .expect("store plugin");
 
     // Store credential
-    db.set_credential(&plugin_id, "test_credential_one", "secret-value")
+    db.set_credential(&plugin_id, "test_credential_one", "secret-value", "default", "default")
         .await
         .expect("set credential");
 

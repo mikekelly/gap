@@ -116,7 +116,7 @@ async fn test_find_matching_plugin() {
         namespace_id: "default".to_string(),
         scope_id: "default".to_string(),
     };
-    let exa_plugin_id = db.add_plugin(&entry1, plugin1_code).await.unwrap();
+    let exa_plugin_id = db.add_plugin(&entry1, plugin1_code, "default", "default").await.unwrap();
 
     let entry2 = PluginEntry {
         id: "s3-plugin".to_string(),
@@ -130,7 +130,7 @@ async fn test_find_matching_plugin() {
         namespace_id: "default".to_string(),
         scope_id: "default".to_string(),
     };
-    let s3_plugin_id = db.add_plugin(&entry2, plugin2_code).await.unwrap();
+    let s3_plugin_id = db.add_plugin(&entry2, plugin2_code, "default", "default").await.unwrap();
 
     // Find matching plugin for api.exa.ai
     let matching_plugin = find_matching_plugin("api.exa.ai", &db).await.unwrap();
@@ -177,10 +177,10 @@ async fn test_proxy_plugin_execution_flow() {
         namespace_id: "default".to_string(),
         scope_id: "default".to_string(),
     };
-    let plugin_id = db.add_plugin(&plugin_entry, plugin_code).await.unwrap();
+    let plugin_id = db.add_plugin(&plugin_entry, plugin_code, "default", "default").await.unwrap();
 
     // Store credentials
-    db.set_credential(&plugin_id, "api_key", "secret123").await.unwrap();
+    db.set_credential(&plugin_id, "api_key", "secret123", "default", "default").await.unwrap();
 
     // Parse incoming HTTP request
     let raw_request = b"GET /v1/users HTTP/1.1\r\nHost: api.example.com\r\nContent-Type: application/json\r\n\r\n";
@@ -192,7 +192,7 @@ async fn test_proxy_plugin_execution_flow() {
     let plugin = plugin.unwrap();
 
     // Load credentials for the plugin
-    let creds_map = db.get_plugin_credentials(&plugin.id).await.unwrap().unwrap();
+    let creds_map = db.get_plugin_credentials(&plugin.id, "default", "default").await.unwrap().unwrap();
     let mut creds = GAPCredentials::new();
     for (field, value) in &creds_map {
         creds.set(field, value);
@@ -248,10 +248,10 @@ async fn test_complete_proxy_transform_pipeline() {
         namespace_id: "default".to_string(),
         scope_id: "default".to_string(),
     };
-    let plugin_id = db.add_plugin(&plugin_entry, plugin_code).await.unwrap();
+    let plugin_id = db.add_plugin(&plugin_entry, plugin_code, "default", "default").await.unwrap();
 
     // Set credentials directly in database
-    db.set_credential(&plugin_id, "secret", "my-secret-value")
+    db.set_credential(&plugin_id, "secret", "my-secret-value", "default", "default")
         .await
         .unwrap();
 

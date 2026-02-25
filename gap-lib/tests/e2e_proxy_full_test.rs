@@ -222,14 +222,14 @@ async fn setup_test_db(
         namespace_id: "default".to_string(),
         scope_id: "default".to_string(),
     };
-    let plugin_id = db.add_plugin(&plugin_entry, PLUGIN_CODE).await.expect("store plugin");
+    let plugin_id = db.add_plugin(&plugin_entry, PLUGIN_CODE, "default", "default").await.expect("store plugin");
 
     // Store credentials
-    db.set_credential(&plugin_id, "test_credential_one", "super-secret-42")
+    db.set_credential(&plugin_id, "test_credential_one", "super-secret-42", "default", "default")
         .await
         .expect("set credential one");
     if include_cred_two {
-        db.set_credential(&plugin_id, "test_credential_two", "another-secret-99")
+        db.set_credential(&plugin_id, "test_credential_two", "another-secret-99", "default", "default")
             .await
             .expect("set credential two");
     }

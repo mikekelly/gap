@@ -526,7 +526,7 @@ impl GapDatabase {
 
     /// Add a plugin by appending a new entry to plugin_versions.
     /// Returns the generated UUID for the new plugin.
-    pub async fn add_plugin(&self, plugin: &PluginEntry, source_code: &str) -> Result<String> {
+    pub async fn add_plugin(&self, plugin: &PluginEntry, source_code: &str, ns: &str, scope: &str) -> Result<String> {
         let id = Uuid::new_v4().to_string();
         let hosts_json =
             serde_json::to_string(&plugin.hosts).map_err(|e| GapError::database(e.to_string()))?;
@@ -541,7 +541,7 @@ impl GapDatabase {
 
         self.conn
             .execute(
-                "INSERT INTO plugin_versions (plugin_id, hosts, credential_schema, commit_sha, source_hash, source_code, installed_at, deleted, dangerously_permit_http, weight) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 0, ?8, ?9)",
+                "INSERT INTO plugin_versions (plugin_id, hosts, credential_schema, commit_sha, source_hash, source_code, installed_at, deleted, dangerously_permit_http, weight, namespace_id, scope_id) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 0, ?8, ?9, ?10, ?11)",
                 libsql::params![
                     id.as_str(),
                     hosts_json,
@@ -551,7 +551,9 @@ impl GapDatabase {
                     source_code,
                     now,
                     permit_http,
-                    plugin.weight
+                    plugin.weight,
+                    ns,
+                    scope
                 ],
             )
             .await
@@ -561,13 +563,13 @@ impl GapDatabase {
     }
 
     /// Get a plugin entry by ID (latest version, None if deleted or absent).
-    pub async fn get_plugin(&self, id: &str) -> Result<Option<PluginEntry>> {
+    pub async fn get_plugin(&self, id: &str, ns: &str, scope: &str) -> Result<Option<PluginEntry>> {
         // Get the absolute latest entry; if it's a tombstone, the plugin is "deleted".
         let mut rows = self
             .conn
             .query(
-                "SELECT plugin_id, hosts, credential_schema, commit_sha, deleted, dangerously_permit_http, weight, installed_at FROM plugin_versions WHERE plugin_id = ?1 ORDER BY id DESC LIMIT 1",
-                libsql::params![id],
+                "SELECT plugin_id, hosts, credential_schema, commit_sha, deleted, dangerously_permit_http, weight, installed_at FROM plugin_versions WHERE plugin_id = ?1 AND namespace_id = ?2 AND scope_id = ?3 ORDER BY id DESC LIMIT 1",
+                libsql::params![id, ns, scope],
             )
             .await
             .map_err(|e| GapError::database(e.to_string()))?;
@@ -577,20 +579,20 @@ impl GapDatabase {
             if deleted != 0 {
                 return Ok(None);
             }
-            Ok(Some(self.row_to_plugin_entry(&row, 5)?))
+            Ok(Some(self.row_to_plugin_entry(&row, 5, ns, scope)?))
         } else {
             Ok(None)
         }
     }
 
     /// Get only the source code for a plugin (latest version, None if deleted or absent).
-    pub async fn get_plugin_source(&self, id: &str) -> Result<Option<String>> {
+    pub async fn get_plugin_source(&self, id: &str, ns: &str, scope: &str) -> Result<Option<String>> {
         // Get the absolute latest entry; if it's a tombstone, the plugin is "deleted".
         let mut rows = self
             .conn
             .query(
-                "SELECT source_code, deleted FROM plugin_versions WHERE plugin_id = ?1 ORDER BY id DESC LIMIT 1",
-                libsql::params![id],
+                "SELECT source_code, deleted FROM plugin_versions WHERE plugin_id = ?1 AND namespace_id = ?2 AND scope_id = ?3 ORDER BY id DESC LIMIT 1",
+                libsql::params![id, ns, scope],
             )
             .await
             .map_err(|e| GapError::database(e.to_string()))?;
@@ -607,8 +609,8 @@ impl GapDatabase {
         }
     }
 
-    /// List all plugins (latest non-deleted version of each).
-    pub async fn list_plugins(&self) -> Result<Vec<PluginEntry>> {
+    /// List all plugins (latest non-deleted version of each) within a namespace/scope.
+    pub async fn list_plugins(&self, ns: &str, scope: &str) -> Result<Vec<PluginEntry>> {
         let mut rows = self
             .conn
             .query(
@@ -617,27 +619,28 @@ impl GapDatabase {
                  INNER JOIN ( \
                      SELECT plugin_id, MAX(id) as max_id \
                      FROM plugin_versions \
+                     WHERE namespace_id = ?1 AND scope_id = ?2 \
                      GROUP BY plugin_id \
                  ) latest ON pv.id = latest.max_id \
-                 WHERE pv.deleted = 0",
-                (),
+                 WHERE pv.deleted = 0 AND pv.namespace_id = ?1 AND pv.scope_id = ?2",
+                libsql::params![ns, scope],
             )
             .await
             .map_err(|e| GapError::database(e.to_string()))?;
         let mut result = Vec::new();
         while let Some(row) = rows.next().await.map_err(|e| GapError::database(e.to_string()))? {
-            result.push(self.row_to_plugin_entry(&row, 4)?);
+            result.push(self.row_to_plugin_entry(&row, 4, ns, scope)?);
         }
         Ok(result)
     }
 
     /// Remove a plugin by appending a tombstone. Does NOT delete credentials (preserves across reinstalls).
-    pub async fn remove_plugin(&self, id: &str) -> Result<()> {
+    pub async fn remove_plugin(&self, id: &str, ns: &str, scope: &str) -> Result<()> {
         let now = Utc::now().to_rfc3339();
         self.conn
             .execute(
-                "INSERT INTO plugin_versions (plugin_id, hosts, credential_schema, commit_sha, source_hash, source_code, installed_at, deleted) VALUES (?1, '[]', '[]', '', '', '', ?2, 1)",
-                libsql::params![id, now],
+                "INSERT INTO plugin_versions (plugin_id, hosts, credential_schema, commit_sha, source_hash, source_code, installed_at, deleted, namespace_id, scope_id) VALUES (?1, '[]', '[]', '', '', '', ?2, 1, ?3, ?4)",
+                libsql::params![id, now, ns, scope],
             )
             .await
             .map_err(|e| GapError::database(e.to_string()))?;
@@ -645,8 +648,8 @@ impl GapDatabase {
     }
 
     /// Check whether a plugin exists (latest entry is non-deleted).
-    pub async fn has_plugin(&self, id: &str) -> Result<bool> {
-        Ok(self.get_plugin(id).await?.is_some())
+    pub async fn has_plugin(&self, id: &str, ns: &str, scope: &str) -> Result<bool> {
+        Ok(self.get_plugin(id, ns, scope).await?.is_some())
     }
 
     /// Parse a `Row` into a `PluginEntry`.
@@ -654,7 +657,7 @@ impl GapDatabase {
     /// Columns expected at positions 0-3: plugin_id, hosts, credential_schema, commit_sha.
     /// The `dangerously_permit_http` column index varies by query and is passed explicitly.
     /// Weight is at `permit_http_col + 1`, installed_at at `permit_http_col + 2`.
-    fn row_to_plugin_entry(&self, row: &libsql::Row, permit_http_col: usize) -> Result<PluginEntry> {
+    fn row_to_plugin_entry(&self, row: &libsql::Row, permit_http_col: usize, ns: &str, scope: &str) -> Result<PluginEntry> {
         let id: String = row.get(0).map_err(|e| GapError::database(e.to_string()))?;
         let hosts_json: String = row.get(1).map_err(|e| GapError::database(e.to_string()))?;
         let schema_json: String = row.get(2).map_err(|e| GapError::database(e.to_string()))?;
@@ -692,18 +695,18 @@ impl GapDatabase {
             dangerously_permit_http: dangerously_permit_http != 0,
             weight,
             installed_at,
-            namespace_id: "default".to_string(),
-            scope_id: "default".to_string(),
+            namespace_id: ns.to_string(),
+            scope_id: scope.to_string(),
         })
     }
 
-    /// Look up a plugin version by its source hash.
-    pub async fn get_plugin_version_by_hash(&self, source_hash: &str) -> Result<Option<PluginVersion>> {
+    /// Look up a plugin version by its source hash within a namespace/scope.
+    pub async fn get_plugin_version_by_hash(&self, source_hash: &str, ns: &str, scope: &str) -> Result<Option<PluginVersion>> {
         let mut rows = self
             .conn
             .query(
-                "SELECT plugin_id, commit_sha, source_hash, source_code, installed_at FROM plugin_versions WHERE source_hash = ?1 LIMIT 1",
-                libsql::params![source_hash],
+                "SELECT plugin_id, commit_sha, source_hash, source_code, installed_at FROM plugin_versions WHERE source_hash = ?1 AND namespace_id = ?2 AND scope_id = ?3 LIMIT 1",
+                libsql::params![source_hash, ns, scope],
             )
             .await
             .map_err(|e| GapError::database(e.to_string()))?;
@@ -735,11 +738,11 @@ impl GapDatabase {
     // ── Credential CRUD ─────────────────────────────────────────────
 
     /// Set (upsert) a credential value.
-    pub async fn set_credential(&self, plugin_id: &str, field: &str, value: &str) -> Result<()> {
+    pub async fn set_credential(&self, plugin_id: &str, field: &str, value: &str, ns: &str, scope: &str) -> Result<()> {
         self.conn
             .execute(
-                "INSERT OR REPLACE INTO credentials (plugin_id, field, value) VALUES (?1, ?2, ?3)",
-                libsql::params![plugin_id, field, value],
+                "INSERT OR REPLACE INTO credentials (namespace_id, scope_id, plugin_id, field, value) VALUES (?1, ?2, ?3, ?4, ?5)",
+                libsql::params![ns, scope, plugin_id, field, value],
             )
             .await
             .map_err(|e| GapError::database(e.to_string()))?;
@@ -747,12 +750,12 @@ impl GapDatabase {
     }
 
     /// Get a single credential value.
-    pub async fn get_credential(&self, plugin_id: &str, field: &str) -> Result<Option<String>> {
+    pub async fn get_credential(&self, plugin_id: &str, field: &str, ns: &str, scope: &str) -> Result<Option<String>> {
         let mut rows = self
             .conn
             .query(
-                "SELECT value FROM credentials WHERE plugin_id = ?1 AND field = ?2",
-                libsql::params![plugin_id, field],
+                "SELECT value FROM credentials WHERE plugin_id = ?1 AND field = ?2 AND namespace_id = ?3 AND scope_id = ?4",
+                libsql::params![plugin_id, field, ns, scope],
             )
             .await
             .map_err(|e| GapError::database(e.to_string()))?;
@@ -769,12 +772,14 @@ impl GapDatabase {
     pub async fn get_plugin_credentials(
         &self,
         plugin_id: &str,
+        ns: &str,
+        scope: &str,
     ) -> Result<Option<HashMap<String, String>>> {
         let mut rows = self
             .conn
             .query(
-                "SELECT field, value FROM credentials WHERE plugin_id = ?1",
-                libsql::params![plugin_id],
+                "SELECT field, value FROM credentials WHERE plugin_id = ?1 AND namespace_id = ?2 AND scope_id = ?3",
+                libsql::params![plugin_id, ns, scope],
             )
             .await
             .map_err(|e| GapError::database(e.to_string()))?;
@@ -794,10 +799,13 @@ impl GapDatabase {
     }
 
     /// List all credentials as `CredentialEntry` (plugin_id + field, no value).
-    pub async fn list_credentials(&self) -> Result<Vec<CredentialEntry>> {
+    pub async fn list_credentials(&self, ns: &str, scope: &str) -> Result<Vec<CredentialEntry>> {
         let mut rows = self
             .conn
-            .query("SELECT plugin_id, field FROM credentials", ())
+            .query(
+                "SELECT plugin_id, field FROM credentials WHERE namespace_id = ?1 AND scope_id = ?2",
+                libsql::params![ns, scope],
+            )
             .await
             .map_err(|e| GapError::database(e.to_string()))?;
         let mut result = Vec::new();
@@ -807,19 +815,19 @@ impl GapDatabase {
             result.push(CredentialEntry {
                 plugin_id,
                 field,
-                namespace_id: "default".to_string(),
-                scope_id: "default".to_string(),
+                namespace_id: ns.to_string(),
+                scope_id: scope.to_string(),
             });
         }
         Ok(result)
     }
 
     /// Remove a single credential.
-    pub async fn remove_credential(&self, plugin_id: &str, field: &str) -> Result<()> {
+    pub async fn remove_credential(&self, plugin_id: &str, field: &str, ns: &str, scope: &str) -> Result<()> {
         self.conn
             .execute(
-                "DELETE FROM credentials WHERE plugin_id = ?1 AND field = ?2",
-                libsql::params![plugin_id, field],
+                "DELETE FROM credentials WHERE plugin_id = ?1 AND field = ?2 AND namespace_id = ?3 AND scope_id = ?4",
+                libsql::params![plugin_id, field, ns, scope],
             )
             .await
             .map_err(|e| GapError::database(e.to_string()))?;
@@ -1259,12 +1267,12 @@ impl GapDatabase {
     // ── Plugin Weight ──────────────────────────────────────────────
 
     /// Update the weight of the latest version of a plugin.
-    pub async fn update_plugin_weight(&self, id: &str, weight: i32) -> Result<()> {
+    pub async fn update_plugin_weight(&self, id: &str, weight: i32, ns: &str, scope: &str) -> Result<()> {
         let rows_affected = self
             .conn
             .execute(
-                "UPDATE plugin_versions SET weight = ?1 WHERE id = (SELECT MAX(id) FROM plugin_versions WHERE plugin_id = ?2 AND deleted = 0)",
-                libsql::params![weight, id],
+                "UPDATE plugin_versions SET weight = ?1 WHERE id = (SELECT MAX(id) FROM plugin_versions WHERE plugin_id = ?2 AND deleted = 0 AND namespace_id = ?3 AND scope_id = ?4)",
+                libsql::params![weight, id, ns, scope],
             )
             .await
             .map_err(|e| GapError::database(e.to_string()))?;
@@ -1646,9 +1654,9 @@ mod tests {
         let db = GapDatabase::in_memory().await.unwrap();
         let plugin = sample_plugin("placeholder");
 
-        let id = db.add_plugin(&plugin, "function transform() {}").await.unwrap();
+        let id = db.add_plugin(&plugin, "function transform() {}", "default", "default").await.unwrap();
 
-        let got = db.get_plugin(&id).await.unwrap().unwrap();
+        let got = db.get_plugin(&id, "default", "default").await.unwrap().unwrap();
         assert_eq!(got.id, id);
         assert_eq!(got.hosts, vec!["api.example.com"]);
         assert_eq!(got.credential_schema, vec!["api_key"]);
@@ -1660,33 +1668,33 @@ mod tests {
         let db = GapDatabase::in_memory().await.unwrap();
         let plugin = sample_plugin("placeholder");
 
-        let id = db.add_plugin(&plugin, "// source code here")
+        let id = db.add_plugin(&plugin, "// source code here", "default", "default")
             .await
             .unwrap();
 
-        let src = db.get_plugin_source(&id).await.unwrap().unwrap();
+        let src = db.get_plugin_source(&id, "default", "default").await.unwrap().unwrap();
         assert_eq!(src, "// source code here");
     }
 
     #[tokio::test]
     async fn test_plugin_get_nonexistent() {
         let db = GapDatabase::in_memory().await.unwrap();
-        assert!(db.get_plugin("nonexistent-id").await.unwrap().is_none());
-        assert!(db.get_plugin_source("nonexistent-id").await.unwrap().is_none());
+        assert!(db.get_plugin("nonexistent-id", "default", "default").await.unwrap().is_none());
+        assert!(db.get_plugin_source("nonexistent-id", "default", "default").await.unwrap().is_none());
     }
 
     #[tokio::test]
     async fn test_plugin_list() {
         let db = GapDatabase::in_memory().await.unwrap();
 
-        assert_eq!(db.list_plugins().await.unwrap().len(), 0);
+        assert_eq!(db.list_plugins("default", "default").await.unwrap().len(), 0);
 
-        db.add_plugin(&sample_plugin("placeholder1"), "src1").await.unwrap();
-        db.add_plugin(&sample_plugin("placeholder2"), "src2")
+        db.add_plugin(&sample_plugin("placeholder1"), "src1", "default", "default").await.unwrap();
+        db.add_plugin(&sample_plugin("placeholder2"), "src2", "default", "default")
             .await
             .unwrap();
 
-        let plugins = db.list_plugins().await.unwrap();
+        let plugins = db.list_plugins("default", "default").await.unwrap();
         assert_eq!(plugins.len(), 2);
     }
 
@@ -1694,28 +1702,28 @@ mod tests {
     async fn test_plugin_remove_preserves_credentials() {
         let db = GapDatabase::in_memory().await.unwrap();
 
-        let id = db.add_plugin(&sample_plugin("placeholder"), "src").await.unwrap();
-        db.set_credential(&id, "api_key", "secret")
+        let id = db.add_plugin(&sample_plugin("placeholder"), "src", "default", "default").await.unwrap();
+        db.set_credential(&id, "api_key", "secret", "default", "default")
             .await
             .unwrap();
 
         // Remove plugin
-        db.remove_plugin(&id).await.unwrap();
+        db.remove_plugin(&id, "default", "default").await.unwrap();
 
         // Plugin is gone
-        assert!(db.get_plugin(&id).await.unwrap().is_none());
+        assert!(db.get_plugin(&id, "default", "default").await.unwrap().is_none());
         // Credentials are preserved
-        let cred = db.get_credential(&id, "api_key").await.unwrap();
+        let cred = db.get_credential(&id, "api_key", "default", "default").await.unwrap();
         assert_eq!(cred, Some("secret".to_string()));
     }
 
     #[tokio::test]
     async fn test_plugin_has() {
         let db = GapDatabase::in_memory().await.unwrap();
-        assert!(!db.has_plugin("nonexistent-id").await.unwrap());
+        assert!(!db.has_plugin("nonexistent-id", "default", "default").await.unwrap());
 
-        let id = db.add_plugin(&sample_plugin("placeholder"), "src").await.unwrap();
-        assert!(db.has_plugin(&id).await.unwrap());
+        let id = db.add_plugin(&sample_plugin("placeholder"), "src", "default", "default").await.unwrap();
+        assert!(db.has_plugin(&id, "default", "default").await.unwrap());
     }
 
     #[tokio::test]
@@ -1734,9 +1742,9 @@ mod tests {
             scope_id: "default".to_string(),
         };
 
-        let id = db.add_plugin(&plugin, "src").await.unwrap();
+        let id = db.add_plugin(&plugin, "src", "default", "default").await.unwrap();
 
-        let got = db.get_plugin(&id).await.unwrap().unwrap();
+        let got = db.get_plugin(&id, "default", "default").await.unwrap().unwrap();
         assert_eq!(got.commit_sha, Some("abc1234".to_string()));
     }
 
@@ -1746,50 +1754,50 @@ mod tests {
     async fn test_credential_set_and_get() {
         let db = GapDatabase::in_memory().await.unwrap();
 
-        db.set_credential("plugin-id-1", "api_key", "secret")
+        db.set_credential("plugin-id-1", "api_key", "secret", "default", "default")
             .await
             .unwrap();
 
-        let val = db.get_credential("plugin-id-1", "api_key").await.unwrap();
+        let val = db.get_credential("plugin-id-1", "api_key", "default", "default").await.unwrap();
         assert_eq!(val, Some("secret".to_string()));
     }
 
     #[tokio::test]
     async fn test_credential_get_nonexistent() {
         let db = GapDatabase::in_memory().await.unwrap();
-        assert!(db.get_credential("nope", "nope").await.unwrap().is_none());
+        assert!(db.get_credential("nope", "nope", "default", "default").await.unwrap().is_none());
     }
 
     #[tokio::test]
     async fn test_credential_get_plugin_credentials() {
         let db = GapDatabase::in_memory().await.unwrap();
 
-        db.set_credential("plugin-id-1", "api_key", "key-val")
+        db.set_credential("plugin-id-1", "api_key", "key-val", "default", "default")
             .await
             .unwrap();
-        db.set_credential("plugin-id-1", "secret", "secret-val")
+        db.set_credential("plugin-id-1", "secret", "secret-val", "default", "default")
             .await
             .unwrap();
 
-        let creds = db.get_plugin_credentials("plugin-id-1").await.unwrap().unwrap();
+        let creds = db.get_plugin_credentials("plugin-id-1", "default", "default").await.unwrap().unwrap();
         assert_eq!(creds.len(), 2);
         assert_eq!(creds.get("api_key").unwrap(), "key-val");
         assert_eq!(creds.get("secret").unwrap(), "secret-val");
 
         // Nonexistent plugin returns None
-        assert!(db.get_plugin_credentials("nope").await.unwrap().is_none());
+        assert!(db.get_plugin_credentials("nope", "default", "default").await.unwrap().is_none());
     }
 
     #[tokio::test]
     async fn test_credential_list() {
         let db = GapDatabase::in_memory().await.unwrap();
 
-        assert_eq!(db.list_credentials().await.unwrap().len(), 0);
+        assert_eq!(db.list_credentials("default", "default").await.unwrap().len(), 0);
 
-        db.set_credential("plugin-id-1", "api_key", "v1").await.unwrap();
-        db.set_credential("plugin-id-2", "token", "v2").await.unwrap();
+        db.set_credential("plugin-id-1", "api_key", "v1", "default", "default").await.unwrap();
+        db.set_credential("plugin-id-2", "token", "v2", "default", "default").await.unwrap();
 
-        let creds = db.list_credentials().await.unwrap();
+        let creds = db.list_credentials("default", "default").await.unwrap();
         assert_eq!(creds.len(), 2);
         assert!(creds.iter().any(|c| c.plugin_id == "plugin-id-1" && c.field == "api_key"));
         assert!(creds.iter().any(|c| c.plugin_id == "plugin-id-2" && c.field == "token"));
@@ -1799,14 +1807,14 @@ mod tests {
     async fn test_credential_remove() {
         let db = GapDatabase::in_memory().await.unwrap();
 
-        db.set_credential("plugin-id-1", "api_key", "v1").await.unwrap();
-        db.set_credential("plugin-id-1", "secret", "v2").await.unwrap();
+        db.set_credential("plugin-id-1", "api_key", "v1", "default", "default").await.unwrap();
+        db.set_credential("plugin-id-1", "secret", "v2", "default", "default").await.unwrap();
 
-        db.remove_credential("plugin-id-1", "api_key").await.unwrap();
+        db.remove_credential("plugin-id-1", "api_key", "default", "default").await.unwrap();
 
-        assert!(db.get_credential("plugin-id-1", "api_key").await.unwrap().is_none());
+        assert!(db.get_credential("plugin-id-1", "api_key", "default", "default").await.unwrap().is_none());
         assert_eq!(
-            db.get_credential("plugin-id-1", "secret").await.unwrap(),
+            db.get_credential("plugin-id-1", "secret", "default", "default").await.unwrap(),
             Some("v2".to_string())
         );
     }
@@ -2446,9 +2454,9 @@ mod tests {
             namespace_id: "default".to_string(),
             scope_id: "default".to_string(),
         };
-        let id = db.add_plugin(&plugin, source_code).await.unwrap();
+        let id = db.add_plugin(&plugin, source_code, "default", "default").await.unwrap();
 
-        let version = db.get_plugin_version_by_hash(&source_hash).await.unwrap();
+        let version = db.get_plugin_version_by_hash(&source_hash, "default", "default").await.unwrap();
         assert!(version.is_some());
         let version = version.unwrap();
         assert_eq!(version.plugin_id, id);
@@ -2460,7 +2468,7 @@ mod tests {
     #[tokio::test]
     async fn test_get_plugin_version_by_hash_not_found() {
         let db = GapDatabase::in_memory().await.unwrap();
-        let result = db.get_plugin_version_by_hash("nonexistent").await.unwrap();
+        let result = db.get_plugin_version_by_hash("nonexistent", "default", "default").await.unwrap();
         assert!(result.is_none());
     }
 
@@ -2470,13 +2478,13 @@ mod tests {
 
         let plugin = sample_plugin("placeholder");
         let source_code = "function transform() { return request; }";
-        let id = db.add_plugin(&plugin, source_code).await.unwrap();
+        let id = db.add_plugin(&plugin, source_code, "default", "default").await.unwrap();
 
         // Compute expected hash
         let expected_hash = format!("{:x}", sha2::Sha256::digest(source_code.as_bytes()));
 
         // Should be able to find the version by hash
-        let version = db.get_plugin_version_by_hash(&expected_hash).await.unwrap();
+        let version = db.get_plugin_version_by_hash(&expected_hash, "default", "default").await.unwrap();
         assert!(version.is_some());
         let version = version.unwrap();
         assert_eq!(version.plugin_id, id);
@@ -2491,18 +2499,18 @@ mod tests {
 
         // Install v1
         let code_v1 = "// version 1";
-        db.add_plugin(&plugin, code_v1).await.unwrap();
+        db.add_plugin(&plugin, code_v1, "default", "default").await.unwrap();
 
         // Install v2 (different code, gets a new UUID)
         let code_v2 = "// version 2";
-        db.add_plugin(&plugin, code_v2).await.unwrap();
+        db.add_plugin(&plugin, code_v2, "default", "default").await.unwrap();
 
         // Both versions should exist
         let hash_v1 = format!("{:x}", sha2::Sha256::digest(code_v1.as_bytes()));
         let hash_v2 = format!("{:x}", sha2::Sha256::digest(code_v2.as_bytes()));
 
-        let v1 = db.get_plugin_version_by_hash(&hash_v1).await.unwrap();
-        let v2 = db.get_plugin_version_by_hash(&hash_v2).await.unwrap();
+        let v1 = db.get_plugin_version_by_hash(&hash_v1, "default", "default").await.unwrap();
+        let v2 = db.get_plugin_version_by_hash(&hash_v2, "default", "default").await.unwrap();
         assert!(v1.is_some());
         assert!(v2.is_some());
         assert_eq!(v1.unwrap().source_code, code_v1);
@@ -2515,14 +2523,14 @@ mod tests {
     async fn test_remove_plugin_creates_tombstone() {
         let db = GapDatabase::in_memory().await.unwrap();
 
-        let id = db.add_plugin(&sample_plugin("placeholder"), "src").await.unwrap();
-        db.remove_plugin(&id).await.unwrap();
+        let id = db.add_plugin(&sample_plugin("placeholder"), "src", "default", "default").await.unwrap();
+        db.remove_plugin(&id, "default", "default").await.unwrap();
 
         // Plugin should be invisible via get/has/list
-        assert!(db.get_plugin(&id).await.unwrap().is_none());
-        assert!(!db.has_plugin(&id).await.unwrap());
-        assert_eq!(db.list_plugins().await.unwrap().len(), 0);
-        assert!(db.get_plugin_source(&id).await.unwrap().is_none());
+        assert!(db.get_plugin(&id, "default", "default").await.unwrap().is_none());
+        assert!(!db.has_plugin(&id, "default", "default").await.unwrap());
+        assert_eq!(db.list_plugins("default", "default").await.unwrap().len(), 0);
+        assert!(db.get_plugin_source(&id, "default", "default").await.unwrap().is_none());
     }
 
     #[tokio::test]
@@ -2530,15 +2538,15 @@ mod tests {
         let db = GapDatabase::in_memory().await.unwrap();
 
         // Install, delete, reinstall
-        let id1 = db.add_plugin(&sample_plugin("placeholder"), "v1 src").await.unwrap();
-        db.remove_plugin(&id1).await.unwrap();
-        assert!(db.get_plugin(&id1).await.unwrap().is_none());
+        let id1 = db.add_plugin(&sample_plugin("placeholder"), "v1 src", "default", "default").await.unwrap();
+        db.remove_plugin(&id1, "default", "default").await.unwrap();
+        assert!(db.get_plugin(&id1, "default", "default").await.unwrap().is_none());
 
-        let id2 = db.add_plugin(&sample_plugin("placeholder"), "v2 src").await.unwrap();
-        let got = db.get_plugin(&id2).await.unwrap().unwrap();
+        let id2 = db.add_plugin(&sample_plugin("placeholder"), "v2 src", "default", "default").await.unwrap();
+        let got = db.get_plugin(&id2, "default", "default").await.unwrap().unwrap();
         assert_eq!(got.id, id2);
 
-        let src = db.get_plugin_source(&id2).await.unwrap().unwrap();
+        let src = db.get_plugin_source(&id2, "default", "default").await.unwrap().unwrap();
         assert_eq!(src, "v2 src");
     }
 
@@ -2547,13 +2555,13 @@ mod tests {
         let db = GapDatabase::in_memory().await.unwrap();
 
         // Install two plugins
-        let id1 = db.add_plugin(&sample_plugin("placeholder1"), "src1").await.unwrap();
-        let id2 = db.add_plugin(&sample_plugin("placeholder2"), "src2").await.unwrap();
+        let id1 = db.add_plugin(&sample_plugin("placeholder1"), "src1", "default", "default").await.unwrap();
+        let id2 = db.add_plugin(&sample_plugin("placeholder2"), "src2", "default", "default").await.unwrap();
 
         // Delete one
-        db.remove_plugin(&id1).await.unwrap();
+        db.remove_plugin(&id1, "default", "default").await.unwrap();
 
-        let plugins = db.list_plugins().await.unwrap();
+        let plugins = db.list_plugins("default", "default").await.unwrap();
         assert_eq!(plugins.len(), 1);
         assert_eq!(plugins[0].id, id2);
     }
@@ -2574,7 +2582,7 @@ mod tests {
             namespace_id: "default".to_string(),
             scope_id: "default".to_string(),
         };
-        let id1 = db.add_plugin(&plugin_v1, "v1 code").await.unwrap();
+        let id1 = db.add_plugin(&plugin_v1, "v1 code", "default", "default").await.unwrap();
 
         let plugin_v2 = PluginEntry {
             id: "placeholder".to_string(),
@@ -2588,24 +2596,24 @@ mod tests {
             namespace_id: "default".to_string(),
             scope_id: "default".to_string(),
         };
-        let id2 = db.add_plugin(&plugin_v2, "v2 code").await.unwrap();
+        let id2 = db.add_plugin(&plugin_v2, "v2 code", "default", "default").await.unwrap();
 
         // Each add_plugin generates a unique UUID, so both plugins exist independently
-        let got1 = db.get_plugin(&id1).await.unwrap().unwrap();
+        let got1 = db.get_plugin(&id1, "default", "default").await.unwrap().unwrap();
         assert_eq!(got1.hosts, vec!["api.exa.ai"]);
         assert_eq!(got1.commit_sha, Some("aaa1111".to_string()));
 
-        let got2 = db.get_plugin(&id2).await.unwrap().unwrap();
+        let got2 = db.get_plugin(&id2, "default", "default").await.unwrap().unwrap();
         assert_eq!(got2.hosts, vec!["api.exa.ai", "new.exa.ai"]);
         assert_eq!(got2.credential_schema, vec!["api_key", "secret"]);
         assert_eq!(got2.commit_sha, Some("bbb2222".to_string()));
 
         // get_plugin_source should return respective code
-        let src2 = db.get_plugin_source(&id2).await.unwrap().unwrap();
+        let src2 = db.get_plugin_source(&id2, "default", "default").await.unwrap().unwrap();
         assert_eq!(src2, "v2 code");
 
         // list should show both plugins (each has a unique ID)
-        let plugins = db.list_plugins().await.unwrap();
+        let plugins = db.list_plugins("default", "default").await.unwrap();
         assert_eq!(plugins.len(), 2);
     }
 
@@ -2626,9 +2634,9 @@ mod tests {
             namespace_id: "default".to_string(),
             scope_id: "default".to_string(),
         };
-        let id = db.add_plugin(&plugin, "src").await.unwrap();
+        let id = db.add_plugin(&plugin, "src", "default", "default").await.unwrap();
 
-        let got = db.get_plugin(&id).await.unwrap().unwrap();
+        let got = db.get_plugin(&id, "default", "default").await.unwrap().unwrap();
         assert!(got.dangerously_permit_http, "dangerously_permit_http should be true");
     }
 
@@ -2638,9 +2646,9 @@ mod tests {
 
         // Plugin without dangerously_permit_http (default false)
         let plugin = sample_plugin("placeholder");
-        let id = db.add_plugin(&plugin, "src").await.unwrap();
+        let id = db.add_plugin(&plugin, "src", "default", "default").await.unwrap();
 
-        let got = db.get_plugin(&id).await.unwrap().unwrap();
+        let got = db.get_plugin(&id, "default", "default").await.unwrap().unwrap();
         assert!(!got.dangerously_permit_http, "dangerously_permit_http should default to false");
     }
 
@@ -2660,9 +2668,9 @@ mod tests {
             namespace_id: "default".to_string(),
             scope_id: "default".to_string(),
         };
-        db.add_plugin(&plugin, "src").await.unwrap();
+        db.add_plugin(&plugin, "src", "default", "default").await.unwrap();
 
-        let plugins = db.list_plugins().await.unwrap();
+        let plugins = db.list_plugins("default", "default").await.unwrap();
         assert_eq!(plugins.len(), 1);
         assert!(plugins[0].dangerously_permit_http);
     }
@@ -3108,16 +3116,16 @@ mod tests {
 
         // Add plugin with default weight=0
         let plugin = sample_plugin("placeholder");
-        let id = db.add_plugin(&plugin, "src").await.unwrap();
+        let id = db.add_plugin(&plugin, "src", "default", "default").await.unwrap();
 
-        let got = db.get_plugin(&id).await.unwrap().unwrap();
+        let got = db.get_plugin(&id, "default", "default").await.unwrap().unwrap();
         assert_eq!(got.weight, 0);
 
         // Update weight
-        db.update_plugin_weight(&id, 42).await.unwrap();
+        db.update_plugin_weight(&id, 42, "default", "default").await.unwrap();
 
         // Verify via list_plugins
-        let plugins = db.list_plugins().await.unwrap();
+        let plugins = db.list_plugins("default", "default").await.unwrap();
         let p = plugins.iter().find(|p| p.id == id).unwrap();
         assert_eq!(p.weight, 42);
     }
@@ -3127,12 +3135,115 @@ mod tests {
         let db = GapDatabase::in_memory().await.unwrap();
 
         let plugin = sample_plugin("placeholder");
-        let id = db.add_plugin(&plugin, "src").await.unwrap();
+        let id = db.add_plugin(&plugin, "src", "default", "default").await.unwrap();
 
-        let got = db.get_plugin(&id).await.unwrap().unwrap();
+        let got = db.get_plugin(&id, "default", "default").await.unwrap().unwrap();
         assert!(
             got.installed_at.is_some(),
             "installed_at should be populated from DB"
         );
+    }
+
+    // ── Namespace Isolation ──────────────────────────────────────────
+
+    #[tokio::test]
+    async fn test_plugin_namespace_isolation() {
+        let db = GapDatabase::in_memory().await.unwrap();
+
+        // Add plugin in org1/team1
+        let plugin = sample_plugin("placeholder");
+        let id = db.add_plugin(&plugin, "function transform() {}", "org1", "team1").await.unwrap();
+
+        // Visible from org1/team1
+        assert!(db.get_plugin(&id, "org1", "team1").await.unwrap().is_some());
+        assert!(db.has_plugin(&id, "org1", "team1").await.unwrap());
+        assert_eq!(db.list_plugins("org1", "team1").await.unwrap().len(), 1);
+        assert!(db.get_plugin_source(&id, "org1", "team1").await.unwrap().is_some());
+
+        // NOT visible from org1/team2 (different scope)
+        assert!(db.get_plugin(&id, "org1", "team2").await.unwrap().is_none());
+        assert!(!db.has_plugin(&id, "org1", "team2").await.unwrap());
+        assert_eq!(db.list_plugins("org1", "team2").await.unwrap().len(), 0);
+        assert!(db.get_plugin_source(&id, "org1", "team2").await.unwrap().is_none());
+
+        // NOT visible from org2/team1 (different namespace)
+        assert!(db.get_plugin(&id, "org2", "team1").await.unwrap().is_none());
+        assert!(!db.has_plugin(&id, "org2", "team1").await.unwrap());
+        assert_eq!(db.list_plugins("org2", "team1").await.unwrap().len(), 0);
+
+        // NOT visible from default/default
+        assert!(db.get_plugin(&id, "default", "default").await.unwrap().is_none());
+        assert_eq!(db.list_plugins("default", "default").await.unwrap().len(), 0);
+
+        // Verify returned entry has correct namespace/scope
+        let got = db.get_plugin(&id, "org1", "team1").await.unwrap().unwrap();
+        assert_eq!(got.namespace_id, "org1");
+        assert_eq!(got.scope_id, "team1");
+
+        // Verify list_plugins returns entries with correct namespace/scope
+        let plugins = db.list_plugins("org1", "team1").await.unwrap();
+        assert_eq!(plugins[0].namespace_id, "org1");
+        assert_eq!(plugins[0].scope_id, "team1");
+
+        // Verify remove_plugin respects namespace/scope
+        db.remove_plugin(&id, "org1", "team2").await.unwrap(); // wrong scope - should not affect
+        assert!(db.has_plugin(&id, "org1", "team1").await.unwrap()); // still visible
+        db.remove_plugin(&id, "org1", "team1").await.unwrap(); // correct scope
+        assert!(!db.has_plugin(&id, "org1", "team1").await.unwrap()); // now gone
+
+        // Verify get_plugin_version_by_hash respects namespace/scope
+        let source_hash = format!("{:x}", sha2::Sha256::digest("function transform() {}".as_bytes()));
+        assert!(db.get_plugin_version_by_hash(&source_hash, "org1", "team1").await.unwrap().is_some());
+        assert!(db.get_plugin_version_by_hash(&source_hash, "org1", "team2").await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn test_credential_namespace_isolation() {
+        let db = GapDatabase::in_memory().await.unwrap();
+
+        // Set credential in org1/team1
+        db.set_credential("plugin-1", "api_key", "secret-for-team1", "org1", "team1")
+            .await
+            .unwrap();
+
+        // Visible from org1/team1
+        let val = db.get_credential("plugin-1", "api_key", "org1", "team1").await.unwrap();
+        assert_eq!(val, Some("secret-for-team1".to_string()));
+
+        // NOT visible from org1/team2
+        let val = db.get_credential("plugin-1", "api_key", "org1", "team2").await.unwrap();
+        assert!(val.is_none());
+
+        // NOT visible from org2/team1
+        let val = db.get_credential("plugin-1", "api_key", "org2", "team1").await.unwrap();
+        assert!(val.is_none());
+
+        // NOT visible from default/default
+        let val = db.get_credential("plugin-1", "api_key", "default", "default").await.unwrap();
+        assert!(val.is_none());
+
+        // get_plugin_credentials also isolated
+        let creds = db.get_plugin_credentials("plugin-1", "org1", "team1").await.unwrap();
+        assert!(creds.is_some());
+        assert_eq!(creds.unwrap().get("api_key").unwrap(), "secret-for-team1");
+
+        let creds = db.get_plugin_credentials("plugin-1", "org1", "team2").await.unwrap();
+        assert!(creds.is_none());
+
+        // list_credentials isolated
+        let creds = db.list_credentials("org1", "team1").await.unwrap();
+        assert_eq!(creds.len(), 1);
+        assert_eq!(creds[0].namespace_id, "org1");
+        assert_eq!(creds[0].scope_id, "team1");
+
+        let creds = db.list_credentials("org1", "team2").await.unwrap();
+        assert_eq!(creds.len(), 0);
+
+        // remove_credential isolated
+        db.remove_credential("plugin-1", "api_key", "org1", "team2").await.unwrap(); // wrong scope
+        assert!(db.get_credential("plugin-1", "api_key", "org1", "team1").await.unwrap().is_some()); // still there
+
+        db.remove_credential("plugin-1", "api_key", "org1", "team1").await.unwrap(); // correct scope
+        assert!(db.get_credential("plugin-1", "api_key", "org1", "team1").await.unwrap().is_none()); // now gone
     }
 }

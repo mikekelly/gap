@@ -43,12 +43,12 @@ async fn test_parse_and_transform_with_multi_field_credentials() {
         namespace_id: "default".to_string(),
         scope_id: "default".to_string(),
     };
-    let plugin_id = db.add_plugin(&plugin_entry, plugin_code).await.unwrap();
+    let plugin_id = db.add_plugin(&plugin_entry, plugin_code, "default", "default").await.unwrap();
 
     // Set credentials directly in database
-    db.set_credential(&plugin_id, "access_key", "AKIAIOSFODNN7EXAMPLE").await.unwrap();
-    db.set_credential(&plugin_id, "secret_key", "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY").await.unwrap();
-    db.set_credential(&plugin_id, "region", "us-west-2").await.unwrap();
+    db.set_credential(&plugin_id, "access_key", "AKIAIOSFODNN7EXAMPLE", "default", "default").await.unwrap();
+    db.set_credential(&plugin_id, "secret_key", "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY", "default", "default").await.unwrap();
+    db.set_credential(&plugin_id, "region", "us-west-2", "default", "default").await.unwrap();
 
     // Simulate an incoming HTTP request
     let raw_http = b"GET /api/data HTTP/1.1\r\nHost: api.multicred.com\r\nUser-Agent: TestAgent/1.0\r\n\r\n";
@@ -97,10 +97,10 @@ async fn test_parse_and_transform_with_single_field_credential() {
         namespace_id: "default".to_string(),
         scope_id: "default".to_string(),
     };
-    let plugin_id = db.add_plugin(&plugin_entry, plugin_code).await.unwrap();
+    let plugin_id = db.add_plugin(&plugin_entry, plugin_code, "default", "default").await.unwrap();
 
     // Set credential directly in database
-    db.set_credential(&plugin_id, "api_key", "secret-api-key-123").await.unwrap();
+    db.set_credential(&plugin_id, "api_key", "secret-api-key-123", "default", "default").await.unwrap();
 
     // Simulate an incoming HTTP request
     let raw_http = b"GET /api/data HTTP/1.1\r\nHost: api.simple.com\r\n\r\n";
@@ -170,7 +170,7 @@ async fn test_parse_and_transform_rejects_missing_credentials() {
         namespace_id: "default".to_string(),
         scope_id: "default".to_string(),
     };
-    db.add_plugin(&plugin_entry, plugin_code).await.unwrap();
+    db.add_plugin(&plugin_entry, plugin_code, "default", "default").await.unwrap();
 
     // Note: NOT storing credentials - plugin exists but is not configured
 

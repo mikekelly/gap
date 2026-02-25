@@ -1394,8 +1394,8 @@ mod tests {
             namespace_id: "default".to_string(),
             scope_id: "default".to_string(),
         };
-        let plugin_id = db.add_plugin(&plugin_entry, plugin_code).await.unwrap();
-        db.set_credential(&plugin_id, "api_key", "my-secret-key").await.unwrap();
+        let plugin_id = db.add_plugin(&plugin_entry, plugin_code, "default", "default").await.unwrap();
+        db.set_credential(&plugin_id, "api_key", "my-secret-key", "default", "default").await.unwrap();
 
         // -- Create paired DuplexStreams --
         // Agent side: agent_client writes HTTP requests, proxy reads them
@@ -1553,8 +1553,8 @@ mod tests {
             namespace_id: "default".to_string(),
             scope_id: "default".to_string(),
         };
-        let plugin_id_http = db.add_plugin(&plugin_entry, plugin_code).await.unwrap();
-        db.set_credential(&plugin_id_http, "api_key", "http-secret").await.unwrap();
+        let plugin_id_http = db.add_plugin(&plugin_entry, plugin_code, "default", "default").await.unwrap();
+        db.set_credential(&plugin_id_http, "api_key", "http-secret", "default", "default").await.unwrap();
 
         // -- Create paired DuplexStreams --
         let (agent_client, agent_proxy) = tokio::io::duplex(8192);
@@ -1673,8 +1673,8 @@ mod tests {
             namespace_id: "default".to_string(),
             scope_id: "default".to_string(),
         };
-        let plugin_id_details = db.add_plugin(&plugin_entry, plugin_code).await.unwrap();
-        db.set_credential(&plugin_id_details, "api_key", "secret-key-456").await.unwrap();
+        let plugin_id_details = db.add_plugin(&plugin_entry, plugin_code, "default", "default").await.unwrap();
+        db.set_credential(&plugin_id_details, "api_key", "secret-key-456", "default", "default").await.unwrap();
 
         let (agent_client, agent_proxy) = tokio::io::duplex(8192);
         let (upstream_proxy, upstream_server) = tokio::io::duplex(8192);

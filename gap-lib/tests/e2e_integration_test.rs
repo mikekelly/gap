@@ -252,7 +252,7 @@ async fn test_plugin_installation_flow() {
         namespace_id: "default".to_string(),
         scope_id: "default".to_string(),
     };
-    let plugin_id = db.add_plugin(&plugin_entry, plugin_code)
+    let plugin_id = db.add_plugin(&plugin_entry, plugin_code, "default", "default")
         .await
         .expect("Failed to install plugin");
 
@@ -269,7 +269,7 @@ async fn test_plugin_installation_flow() {
     assert_eq!(plugin.credential_schema, vec!["api_key"]);
 
     // Verify plugin can be retrieved from database
-    let retrieved = db.get_plugin_source(&plugin_id).await.expect("Failed to get plugin");
+    let retrieved = db.get_plugin_source(&plugin_id, "default", "default").await.expect("Failed to get plugin");
     assert!(retrieved.is_some());
 }
 
@@ -281,21 +281,21 @@ async fn test_credential_setting_flow() {
     let db = GapDatabase::in_memory().await.expect("Failed to create in-memory db");
 
     // Set a credential
-    db.set_credential("test-service", "api_key", "secret_key_12345")
+    db.set_credential("test-service", "api_key", "secret_key_12345", "default", "default")
         .await
         .expect("Failed to set credential");
 
     // Retrieve and verify
-    let retrieved = db.get_credential("test-service", "api_key")
+    let retrieved = db.get_credential("test-service", "api_key", "default", "default")
         .await
         .expect("Failed to get credential");
     assert_eq!(retrieved, Some("secret_key_12345".to_string()));
 
     // Verify can be deleted
-    db.remove_credential("test-service", "api_key")
+    db.remove_credential("test-service", "api_key", "default", "default")
         .await
         .expect("Failed to delete");
-    let deleted = db.get_credential("test-service", "api_key")
+    let deleted = db.get_credential("test-service", "api_key", "default", "default")
         .await
         .expect("Failed to get after delete");
     assert_eq!(deleted, None);
