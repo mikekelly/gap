@@ -179,7 +179,7 @@ pub struct InitResponse {
 
 #[derive(Debug, Deserialize)]
 pub struct PluginInfo {
-    pub name: String,
+    pub id: String,
     pub match_patterns: Vec<String>,
     pub credential_schema: Vec<String>,
 }
@@ -191,27 +191,28 @@ pub struct PluginsResponse {
 
 #[derive(Debug, Deserialize)]
 pub struct InstallResponse {
-    pub name: String,
+    pub id: String,
+    pub source: String,
     pub installed: bool,
     pub commit_sha: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
 pub struct UninstallResponse {
-    pub name: String,
+    pub id: String,
     pub uninstalled: bool,
 }
 
 #[derive(Debug, Deserialize)]
 pub struct UpdateResponse {
-    pub name: String,
+    pub id: String,
     pub updated: bool,
     pub commit_sha: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
 pub struct SetCredentialResponse {
-    pub plugin: String,
+    pub plugin_id: String,
     pub key: String,
     pub set: bool,
 }
@@ -255,7 +256,7 @@ pub struct ActivityEntry {
     pub url: String,
     pub agent_id: Option<String>,
     pub status: u16,
-    pub plugin_name: Option<String>,
+    pub plugin_id: Option<String>,
     pub plugin_sha: Option<String>,
     pub source_hash: Option<String>,
     pub request_headers: Option<String>,
@@ -373,5 +374,59 @@ mod tests {
 
         assert_eq!(url, "http://localhost:9080/management-log");
         assert!(!url.contains('?'));
+    }
+
+    #[test]
+    fn test_plugin_info_has_id_field() {
+        // PluginInfo should use `id` (UUID) not `name`
+        let json = r#"{"id":"550e8400-e29b-41d4-a716-446655440000","match_patterns":["*.example.com"],"credential_schema":["api_key"]}"#;
+        let info: PluginInfo = serde_json::from_str(json).unwrap();
+        assert_eq!(info.id, "550e8400-e29b-41d4-a716-446655440000");
+    }
+
+    #[test]
+    fn test_install_response_has_id_and_source_fields() {
+        // InstallResponse should use `id` and have `source`
+        let json = r#"{"id":"550e8400-e29b-41d4-a716-446655440000","source":"owner/repo","installed":true,"commit_sha":"abc123"}"#;
+        let resp: InstallResponse = serde_json::from_str(json).unwrap();
+        assert_eq!(resp.id, "550e8400-e29b-41d4-a716-446655440000");
+        assert_eq!(resp.source, "owner/repo");
+        assert!(resp.installed);
+    }
+
+    #[test]
+    fn test_uninstall_response_has_id_field() {
+        // UninstallResponse should use `id` not `name`
+        let json = r#"{"id":"550e8400-e29b-41d4-a716-446655440000","uninstalled":true}"#;
+        let resp: UninstallResponse = serde_json::from_str(json).unwrap();
+        assert_eq!(resp.id, "550e8400-e29b-41d4-a716-446655440000");
+        assert!(resp.uninstalled);
+    }
+
+    #[test]
+    fn test_update_response_has_id_field() {
+        // UpdateResponse should use `id` not `name`
+        let json = r#"{"id":"550e8400-e29b-41d4-a716-446655440000","updated":true,"commit_sha":null}"#;
+        let resp: UpdateResponse = serde_json::from_str(json).unwrap();
+        assert_eq!(resp.id, "550e8400-e29b-41d4-a716-446655440000");
+        assert!(resp.updated);
+    }
+
+    #[test]
+    fn test_set_credential_response_has_plugin_id_field() {
+        // SetCredentialResponse should use `plugin_id` not `plugin`
+        let json = r#"{"plugin_id":"550e8400-e29b-41d4-a716-446655440000","key":"api_key","set":true}"#;
+        let resp: SetCredentialResponse = serde_json::from_str(json).unwrap();
+        assert_eq!(resp.plugin_id, "550e8400-e29b-41d4-a716-446655440000");
+        assert_eq!(resp.key, "api_key");
+        assert!(resp.set);
+    }
+
+    #[test]
+    fn test_activity_entry_has_plugin_id_field() {
+        // ActivityEntry should use `plugin_id` not `plugin_name`
+        let json = r#"{"timestamp":"2024-01-01T00:00:00Z","request_id":null,"method":"GET","url":"https://api.example.com","agent_id":null,"status":200,"plugin_id":"550e8400-e29b-41d4-a716-446655440000","plugin_sha":null,"source_hash":null,"request_headers":null}"#;
+        let entry: ActivityEntry = serde_json::from_str(json).unwrap();
+        assert_eq!(entry.plugin_id.as_deref(), Some("550e8400-e29b-41d4-a716-446655440000"));
     }
 }

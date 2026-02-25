@@ -51,20 +51,20 @@ enum Commands {
 
     /// Install a plugin
     Install {
-        /// Plugin name or URL
-        name: String,
+        /// Plugin source (owner/repo)
+        source: String,
     },
 
     /// Uninstall a plugin
     Uninstall {
-        /// Plugin name
-        name: String,
+        /// Plugin ID (UUID or prefix, min 4 chars)
+        id: String,
     },
 
     /// Update a plugin to the latest version
     Update {
-        /// Plugin name
-        name: String,
+        /// Plugin ID (UUID or prefix, min 4 chars)
+        id: String,
     },
 
     /// Set a credential for a plugin
@@ -173,9 +173,9 @@ async fn main() {
         Commands::Init { ca_path, management_sans } => commands::init::run(&cli.server, ca_path.as_deref(), management_sans.as_deref()).await,
         Commands::Status => commands::status::run(&cli.server).await,
         Commands::Plugins => commands::plugins::list(&cli.server).await,
-        Commands::Install { name } => commands::plugins::install(&cli.server, &name).await,
-        Commands::Uninstall { name } => commands::plugins::uninstall(&cli.server, &name).await,
-        Commands::Update { name } => commands::plugins::update(&cli.server, &name).await,
+        Commands::Install { source } => commands::plugins::install(&cli.server, &source).await,
+        Commands::Uninstall { id } => commands::plugins::uninstall(&cli.server, &id).await,
+        Commands::Update { id } => commands::plugins::update(&cli.server, &id).await,
         Commands::Set { key } => commands::credentials::set(&cli.server, &key).await,
         Commands::Token(token_cmd) => match token_cmd {
             TokenCommands::List { all } => commands::tokens::list(&cli.server, all).await,
@@ -225,10 +225,10 @@ mod tests {
 
     #[test]
     fn test_cli_install_parses() {
-        let cli = Cli::parse_from(["gap", "install", "exa"]);
+        let cli = Cli::parse_from(["gap", "install", "owner/repo"]);
         match cli.command {
-            Commands::Install { name } => {
-                assert_eq!(name, "exa");
+            Commands::Install { source } => {
+                assert_eq!(source, "owner/repo");
             }
             _ => panic!("Expected Install command"),
         }
@@ -236,12 +236,23 @@ mod tests {
 
     #[test]
     fn test_cli_uninstall_parses() {
-        let cli = Cli::parse_from(["gap", "uninstall", "exa"]);
+        let cli = Cli::parse_from(["gap", "uninstall", "550e8400-e29b-41d4-a716-446655440000"]);
         match cli.command {
-            Commands::Uninstall { name } => {
-                assert_eq!(name, "exa");
+            Commands::Uninstall { id } => {
+                assert_eq!(id, "550e8400-e29b-41d4-a716-446655440000");
             }
             _ => panic!("Expected Uninstall command"),
+        }
+    }
+
+    #[test]
+    fn test_cli_update_parses() {
+        let cli = Cli::parse_from(["gap", "update", "550e8400-e29b-41d4-a716-446655440000"]);
+        match cli.command {
+            Commands::Update { id } => {
+                assert_eq!(id, "550e8400-e29b-41d4-a716-446655440000");
+            }
+            _ => panic!("Expected Update command"),
         }
     }
 

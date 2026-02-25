@@ -18,7 +18,7 @@ pub async fn list(server_url: &str) -> Result<()> {
         println!("Installed Plugins:");
         println!();
         for plugin in response.plugins {
-            println!("  {}", plugin.name);
+            println!("  {}", plugin.id);
             println!("    Matches: {}", plugin.match_patterns.join(", "));
             println!("    Credentials: {}", plugin.credential_schema.join(", "));
             println!();
@@ -28,14 +28,14 @@ pub async fn list(server_url: &str) -> Result<()> {
     Ok(())
 }
 
-pub async fn install(server_url: &str, name: &str) -> Result<()> {
+pub async fn install(server_url: &str, source: &str) -> Result<()> {
     let password = read_password("Password: ")?;
     let password_hash = hash_password(&password);
 
     let client = crate::create_api_client(server_url)?;
 
     let body = json!({
-        "name": name
+        "source": source
     });
 
     let response: crate::client::InstallResponse =
@@ -43,58 +43,56 @@ pub async fn install(server_url: &str, name: &str) -> Result<()> {
 
     if response.installed {
         if let Some(sha) = response.commit_sha {
-            println!("Plugin '{}' installed successfully. (commit: {})", response.name, sha);
+            println!("Plugin '{}' ({}) installed successfully. (commit: {})", response.id, response.source, sha);
         } else {
-            println!("Plugin '{}' installed successfully.", response.name);
+            println!("Plugin '{}' ({}) installed successfully.", response.id, response.source);
         }
     } else {
-        println!("Failed to install plugin '{}'.", response.name);
+        println!("Failed to install plugin '{}'.", response.id);
     }
 
     Ok(())
 }
 
-pub async fn uninstall(server_url: &str, name: &str) -> Result<()> {
+pub async fn uninstall(server_url: &str, id: &str) -> Result<()> {
     let password = read_password("Password: ")?;
     let password_hash = hash_password(&password);
 
     let client = crate::create_api_client(server_url)?;
 
-    // URL-encode the plugin name (handles owner/repo with /)
-    let encoded_name = urlencoding::encode(name);
-    let path = format!("/plugins/{}", encoded_name);
+    // UUIDs don't contain slashes, no URL encoding needed
+    let path = format!("/plugins/{}", id);
     let response: crate::client::UninstallResponse =
         client.delete_auth(&path, &password_hash).await?;
 
     if response.uninstalled {
-        println!("Plugin '{}' uninstalled successfully.", response.name);
+        println!("Plugin '{}' uninstalled successfully.", response.id);
     } else {
-        println!("Failed to uninstall plugin '{}'.", response.name);
+        println!("Failed to uninstall plugin '{}'.", response.id);
     }
 
     Ok(())
 }
 
-pub async fn update(server_url: &str, name: &str) -> Result<()> {
+pub async fn update(server_url: &str, id: &str) -> Result<()> {
     let password = read_password("Password: ")?;
     let password_hash = hash_password(&password);
 
     let client = crate::create_api_client(server_url)?;
 
-    // URL-encode the plugin name (handles owner/repo with /)
-    let encoded_name = urlencoding::encode(name);
-    let path = format!("/plugins/{}/update", encoded_name);
+    // UUIDs don't contain slashes, no URL encoding needed
+    let path = format!("/plugins/{}/update", id);
     let response: crate::client::UpdateResponse =
         client.post_auth(&path, &password_hash, json!({})).await?;
 
     if response.updated {
         if let Some(sha) = response.commit_sha {
-            println!("Plugin '{}' updated successfully. (commit: {})", response.name, sha);
+            println!("Plugin '{}' updated successfully. (commit: {})", response.id, sha);
         } else {
-            println!("Plugin '{}' updated successfully.", response.name);
+            println!("Plugin '{}' updated successfully.", response.id);
         }
     } else {
-        println!("Failed to update plugin '{}'.", response.name);
+        println!("Failed to update plugin '{}'.", response.id);
     }
 
     Ok(())
