@@ -23,7 +23,9 @@ CREATE TABLE IF NOT EXISTS tokens (
     name TEXT NOT NULL DEFAULT '',
     created_at TEXT NOT NULL,
     revoked_at TEXT,
-    has_scopes INTEGER NOT NULL DEFAULT 0
+    has_scopes INTEGER NOT NULL DEFAULT 0,
+    namespace_id TEXT NOT NULL DEFAULT 'default',
+    scope_id TEXT NOT NULL DEFAULT 'default'
 );
 
 CREATE TABLE IF NOT EXISTS token_scopes (
@@ -40,7 +42,9 @@ CREATE TABLE IF NOT EXISTS credentials (
     plugin_id TEXT NOT NULL,
     field TEXT NOT NULL,
     value TEXT NOT NULL,
-    PRIMARY KEY (plugin_id, field)
+    namespace_id TEXT NOT NULL DEFAULT 'default',
+    scope_id TEXT NOT NULL DEFAULT 'default',
+    PRIMARY KEY (namespace_id, scope_id, plugin_id, field)
 );
 
 CREATE TABLE IF NOT EXISTS access_logs (
@@ -54,7 +58,9 @@ CREATE TABLE IF NOT EXISTS access_logs (
     plugin_id TEXT,
     plugin_sha TEXT,
     source_hash TEXT,
-    request_headers TEXT
+    request_headers TEXT,
+    namespace_id TEXT NOT NULL DEFAULT 'default',
+    scope_id TEXT NOT NULL DEFAULT 'default'
 );
 
 CREATE INDEX IF NOT EXISTS idx_access_logs_timestamp ON access_logs(timestamp);
@@ -69,7 +75,9 @@ CREATE TABLE IF NOT EXISTS plugin_versions (
     source_hash TEXT NOT NULL,
     source_code TEXT NOT NULL,
     installed_at TEXT NOT NULL,
-    deleted INTEGER NOT NULL DEFAULT 0
+    deleted INTEGER NOT NULL DEFAULT 0,
+    namespace_id TEXT NOT NULL DEFAULT 'default',
+    scope_id TEXT NOT NULL DEFAULT 'default'
 );
 
 CREATE INDEX IF NOT EXISTS idx_plugin_versions_plugin ON plugin_versions(plugin_id);
@@ -83,7 +91,9 @@ CREATE TABLE IF NOT EXISTS management_logs (
     resource_id TEXT NOT NULL DEFAULT '',
     detail TEXT NOT NULL DEFAULT '',
     success INTEGER NOT NULL,
-    error_message TEXT NOT NULL DEFAULT ''
+    error_message TEXT NOT NULL DEFAULT '',
+    namespace_id TEXT NOT NULL DEFAULT 'default',
+    scope_id TEXT NOT NULL DEFAULT 'default'
 );
 
 CREATE INDEX IF NOT EXISTS idx_management_logs_timestamp ON management_logs(timestamp);
@@ -107,7 +117,9 @@ CREATE TABLE IF NOT EXISTS header_sets (
     match_patterns TEXT NOT NULL DEFAULT '[]',
     weight INTEGER NOT NULL DEFAULT 0,
     created_at TEXT NOT NULL,
-    deleted INTEGER NOT NULL DEFAULT 0
+    deleted INTEGER NOT NULL DEFAULT 0,
+    namespace_id TEXT NOT NULL DEFAULT 'default',
+    scope_id TEXT NOT NULL DEFAULT 'default'
 );
 
 CREATE TABLE IF NOT EXISTS header_set_headers (
@@ -116,6 +128,13 @@ CREATE TABLE IF NOT EXISTS header_set_headers (
     header_value TEXT NOT NULL,
     PRIMARY KEY (header_set_id, header_name)
 );
+
+CREATE INDEX IF NOT EXISTS idx_plugin_versions_ns ON plugin_versions(namespace_id, scope_id);
+CREATE INDEX IF NOT EXISTS idx_credentials_ns ON credentials(namespace_id, scope_id);
+CREATE INDEX IF NOT EXISTS idx_header_sets_ns ON header_sets(namespace_id, scope_id);
+CREATE INDEX IF NOT EXISTS idx_access_logs_ns ON access_logs(namespace_id, scope_id);
+CREATE INDEX IF NOT EXISTS idx_management_logs_ns ON management_logs(namespace_id, scope_id);
+CREATE INDEX IF NOT EXISTS idx_tokens_ns ON tokens(namespace_id, scope_id);
 ";
 
 /// Embedded libSQL database for GAP persistent storage.
@@ -278,6 +297,17 @@ impl GapDatabase {
             }
         }
 
+        // Namespace mode columns — ignore errors if columns already exist
+        let ns_tables = ["tokens", "credentials", "plugin_versions", "header_sets", "access_logs", "management_logs"];
+        for table in ns_tables {
+            let _ = self.conn.execute(&format!(
+                "ALTER TABLE {} ADD COLUMN namespace_id TEXT NOT NULL DEFAULT 'default'", table
+            ), ()).await;
+            let _ = self.conn.execute(&format!(
+                "ALTER TABLE {} ADD COLUMN scope_id TEXT NOT NULL DEFAULT 'default'", table
+            ), ()).await;
+        }
+
         Ok(())
     }
 
@@ -361,6 +391,8 @@ impl GapDatabase {
                 created_at,
                 scopes,
                 revoked_at: None,
+                namespace_id: "default".to_string(),
+                scope_id: "default".to_string(),
             }))
         } else {
             Ok(None)
@@ -442,6 +474,8 @@ impl GapDatabase {
                 created_at,
                 scopes,
                 revoked_at,
+                namespace_id: "default".to_string(),
+                scope_id: "default".to_string(),
             });
         }
         Ok(result)
@@ -658,6 +692,8 @@ impl GapDatabase {
             dangerously_permit_http: dangerously_permit_http != 0,
             weight,
             installed_at,
+            namespace_id: "default".to_string(),
+            scope_id: "default".to_string(),
         })
     }
 
@@ -768,7 +804,12 @@ impl GapDatabase {
         while let Some(row) = rows.next().await.map_err(|e| GapError::database(e.to_string()))? {
             let plugin_id: String = row.get(0).map_err(|e| GapError::database(e.to_string()))?;
             let field: String = row.get(1).map_err(|e| GapError::database(e.to_string()))?;
-            result.push(CredentialEntry { plugin_id, field });
+            result.push(CredentialEntry {
+                plugin_id,
+                field,
+                namespace_id: "default".to_string(),
+                scope_id: "default".to_string(),
+            });
         }
         Ok(result)
     }
@@ -1018,6 +1059,8 @@ impl GapDatabase {
                 request_headers: empty_to_none(request_headers_raw),
                 rejection_stage: empty_to_none(rejection_stage_raw),
                 rejection_reason: empty_to_none(rejection_reason_raw),
+                namespace_id: "default".to_string(),
+                scope_id: "default".to_string(),
             });
         }
         Ok(result)
@@ -1130,6 +1173,8 @@ impl GapDatabase {
                 detail: empty_to_none(detail_raw),
                 success: success_i64 != 0,
                 error_message: empty_to_none(error_message_raw),
+                namespace_id: "default".to_string(),
+                scope_id: "default".to_string(),
             });
         }
         Ok(result)
@@ -1440,6 +1485,8 @@ impl GapDatabase {
             match_patterns,
             weight,
             created_at,
+            namespace_id: "default".to_string(),
+            scope_id: "default".to_string(),
         })
     }
 }
@@ -1589,6 +1636,8 @@ mod tests {
             dangerously_permit_http: false,
             weight: 0,
             installed_at: None,
+            namespace_id: "default".to_string(),
+            scope_id: "default".to_string(),
         }
     }
 
@@ -1681,6 +1730,8 @@ mod tests {
             dangerously_permit_http: false,
             weight: 0,
             installed_at: None,
+            namespace_id: "default".to_string(),
+            scope_id: "default".to_string(),
         };
 
         let id = db.add_plugin(&plugin, "src").await.unwrap();
@@ -1822,6 +1873,8 @@ mod tests {
             request_headers: None,
             rejection_stage: None,
             rejection_reason: None,
+            namespace_id: "default".to_string(),
+            scope_id: "default".to_string(),
         };
         db.log_activity(&entry).await.unwrap();
 
@@ -1851,6 +1904,8 @@ mod tests {
                 request_headers: None,
                 rejection_stage: None,
                 rejection_reason: None,
+                namespace_id: "default".to_string(),
+                scope_id: "default".to_string(),
             };
             db.log_activity(&entry).await.unwrap();
         }
@@ -1883,6 +1938,8 @@ mod tests {
             request_headers: None,
             rejection_stage: None,
             rejection_reason: None,
+            namespace_id: "default".to_string(),
+            scope_id: "default".to_string(),
         })
         .await
         .unwrap();
@@ -1901,6 +1958,8 @@ mod tests {
             request_headers: None,
             rejection_stage: None,
             rejection_reason: None,
+            namespace_id: "default".to_string(),
+            scope_id: "default".to_string(),
         })
         .await
         .unwrap();
@@ -1927,6 +1986,8 @@ mod tests {
             request_headers: None,
             rejection_stage: None,
             rejection_reason: None,
+            namespace_id: "default".to_string(),
+            scope_id: "default".to_string(),
         };
         db.log_activity(&entry).await.unwrap();
 
@@ -1952,6 +2013,8 @@ mod tests {
             request_headers: None,
             rejection_stage: None,
             rejection_reason: None,
+            namespace_id: "default".to_string(),
+            scope_id: "default".to_string(),
         };
         db.log_activity(&entry).await.unwrap();
 
@@ -1978,6 +2041,8 @@ mod tests {
             request_headers: None,
             rejection_stage: None,
             rejection_reason: None,
+            namespace_id: "default".to_string(),
+            scope_id: "default".to_string(),
         };
         db.log_activity(&entry).await.unwrap();
 
@@ -2004,6 +2069,8 @@ mod tests {
             request_headers: None,
             rejection_stage: None,
             rejection_reason: None,
+            namespace_id: "default".to_string(),
+            scope_id: "default".to_string(),
         };
         db.log_activity(&entry).await.unwrap();
 
@@ -2030,6 +2097,8 @@ mod tests {
             request_headers: Some(headers_json.to_string()),
             rejection_stage: None,
             rejection_reason: None,
+            namespace_id: "default".to_string(),
+            scope_id: "default".to_string(),
         };
         db.log_activity(&entry).await.unwrap();
 
@@ -2058,6 +2127,8 @@ mod tests {
             request_headers: None,
             rejection_stage: None,
             rejection_reason: None,
+            namespace_id: "default".to_string(),
+            scope_id: "default".to_string(),
         };
         db.log_activity(&entry).await.unwrap();
 
@@ -2084,6 +2155,8 @@ mod tests {
                 request_headers: None,
                 rejection_stage: None,
                 rejection_reason: None,
+                namespace_id: "default".to_string(),
+                scope_id: "default".to_string(),
             },
             ActivityEntry {
                 timestamp: Utc::now() - Duration::seconds(4),
@@ -2098,6 +2171,8 @@ mod tests {
                 request_headers: None,
                 rejection_stage: None,
                 rejection_reason: None,
+                namespace_id: "default".to_string(),
+                scope_id: "default".to_string(),
             },
             ActivityEntry {
                 timestamp: Utc::now() - Duration::seconds(3),
@@ -2112,6 +2187,8 @@ mod tests {
                 request_headers: None,
                 rejection_stage: None,
                 rejection_reason: None,
+                namespace_id: "default".to_string(),
+                scope_id: "default".to_string(),
             },
             ActivityEntry {
                 timestamp: Utc::now() - Duration::seconds(2),
@@ -2126,6 +2203,8 @@ mod tests {
                 request_headers: None,
                 rejection_stage: None,
                 rejection_reason: None,
+                namespace_id: "default".to_string(),
+                scope_id: "default".to_string(),
             },
         ];
         for entry in &entries {
@@ -2275,6 +2354,8 @@ mod tests {
             request_headers: None,
             rejection_stage: None,
             rejection_reason: None,
+            namespace_id: "default".to_string(),
+            scope_id: "default".to_string(),
         }).await.unwrap();
 
         // Recent entry
@@ -2291,6 +2372,8 @@ mod tests {
             request_headers: None,
             rejection_stage: None,
             rejection_reason: None,
+            namespace_id: "default".to_string(),
+            scope_id: "default".to_string(),
         }).await.unwrap();
 
         let filter = crate::types::ActivityFilter {
@@ -2319,6 +2402,8 @@ mod tests {
             request_headers: None,
             rejection_stage: None,
             rejection_reason: None,
+            namespace_id: "default".to_string(),
+            scope_id: "default".to_string(),
         };
         db.log_activity(&entry).await.unwrap();
 
@@ -2358,6 +2443,8 @@ mod tests {
             dangerously_permit_http: false,
             weight: 0,
             installed_at: None,
+            namespace_id: "default".to_string(),
+            scope_id: "default".to_string(),
         };
         let id = db.add_plugin(&plugin, source_code).await.unwrap();
 
@@ -2484,6 +2571,8 @@ mod tests {
             dangerously_permit_http: false,
             weight: 0,
             installed_at: None,
+            namespace_id: "default".to_string(),
+            scope_id: "default".to_string(),
         };
         let id1 = db.add_plugin(&plugin_v1, "v1 code").await.unwrap();
 
@@ -2496,6 +2585,8 @@ mod tests {
             dangerously_permit_http: false,
             weight: 0,
             installed_at: None,
+            namespace_id: "default".to_string(),
+            scope_id: "default".to_string(),
         };
         let id2 = db.add_plugin(&plugin_v2, "v2 code").await.unwrap();
 
@@ -2532,6 +2623,8 @@ mod tests {
             dangerously_permit_http: true,
             weight: 0,
             installed_at: None,
+            namespace_id: "default".to_string(),
+            scope_id: "default".to_string(),
         };
         let id = db.add_plugin(&plugin, "src").await.unwrap();
 
@@ -2564,6 +2657,8 @@ mod tests {
             dangerously_permit_http: true,
             weight: 0,
             installed_at: None,
+            namespace_id: "default".to_string(),
+            scope_id: "default".to_string(),
         };
         db.add_plugin(&plugin, "src").await.unwrap();
 
@@ -2591,6 +2686,8 @@ mod tests {
             request_headers: None,
             rejection_stage: Some("no_matching_plugin".to_string()),
             rejection_reason: Some("Host 'unknown.host.com' has no matching plugin".to_string()),
+            namespace_id: "default".to_string(),
+            scope_id: "default".to_string(),
         };
         db.log_activity(&entry).await.unwrap();
 
@@ -2699,6 +2796,8 @@ mod tests {
             detail: None,
             success: true,
             error_message: None,
+            namespace_id: "default".to_string(),
+            scope_id: "default".to_string(),
         }
     }
 
@@ -2714,6 +2813,8 @@ mod tests {
             detail: Some(r#"{"name":"my-token"}"#.to_string()),
             success: true,
             error_message: None,
+            namespace_id: "default".to_string(),
+            scope_id: "default".to_string(),
         };
         db.log_management_event(&entry).await.unwrap();
 
@@ -2740,6 +2841,8 @@ mod tests {
             detail: None,
             success: false,
             error_message: Some("Repository not found".to_string()),
+            namespace_id: "default".to_string(),
+            scope_id: "default".to_string(),
         };
         db.log_management_event(&entry).await.unwrap();
 

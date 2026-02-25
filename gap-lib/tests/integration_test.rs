@@ -41,6 +41,8 @@ async fn test_full_plugin_pipeline() {
         dangerously_permit_http: false,
         weight: 0,
         installed_at: None,
+        namespace_id: "default".to_string(),
+        scope_id: "default".to_string(),
     };
     let plugin_id = db.add_plugin(&plugin_entry, &plugin_code).await.unwrap();
 
@@ -123,6 +125,8 @@ async fn test_multiple_plugins() {
         dangerously_permit_http: false,
         weight: 0,
         installed_at: None,
+        namespace_id: "default".to_string(),
+        scope_id: "default".to_string(),
     };
     let plugin_a_id = db.add_plugin(&entry_a, plugin1_code).await.unwrap();
 
@@ -135,6 +139,8 @@ async fn test_multiple_plugins() {
         dangerously_permit_http: false,
         weight: 0,
         installed_at: None,
+        namespace_id: "default".to_string(),
+        scope_id: "default".to_string(),
     };
     let plugin_b_id = db.add_plugin(&entry_b, plugin2_code).await.unwrap();
 
@@ -207,6 +213,8 @@ async fn test_plugin_with_multiple_credentials() {
         dangerously_permit_http: false,
         weight: 0,
         installed_at: None,
+        namespace_id: "default".to_string(),
+        scope_id: "default".to_string(),
     };
     let plugin_id = db.add_plugin(&plugin_entry, plugin_code).await.unwrap();
 

@@ -307,6 +307,8 @@ mod tests {
             dangerously_permit_http: false,
             weight: 0,
             installed_at: None,
+            namespace_id: "default".to_string(),
+            scope_id: "default".to_string(),
         };
         let plugin_id = db.add_plugin(&entry, plugin_code).await.unwrap();
 
@@ -337,6 +339,8 @@ mod tests {
             dangerously_permit_http: false,
             weight: 0,
             installed_at: None,
+            namespace_id: "default".to_string(),
+            scope_id: "default".to_string(),
         };
         let plugin_id = db.add_plugin(&entry, plugin_code).await.unwrap();
 
@@ -367,6 +371,8 @@ mod tests {
             dangerously_permit_http: false,
             weight: 0,
             installed_at: None,
+            namespace_id: "default".to_string(),
+            scope_id: "default".to_string(),
         };
         db.add_plugin(&entry, plugin_code).await.unwrap();
 
@@ -387,6 +393,8 @@ mod tests {
             dangerously_permit_http: false,
             weight: 0,
             installed_at: None,
+            namespace_id: "default".to_string(),
+            scope_id: "default".to_string(),
         };
         let invalid_code = "THIS IS NOT VALID JAVASCRIPT!!! { syntax error }";
         db.add_plugin(&entry1, invalid_code).await.unwrap();
@@ -400,6 +408,8 @@ mod tests {
             dangerously_permit_http: false,
             weight: 0,
             installed_at: None,
+            namespace_id: "default".to_string(),
+            scope_id: "default".to_string(),
         };
         db.add_plugin(&entry2, invalid_code).await.unwrap();
 
@@ -420,6 +430,8 @@ mod tests {
             dangerously_permit_http: false,
             weight: 0,
             installed_at: None,
+            namespace_id: "default".to_string(),
+            scope_id: "default".to_string(),
         };
         let match_plugin_id = db.add_plugin(&entry3, valid_code).await.unwrap();
 
@@ -452,6 +464,8 @@ mod tests {
             dangerously_permit_http: false,
             weight: 10,
             installed_at: None,
+            namespace_id: "default".to_string(),
+            scope_id: "default".to_string(),
         };
         let plugin_id = db.add_plugin(&entry, plugin_code).await.unwrap();
 
@@ -499,6 +513,8 @@ mod tests {
             dangerously_permit_http: false,
             weight: 5,
             installed_at: None,
+            namespace_id: "default".to_string(),
+            scope_id: "default".to_string(),
         };
         db.add_plugin(&entry, plugin_code).await.unwrap();
 

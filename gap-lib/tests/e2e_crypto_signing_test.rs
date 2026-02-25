@@ -114,6 +114,8 @@ async fn setup_test_db(pkcs8_b64: &str, key_id: &str) -> (Arc<GapDatabase>, Stri
         dangerously_permit_http: false,
         weight: 0,
         installed_at: None,
+        namespace_id: "default".to_string(),
+        scope_id: "default".to_string(),
     };
     let plugin_id = db.add_plugin(&plugin_entry, SIGNING_PLUGIN_CODE)
         .await

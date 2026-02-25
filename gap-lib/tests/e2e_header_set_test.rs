@@ -385,6 +385,8 @@ async fn test_e2e_header_set_vs_plugin_weight() {
         dangerously_permit_http: false,
         weight: 5,
         installed_at: None,
+        namespace_id: "default".to_string(),
+        scope_id: "default".to_string(),
     };
     let plugin_id = db.add_plugin(&plugin_entry, plugin_code)
         .await
@@ -530,6 +532,8 @@ async fn test_e2e_plugin_beats_header_set_by_weight() {
         dangerously_permit_http: false,
         weight: 10,
         installed_at: None,
+        namespace_id: "default".to_string(),
+        scope_id: "default".to_string(),
     };
     let plugin_id = db.add_plugin(&plugin_entry, plugin_code)
         .await

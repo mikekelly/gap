@@ -119,6 +119,8 @@ async fn setup_test_db(
         dangerously_permit_http,
         weight: 0,
         installed_at: None,
+        namespace_id: "default".to_string(),
+        scope_id: "default".to_string(),
     };
     let plugin_id = db.add_plugin(&plugin_entry, plugin_code)
         .await

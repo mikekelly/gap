@@ -481,6 +481,8 @@ async fn validate_auth(
                 let validated = ValidatedToken {
                     prefix,
                     scopes: metadata.scopes,
+                    namespace_id: "default".to_string(),
+                    scope_id: "default".to_string(),
                 };
                 // Populate cache
                 token_cache.insert(token_value, validated.clone());
@@ -716,6 +718,8 @@ where
                                 request_headers: None,
                                 rejection_stage: Some(rejection_stage),
                                 rejection_reason: Some(rejection_reason),
+                                namespace_id: "default".to_string(),
+                                scope_id: "default".to_string(),
                             };
                             if let Err(e) = db_log.log_activity(&entry).await {
                                 tracing::warn!("Failed to log rejected activity: {}", e);
@@ -796,6 +800,8 @@ where
                         request_headers: plugin_info.scrubbed_headers.clone(),
                         rejection_stage: None,
                         rejection_reason: None,
+                        namespace_id: "default".to_string(),
+                        scope_id: "default".to_string(),
                     };
                     if let Err(e) = db_log.log_activity(&entry).await {
                         tracing::warn!("Failed to log activity: {}", e);
@@ -919,6 +925,8 @@ where
                                 request_headers: None,
                                 rejection_stage: Some(rejection_stage),
                                 rejection_reason: Some(rejection_reason),
+                                namespace_id: "default".to_string(),
+                                scope_id: "default".to_string(),
                             };
                             if let Err(e) = db_log.log_activity(&entry).await {
                                 tracing::warn!("Failed to log rejected activity: {}", e);
@@ -1000,6 +1008,8 @@ where
                         request_headers: plugin_info.scrubbed_headers.clone(),
                         rejection_stage: None,
                         rejection_reason: None,
+                        namespace_id: "default".to_string(),
+                        scope_id: "default".to_string(),
                     };
                     if let Err(e) = db_log.log_activity(&entry).await {
                         tracing::warn!("Failed to log activity: {}", e);
@@ -1381,6 +1391,8 @@ mod tests {
             dangerously_permit_http: false,
             weight: 0,
             installed_at: None,
+            namespace_id: "default".to_string(),
+            scope_id: "default".to_string(),
         };
         let plugin_id = db.add_plugin(&plugin_entry, plugin_code).await.unwrap();
         db.set_credential(&plugin_id, "api_key", "my-secret-key").await.unwrap();
@@ -1538,6 +1550,8 @@ mod tests {
             dangerously_permit_http: true,
             weight: 0,
             installed_at: None,
+            namespace_id: "default".to_string(),
+            scope_id: "default".to_string(),
         };
         let plugin_id_http = db.add_plugin(&plugin_entry, plugin_code).await.unwrap();
         db.set_credential(&plugin_id_http, "api_key", "http-secret").await.unwrap();
@@ -1656,6 +1670,8 @@ mod tests {
             dangerously_permit_http: false,
             weight: 0,
             installed_at: None,
+            namespace_id: "default".to_string(),
+            scope_id: "default".to_string(),
         };
         let plugin_id_details = db.add_plugin(&plugin_entry, plugin_code).await.unwrap();
         db.set_credential(&plugin_id_details, "api_key", "secret-key-456").await.unwrap();
@@ -1838,6 +1854,8 @@ mod tests {
         let token = ValidatedToken {
             prefix: "abc123".to_string(),
             scopes: None,
+            namespace_id: "default".to_string(),
+            scope_id: "default".to_string(),
         };
         cache.insert("full-token-value".to_string(), token.clone());
         let cached = cache.get("full-token-value");
@@ -1857,6 +1875,8 @@ mod tests {
         let token = ValidatedToken {
             prefix: "abc123".to_string(),
             scopes: None,
+            namespace_id: "default".to_string(),
+            scope_id: "default".to_string(),
         };
         cache.insert("token-to-remove".to_string(), token);
         cache.invalidate("token-to-remove");
@@ -1866,8 +1886,8 @@ mod tests {
     #[test]
     fn test_token_cache_clear() {
         let cache = TokenCache::new();
-        let token1 = ValidatedToken { prefix: "aaa".to_string(), scopes: None };
-        let token2 = ValidatedToken { prefix: "bbb".to_string(), scopes: None };
+        let token1 = ValidatedToken { prefix: "aaa".to_string(), scopes: None, namespace_id: "default".to_string(), scope_id: "default".to_string() };
+        let token2 = ValidatedToken { prefix: "bbb".to_string(), scopes: None, namespace_id: "default".to_string(), scope_id: "default".to_string() };
         cache.insert("token-1".to_string(), token1);
         cache.insert("token-2".to_string(), token2);
         cache.clear();

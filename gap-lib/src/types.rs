@@ -13,6 +13,29 @@ use serde::{Deserialize, Deserializer, Serialize};
 use std::collections::HashMap;
 use std::fmt;
 
+/// Namespace + scope pair for multi-tenant resource isolation.
+///
+/// Resources are partitioned by (namespace_id, scope_id). The "default" values
+/// represent the single-tenant case where no partitioning is needed.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct NsScope {
+    pub namespace_id: String,
+    pub scope_id: String,
+}
+
+impl Default for NsScope {
+    fn default() -> Self {
+        Self {
+            namespace_id: "default".to_string(),
+            scope_id: "default".to_string(),
+        }
+    }
+}
+
+fn default_ns() -> String {
+    "default".to_string()
+}
+
 /// HTTP request representation for proxying
 ///
 /// Contains all information needed to forward and transform an HTTP request.
@@ -306,6 +329,8 @@ impl<'de> Deserialize<'de> for TokenScope {
 pub struct ValidatedToken {
     pub prefix: String,
     pub scopes: Option<Vec<TokenScope>>,
+    pub namespace_id: String,
+    pub scope_id: String,
 }
 
 /// Agent authentication token
@@ -419,6 +444,10 @@ pub struct ActivityEntry {
     pub rejection_stage: Option<String>,
     /// Human-readable reason for rejection
     pub rejection_reason: Option<String>,
+    #[serde(default = "default_ns")]
+    pub namespace_id: String,
+    #[serde(default = "default_ns")]
+    pub scope_id: String,
 }
 
 /// Detailed request/response data for a single proxied request.
@@ -460,6 +489,8 @@ pub struct ActivityFilter {
     pub request_id: Option<String>,
     /// Max results (default 100)
     pub limit: Option<u32>,
+    pub namespace_id: Option<String>,
+    pub scope_id: Option<String>,
 }
 
 /// Management audit log entry for tracking API mutations
@@ -478,6 +509,10 @@ pub struct ManagementLogEntry {
     pub success: bool,
     /// Error message if the operation failed
     pub error_message: Option<String>,
+    #[serde(default = "default_ns")]
+    pub namespace_id: String,
+    #[serde(default = "default_ns")]
+    pub scope_id: String,
 }
 
 /// Filter for querying management audit logs
@@ -489,6 +524,8 @@ pub struct ManagementLogFilter {
     pub success: Option<bool>,
     pub since: Option<DateTime<Utc>>,
     pub limit: Option<u32>,
+    pub namespace_id: Option<String>,
+    pub scope_id: Option<String>,
 }
 
 // --- Registry-origin types (migrated from registry.rs) ---
@@ -501,6 +538,10 @@ pub struct TokenMetadata {
     pub created_at: DateTime<Utc>,
     pub scopes: Option<Vec<TokenScope>>,
     pub revoked_at: Option<DateTime<Utc>>,
+    #[serde(default = "default_ns")]
+    pub namespace_id: String,
+    #[serde(default = "default_ns")]
+    pub scope_id: String,
 }
 
 /// Token entry returned by list operations (includes the token value)
@@ -510,6 +551,10 @@ pub struct TokenEntry {
     pub created_at: DateTime<Utc>,
     pub scopes: Option<Vec<TokenScope>>,
     pub revoked_at: Option<DateTime<Utc>>,
+    #[serde(default = "default_ns")]
+    pub namespace_id: String,
+    #[serde(default = "default_ns")]
+    pub scope_id: String,
 }
 
 /// Plugin metadata entry (id, hosts, credential schema, optional commit SHA)
@@ -532,6 +577,10 @@ pub struct PluginEntry {
     /// Timestamp when the plugin was installed (populated from DB reads, None on construction for insertion).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub installed_at: Option<DateTime<Utc>>,
+    #[serde(default = "default_ns")]
+    pub namespace_id: String,
+    #[serde(default = "default_ns")]
+    pub scope_id: String,
 }
 
 /// Credential metadata entry (plugin_id + field name, no value)
@@ -539,6 +588,10 @@ pub struct PluginEntry {
 pub struct CredentialEntry {
     pub plugin_id: String,
     pub field: String,
+    #[serde(default = "default_ns")]
+    pub namespace_id: String,
+    #[serde(default = "default_ns")]
+    pub scope_id: String,
 }
 
 /// A named set of static headers to inject into matching requests.
@@ -551,6 +604,10 @@ pub struct HeaderSet {
     pub match_patterns: Vec<String>,
     pub weight: i32,
     pub created_at: DateTime<Utc>,
+    #[serde(default = "default_ns")]
+    pub namespace_id: String,
+    #[serde(default = "default_ns")]
+    pub scope_id: String,
 }
 
 /// Append-only record of every plugin version ever installed
@@ -847,5 +904,138 @@ mod tests {
         let deserialized: Config = serde_json::from_str(&json).unwrap();
 
         assert_eq!(config, deserialized);
+    }
+
+    // --- NsScope tests ---
+
+    #[test]
+    fn test_ns_scope_default() {
+        let ns = NsScope::default();
+        assert_eq!(ns.namespace_id, "default");
+        assert_eq!(ns.scope_id, "default");
+    }
+
+    #[test]
+    fn test_ns_scope_serialization() {
+        let ns = NsScope {
+            namespace_id: "org-a".to_string(),
+            scope_id: "team-1".to_string(),
+        };
+        let json = serde_json::to_string(&ns).unwrap();
+        let deserialized: NsScope = serde_json::from_str(&json).unwrap();
+        assert_eq!(ns, deserialized);
+    }
+
+    // --- namespace_id / scope_id field tests ---
+
+    #[test]
+    fn test_validated_token_has_ns_fields() {
+        let vt = ValidatedToken {
+            prefix: "gap_abc12345".to_string(),
+            scopes: None,
+            namespace_id: "default".to_string(),
+            scope_id: "default".to_string(),
+        };
+        assert_eq!(vt.namespace_id, "default");
+        assert_eq!(vt.scope_id, "default");
+    }
+
+    #[test]
+    fn test_plugin_entry_ns_fields_default_on_deserialize() {
+        // Old JSON without namespace fields — serde default should fill "default"
+        let json = r#"{"id":"exa","hosts":["exa.ai"],"credential_schema":[]}"#;
+        let entry: PluginEntry = serde_json::from_str(json).unwrap();
+        assert_eq!(entry.namespace_id, "default");
+        assert_eq!(entry.scope_id, "default");
+    }
+
+    #[test]
+    fn test_plugin_entry_ns_fields_roundtrip() {
+        let entry = PluginEntry {
+            id: "exa".to_string(),
+            source: None,
+            hosts: vec!["exa.ai".to_string()],
+            credential_schema: vec![],
+            commit_sha: None,
+            dangerously_permit_http: false,
+            weight: 0,
+            installed_at: None,
+            namespace_id: "org-a".to_string(),
+            scope_id: "team-1".to_string(),
+        };
+        let json = serde_json::to_string(&entry).unwrap();
+        let deserialized: PluginEntry = serde_json::from_str(&json).unwrap();
+        assert_eq!(deserialized.namespace_id, "org-a");
+        assert_eq!(deserialized.scope_id, "team-1");
+    }
+
+    #[test]
+    fn test_header_set_ns_fields_default_on_deserialize() {
+        let json = r#"{"id":"my-headers","match_patterns":["api.example.com"],"weight":0,"created_at":"2024-01-01T00:00:00Z"}"#;
+        let hs: HeaderSet = serde_json::from_str(json).unwrap();
+        assert_eq!(hs.namespace_id, "default");
+        assert_eq!(hs.scope_id, "default");
+    }
+
+    #[test]
+    fn test_credential_entry_ns_fields_default_on_deserialize() {
+        let json = r#"{"plugin_id":"exa","field":"api_key"}"#;
+        let ce: CredentialEntry = serde_json::from_str(json).unwrap();
+        assert_eq!(ce.namespace_id, "default");
+        assert_eq!(ce.scope_id, "default");
+    }
+
+    #[test]
+    fn test_activity_entry_ns_fields_default_on_deserialize() {
+        let json = r#"{"timestamp":"2024-01-01T00:00:00Z","method":"GET","url":"https://api.example.com","status":200}"#;
+        let ae: ActivityEntry = serde_json::from_str(json).unwrap();
+        assert_eq!(ae.namespace_id, "default");
+        assert_eq!(ae.scope_id, "default");
+    }
+
+    #[test]
+    fn test_management_log_entry_ns_fields_default_on_deserialize() {
+        let json = r#"{"timestamp":"2024-01-01T00:00:00Z","operation":"token_create","resource_type":"token","success":true}"#;
+        let mle: ManagementLogEntry = serde_json::from_str(json).unwrap();
+        assert_eq!(mle.namespace_id, "default");
+        assert_eq!(mle.scope_id, "default");
+    }
+
+    #[test]
+    fn test_token_entry_ns_fields_default_on_deserialize() {
+        let json = r#"{"token_value":"gap_abc","created_at":"2024-01-01T00:00:00Z","scopes":null,"revoked_at":null}"#;
+        let te: TokenEntry = serde_json::from_str(json).unwrap();
+        assert_eq!(te.namespace_id, "default");
+        assert_eq!(te.scope_id, "default");
+    }
+
+    #[test]
+    fn test_token_metadata_ns_fields_default_on_deserialize() {
+        let json = r#"{"created_at":"2024-01-01T00:00:00Z","scopes":null,"revoked_at":null}"#;
+        let tm: TokenMetadata = serde_json::from_str(json).unwrap();
+        assert_eq!(tm.namespace_id, "default");
+        assert_eq!(tm.scope_id, "default");
+    }
+
+    #[test]
+    fn test_activity_filter_ns_fields() {
+        let filter = ActivityFilter {
+            namespace_id: Some("org-a".to_string()),
+            scope_id: Some("team-1".to_string()),
+            ..Default::default()
+        };
+        assert_eq!(filter.namespace_id, Some("org-a".to_string()));
+        assert_eq!(filter.scope_id, Some("team-1".to_string()));
+    }
+
+    #[test]
+    fn test_management_log_filter_ns_fields() {
+        let filter = ManagementLogFilter {
+            namespace_id: Some("org-a".to_string()),
+            scope_id: None,
+            ..Default::default()
+        };
+        assert_eq!(filter.namespace_id, Some("org-a".to_string()));
+        assert_eq!(filter.scope_id, None);
     }
 }

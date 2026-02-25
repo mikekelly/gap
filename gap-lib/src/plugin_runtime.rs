@@ -1354,6 +1354,8 @@ mod tests {
             dangerously_permit_http: false,
             weight: 0,
             installed_at: None,
+            namespace_id: "default".to_string(),
+            scope_id: "default".to_string(),
         };
         let plugin_id = db.add_plugin(&entry, plugin_code).await.unwrap();
 

@@ -445,6 +445,8 @@ async fn init(
         detail: None,
         success: true,
         error_message: None,
+        namespace_id: "default".to_string(),
+        scope_id: "default".to_string(),
     });
 
     Ok(Json(InitResponse { ca_path }))
@@ -526,6 +528,8 @@ async fn install_plugin(
         detail: Some(serde_json::json!({"repo": req.source}).to_string()),
         success: true,
         error_message: None,
+        namespace_id: "default".to_string(),
+        scope_id: "default".to_string(),
     });
 
     Ok(Json(InstallResponse {
@@ -569,6 +573,8 @@ async fn register_plugin(
         dangerously_permit_http: plugin.dangerously_permit_http,
         weight: 0,
         installed_at: None,
+        namespace_id: "default".to_string(),
+        scope_id: "default".to_string(),
     };
     let plugin_id = state.db.add_plugin(&plugin_entry, &transformed_code).await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to store plugin: {}", e)))?;
@@ -583,6 +589,8 @@ async fn register_plugin(
         detail: None,
         success: true,
         error_message: None,
+        namespace_id: "default".to_string(),
+        scope_id: "default".to_string(),
     });
 
     Ok(Json(RegisterResponse {
@@ -625,6 +633,8 @@ async fn uninstall_plugin(
         detail: None,
         success: true,
         error_message: None,
+        namespace_id: "default".to_string(),
+        scope_id: "default".to_string(),
     });
 
     Ok(Json(UninstallResponse {
@@ -671,6 +681,8 @@ async fn update_plugin_from_github(
         detail: None,
         success: true,
         error_message: None,
+        namespace_id: "default".to_string(),
+        scope_id: "default".to_string(),
     });
 
     Ok(Json(UpdateResponse {
@@ -760,6 +772,8 @@ async fn clone_and_validate_plugin(
         dangerously_permit_http: plugin.dangerously_permit_http,
         weight: 0,
         installed_at: None,
+        namespace_id: "default".to_string(),
+        scope_id: "default".to_string(),
     };
     let plugin_id = state.db.add_plugin(&plugin_entry, &transformed_code).await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to store plugin: {}", e)))?;
@@ -850,6 +864,8 @@ async fn create_token(
         detail: scopes.as_ref().map(|s| serde_json::to_string(s).unwrap_or_default()),
         success: true,
         error_message: None,
+        namespace_id: "default".to_string(),
+        scope_id: "default".to_string(),
     });
 
     Ok(Json(TokenResponse {
@@ -889,6 +905,8 @@ async fn delete_token(
         detail: None,
         success: true,
         error_message: None,
+        namespace_id: "default".to_string(),
+        scope_id: "default".to_string(),
     });
 
     Ok(Json(serde_json::json!({
@@ -923,6 +941,8 @@ async fn set_credential(
         detail: None, // NEVER log credential values
         success: true,
         error_message: None,
+        namespace_id: "default".to_string(),
+        scope_id: "default".to_string(),
     });
 
     Ok(Json(serde_json::json!({
@@ -955,6 +975,8 @@ async fn delete_credential(
         detail: None,
         success: true,
         error_message: None,
+        namespace_id: "default".to_string(),
+        scope_id: "default".to_string(),
     });
 
     Ok(StatusCode::OK)
@@ -973,6 +995,8 @@ fn query_to_filter(q: &ActivityQuery) -> gap_lib::ActivityFilter {
         }),
         request_id: q.request_id.clone(),
         limit: q.limit.or(Some(100)),
+        namespace_id: None,
+        scope_id: None,
     }
 }
 
@@ -1122,6 +1146,8 @@ fn management_query_to_filter(q: &ManagementLogQuery) -> gap_lib::ManagementLogF
             DateTime::parse_from_rfc3339(s).ok().map(|dt| dt.with_timezone(&Utc))
         }),
         limit: q.limit.or(Some(100)),
+        namespace_id: None,
+        scope_id: None,
     }
 }
 
@@ -1287,6 +1313,8 @@ async fn create_header_set(
         detail: None,
         success: true,
         error_message: None,
+        namespace_id: "default".to_string(),
+        scope_id: "default".to_string(),
     });
 
     Ok(Json(CreateHeaderSetResponse { id, created: true }))
@@ -1356,6 +1384,8 @@ async fn update_header_set(
         detail: None,
         success: true,
         error_message: None,
+        namespace_id: "default".to_string(),
+        scope_id: "default".to_string(),
     });
 
     Ok(Json(serde_json::json!({"id": id, "updated": true})))
@@ -1380,6 +1410,8 @@ async fn delete_header_set(
         detail: None,
         success: true,
         error_message: None,
+        namespace_id: "default".to_string(),
+        scope_id: "default".to_string(),
     });
 
     Ok(Json(DeleteResponse { deleted: true }))
@@ -1415,6 +1447,8 @@ async fn set_header_set_header(
         detail: Some(header_name.clone()),
         success: true,
         error_message: None,
+        namespace_id: "default".to_string(),
+        scope_id: "default".to_string(),
     });
 
     Ok(Json(serde_json::json!({"header_set": id, "header": header_name, "set": true})))
@@ -1439,6 +1473,8 @@ async fn delete_header_set_header(
         detail: Some(header_name.clone()),
         success: true,
         error_message: None,
+        namespace_id: "default".to_string(),
+        scope_id: "default".to_string(),
     });
 
     Ok(Json(serde_json::json!({"header_set": id, "header": header_name, "deleted": true})))
@@ -1472,6 +1508,8 @@ async fn update_plugin(
         detail: Some(format!("weight={}", req.weight)),
         success: true,
         error_message: None,
+        namespace_id: "default".to_string(),
+        scope_id: "default".to_string(),
     });
 
     Ok(Json(UpdatePluginResponse { id, updated: true }))
@@ -2106,6 +2144,8 @@ mod tests {
         assert_eq!(creds[0], CredentialEntry {
             plugin_id: "exa".to_string(),
             field: "api_key".to_string(),
+            namespace_id: "default".to_string(),
+            scope_id: "default".to_string(),
         });
     }
 
@@ -2219,6 +2259,8 @@ mod tests {
         assert_eq!(creds[0], CredentialEntry {
             plugin_id: "exa".to_string(),
             field: "api_key".to_string(),
+            namespace_id: "default".to_string(),
+            scope_id: "default".to_string(),
         });
     }
 
@@ -2526,6 +2568,8 @@ mod tests {
             request_headers: None,
             rejection_stage: None,
             rejection_reason: None,
+            namespace_id: "default".to_string(),
+            scope_id: "default".to_string(),
         };
         activity_tx.send(entry.clone()).unwrap();
 
@@ -2595,6 +2639,8 @@ mod tests {
             request_headers: None,
             rejection_stage: None,
             rejection_reason: None,
+            namespace_id: "default".to_string(),
+            scope_id: "default".to_string(),
         };
         // Send a non-matching entry first
         let non_matching_entry = ActivityEntry {
@@ -2610,6 +2656,8 @@ mod tests {
             request_headers: None,
             rejection_stage: None,
             rejection_reason: None,
+            namespace_id: "default".to_string(),
+            scope_id: "default".to_string(),
         };
         activity_tx.send(non_matching_entry).unwrap();
         activity_tx.send(matching_entry).unwrap();
@@ -2669,6 +2717,8 @@ mod tests {
                 request_headers: None,
                 rejection_stage: None,
                 rejection_reason: None,
+                namespace_id: "default".to_string(),
+                scope_id: "default".to_string(),
             },
             // POST on api.openai.com, plugin=openai, req_id=req-002
             ActivityEntry {
@@ -2684,6 +2734,8 @@ mod tests {
                 request_headers: None,
                 rejection_stage: None,
                 rejection_reason: None,
+                namespace_id: "default".to_string(),
+                scope_id: "default".to_string(),
             },
             // POST on api.anthropic.com, plugin=anthropic, req_id=req-003
             ActivityEntry {
@@ -2699,6 +2751,8 @@ mod tests {
                 request_headers: None,
                 rejection_stage: None,
                 rejection_reason: None,
+                namespace_id: "default".to_string(),
+                scope_id: "default".to_string(),
             },
             // PUT on api.openai.com, no plugin, req_id=req-004
             ActivityEntry {
@@ -2714,6 +2768,8 @@ mod tests {
                 request_headers: None,
                 rejection_stage: None,
                 rejection_reason: None,
+                namespace_id: "default".to_string(),
+                scope_id: "default".to_string(),
             },
         ];
         for entry in &entries {
@@ -2862,6 +2918,8 @@ mod tests {
             request_headers: None,
             rejection_stage: None,
             rejection_reason: None,
+            namespace_id: "default".to_string(),
+            scope_id: "default".to_string(),
         }).await.unwrap();
 
         db.log_activity(&ActivityEntry {
@@ -2877,6 +2935,8 @@ mod tests {
             request_headers: None,
             rejection_stage: None,
             rejection_reason: None,
+            namespace_id: "default".to_string(),
+            scope_id: "default".to_string(),
         }).await.unwrap();
 
         let since_param = urlencoding::encode(&cutoff.to_rfc3339()).into_owned();
@@ -3032,6 +3092,8 @@ mod tests {
             detail: None,
             success: true,
             error_message: None,
+            namespace_id: "default".to_string(),
+            scope_id: "default".to_string(),
         }).await.unwrap();
 
         let state = ApiState::new(9443, 9080, Arc::clone(&db), Arc::new(TokenCache::new()));
@@ -3268,6 +3330,8 @@ mod tests {
             detail: None,
             success: true,
             error_message: None,
+            namespace_id: "default".to_string(),
+            scope_id: "default".to_string(),
         };
         management_tx.send(entry).unwrap();
 
@@ -3840,6 +3904,8 @@ mod tests {
             dangerously_permit_http: false,
             weight: 0,
             installed_at: None,
+            namespace_id: "default".to_string(),
+            scope_id: "default".to_string(),
         };
         let plugin_id = db.add_plugin(&plugin_entry, "var plugin = {};").await.unwrap();
 

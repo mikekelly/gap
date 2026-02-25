@@ -443,6 +443,8 @@ mod tests {
             dangerously_permit_http: false,
             weight: 0,
             installed_at: None,
+            namespace_id: "default".to_string(),
+            scope_id: "default".to_string(),
         };
         let plugin_id = db.add_plugin(&plugin_entry, plugin_code).await.unwrap();
         db.set_credential(&plugin_id, "api_key", "secret-key-123").await.unwrap();
@@ -507,6 +509,8 @@ mod tests {
             dangerously_permit_http: false,
             weight: 0,
             installed_at: None,
+            namespace_id: "default".to_string(),
+            scope_id: "default".to_string(),
         };
         db.add_plugin(&plugin_entry, plugin_code).await.unwrap();
 
@@ -721,6 +725,8 @@ mod tests {
             dangerously_permit_http: true,
             weight: 0,
             installed_at: None,
+            namespace_id: "default".to_string(),
+            scope_id: "default".to_string(),
         };
         let plugin_id = db.add_plugin(&plugin_entry, plugin_code).await.unwrap();
         db.set_credential(&plugin_id, "api_key", "http-secret").await.unwrap();
