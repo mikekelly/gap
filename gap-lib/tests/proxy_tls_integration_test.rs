@@ -45,7 +45,7 @@ async fn create_test_proxy(port: u16, token: AgentToken) -> (ProxyServer, String
     let db = Arc::new(GapDatabase::in_memory().await.expect("create in-memory db"));
 
     // Store the token in the database
-    db.add_token(&token.token, token.created_at, None)
+    db.add_token(&token.token, token.created_at, None, "default", "default")
         .await
         .expect("store token");
 

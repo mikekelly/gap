@@ -320,7 +320,7 @@ pub async fn transform_request(
             }
 
             // Load headers for this set
-            let header_values = db.get_header_set_headers(&header_set.id).await?;
+            let header_values = db.get_header_set_headers(&header_set.id, "default", "default").await?;
 
             if header_values.is_empty() {
                 warn!(
@@ -892,13 +892,13 @@ mod tests {
         let db = GapDatabase::in_memory().await.unwrap();
 
         // Create a header set matching the host
-        let header_set_id = db.add_header_set(&["api.hs.com".to_string()], 0)
+        let header_set_id = db.add_header_set(&["api.hs.com".to_string()], 0, "default", "default")
             .await
             .unwrap();
-        db.set_header_set_header(&header_set_id, "Authorization", "Bearer hs-secret-123")
+        db.set_header_set_header(&header_set_id, "Authorization", "Bearer hs-secret-123", "default", "default")
             .await
             .unwrap();
-        db.set_header_set_header(&header_set_id, "X-Custom", "custom-value")
+        db.set_header_set_header(&header_set_id, "X-Custom", "custom-value", "default", "default")
             .await
             .unwrap();
 
@@ -930,10 +930,10 @@ mod tests {
     async fn test_transform_request_header_set_blocks_http() {
         let db = GapDatabase::in_memory().await.unwrap();
 
-        let header_set_id = db.add_header_set(&["api.httphs.com".to_string()], 0)
+        let header_set_id = db.add_header_set(&["api.httphs.com".to_string()], 0, "default", "default")
             .await
             .unwrap();
-        db.set_header_set_header(&header_set_id, "Authorization", "Bearer secret")
+        db.set_header_set_header(&header_set_id, "Authorization", "Bearer secret", "default", "default")
             .await
             .unwrap();
 
@@ -956,7 +956,7 @@ mod tests {
         let db = GapDatabase::in_memory().await.unwrap();
 
         // Header set with no headers configured
-        db.add_header_set(&["api.empty.com".to_string()], 0)
+        db.add_header_set(&["api.empty.com".to_string()], 0, "default", "default")
             .await
             .unwrap();
 
@@ -977,10 +977,10 @@ mod tests {
     async fn test_transform_request_header_set_scrubs_values() {
         let db = GapDatabase::in_memory().await.unwrap();
 
-        let header_set_id = db.add_header_set(&["api.scrub.com".to_string()], 0)
+        let header_set_id = db.add_header_set(&["api.scrub.com".to_string()], 0, "default", "default")
             .await
             .unwrap();
-        db.set_header_set_header(&header_set_id, "Authorization", "Bearer scrub-secret-val")
+        db.set_header_set_header(&header_set_id, "Authorization", "Bearer scrub-secret-val", "default", "default")
             .await
             .unwrap();
 

@@ -324,12 +324,14 @@ impl GapDatabase {
         token_value: &str,
         created_at: DateTime<Utc>,
         scopes: Option<&[TokenScope]>,
+        ns: &str,
+        scope: &str,
     ) -> Result<()> {
         let has_scopes: i64 = if scopes.is_some() { 1 } else { 0 };
         self.conn
             .execute(
-                "INSERT OR REPLACE INTO tokens (token_value, name, created_at, has_scopes) VALUES (?1, '', ?2, ?3)",
-                libsql::params![token_value, created_at.to_rfc3339(), has_scopes],
+                "INSERT OR REPLACE INTO tokens (token_value, name, created_at, has_scopes, namespace_id, scope_id) VALUES (?1, '', ?2, ?3, ?4, ?5)",
+                libsql::params![token_value, created_at.to_rfc3339(), has_scopes, ns, scope],
             )
             .await
             .map_err(|e| GapError::database(e.to_string()))?;
@@ -363,12 +365,12 @@ impl GapDatabase {
     /// Get token metadata by token value.
     ///
     /// Returns `None` for revoked tokens or tokens that don't exist.
-    pub async fn get_token(&self, token_value: &str) -> Result<Option<TokenMetadata>> {
+    pub async fn get_token(&self, token_value: &str, ns: &str, scope: &str) -> Result<Option<TokenMetadata>> {
         let mut rows = self
             .conn
             .query(
-                "SELECT created_at, has_scopes FROM tokens WHERE token_value = ?1 AND revoked_at IS NULL",
-                libsql::params![token_value],
+                "SELECT created_at, has_scopes FROM tokens WHERE token_value = ?1 AND revoked_at IS NULL AND namespace_id = ?2 AND scope_id = ?3",
+                libsql::params![token_value, ns, scope],
             )
             .await
             .map_err(|e| GapError::database(e.to_string()))?;
@@ -391,8 +393,8 @@ impl GapDatabase {
                 created_at,
                 scopes,
                 revoked_at: None,
-                namespace_id: "default".to_string(),
-                scope_id: "default".to_string(),
+                namespace_id: ns.to_string(),
+                scope_id: scope.to_string(),
             }))
         } else {
             Ok(None)
@@ -434,15 +436,15 @@ impl GapDatabase {
     ///
     /// When `include_revoked` is `false`, only active (non-revoked) tokens are returned.
     /// When `true`, all tokens are returned including revoked ones.
-    pub async fn list_tokens(&self, include_revoked: bool) -> Result<Vec<TokenEntry>> {
+    pub async fn list_tokens(&self, include_revoked: bool, ns: &str, scope: &str) -> Result<Vec<TokenEntry>> {
         let query = if include_revoked {
-            "SELECT token_value, created_at, revoked_at, has_scopes FROM tokens"
+            "SELECT token_value, created_at, revoked_at, has_scopes FROM tokens WHERE namespace_id = ?1 AND scope_id = ?2"
         } else {
-            "SELECT token_value, created_at, revoked_at, has_scopes FROM tokens WHERE revoked_at IS NULL"
+            "SELECT token_value, created_at, revoked_at, has_scopes FROM tokens WHERE revoked_at IS NULL AND namespace_id = ?1 AND scope_id = ?2"
         };
         let mut rows = self
             .conn
-            .query(query, ())
+            .query(query, libsql::params![ns, scope])
             .await
             .map_err(|e| GapError::database(e.to_string()))?;
         let mut result = Vec::new();
@@ -474,8 +476,8 @@ impl GapDatabase {
                 created_at,
                 scopes,
                 revoked_at,
-                namespace_id: "default".to_string(),
-                scope_id: "default".to_string(),
+                namespace_id: ns.to_string(),
+                scope_id: scope.to_string(),
             });
         }
         Ok(result)
@@ -484,11 +486,11 @@ impl GapDatabase {
     /// Soft-delete a token by setting its revoked_at timestamp.
     ///
     /// Revoked tokens are excluded from `get_token` and `list_tokens(false)`.
-    pub async fn revoke_token(&self, token_value: &str) -> Result<()> {
+    pub async fn revoke_token(&self, token_value: &str, ns: &str, scope: &str) -> Result<()> {
         self.conn
             .execute(
-                "UPDATE tokens SET revoked_at = ?2 WHERE token_value = ?1 AND revoked_at IS NULL",
-                libsql::params![token_value, Utc::now().to_rfc3339()],
+                "UPDATE tokens SET revoked_at = ?2 WHERE token_value = ?1 AND revoked_at IS NULL AND namespace_id = ?3 AND scope_id = ?4",
+                libsql::params![token_value, Utc::now().to_rfc3339(), ns, scope],
             )
             .await
             .map_err(|e| GapError::database(e.to_string()))?;
@@ -499,13 +501,13 @@ impl GapDatabase {
     ///
     /// Returns the full token value if exactly one active token matches.
     /// Returns `None` if no tokens match.
-    pub async fn get_token_by_prefix(&self, prefix: &str) -> Result<Option<String>> {
+    pub async fn get_token_by_prefix(&self, prefix: &str, ns: &str, scope: &str) -> Result<Option<String>> {
         let pattern = format!("{}%", prefix);
         let mut rows = self
             .conn
             .query(
-                "SELECT token_value FROM tokens WHERE token_value LIKE ?1 AND revoked_at IS NULL",
-                libsql::params![pattern],
+                "SELECT token_value FROM tokens WHERE token_value LIKE ?1 AND revoked_at IS NULL AND namespace_id = ?2 AND scope_id = ?3",
+                libsql::params![pattern, ns, scope],
             )
             .await
             .map_err(|e| GapError::database(e.to_string()))?;
@@ -914,7 +916,7 @@ impl GapDatabase {
     pub async fn log_activity(&self, entry: &ActivityEntry) -> Result<()> {
         self.conn
             .execute(
-                "INSERT INTO access_logs (timestamp, request_id, method, url, agent_id, status, plugin_id, plugin_sha, source_hash, request_headers, rejection_stage, rejection_reason) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+                "INSERT INTO access_logs (timestamp, request_id, method, url, agent_id, status, plugin_id, plugin_sha, source_hash, request_headers, rejection_stage, rejection_reason, namespace_id, scope_id) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
                 libsql::params![
                     entry.timestamp.to_rfc3339(),
                     entry.request_id.as_deref().unwrap_or(""),
@@ -927,7 +929,9 @@ impl GapDatabase {
                     entry.source_hash.as_deref().unwrap_or(""),
                     entry.request_headers.as_deref().unwrap_or(""),
                     entry.rejection_stage.as_deref().unwrap_or(""),
-                    entry.rejection_reason.as_deref().unwrap_or("")
+                    entry.rejection_reason.as_deref().unwrap_or(""),
+                    entry.namespace_id.as_str(),
+                    entry.scope_id.as_str()
                 ],
             )
             .await
@@ -958,7 +962,7 @@ impl GapDatabase {
     /// All filter fields are optional. When not set, that filter is skipped.
     /// Results are ordered by id DESC (newest first). Default limit is 100.
     pub async fn query_activity(&self, filter: &crate::types::ActivityFilter) -> Result<Vec<ActivityEntry>> {
-        let select = "SELECT timestamp, request_id, method, url, agent_id, status, plugin_id, plugin_sha, source_hash, request_headers, rejection_stage, rejection_reason FROM access_logs";
+        let select = "SELECT timestamp, request_id, method, url, agent_id, status, plugin_id, plugin_sha, source_hash, request_headers, rejection_stage, rejection_reason, namespace_id, scope_id FROM access_logs";
 
         let mut conditions: Vec<String> = Vec::new();
         let mut params: Vec<libsql::Value> = Vec::new();
@@ -997,7 +1001,16 @@ impl GapDatabase {
         if let Some(ref request_id) = filter.request_id {
             conditions.push(format!("request_id = ?{}", idx));
             params.push(libsql::Value::Text(request_id.clone()));
-            // idx += 1; // not needed, last param
+            idx += 1;
+        }
+        if let Some(ref namespace_id) = filter.namespace_id {
+            conditions.push(format!("namespace_id = ?{}", idx));
+            params.push(libsql::Value::Text(namespace_id.clone()));
+            idx += 1;
+        }
+        if let Some(ref scope_id) = filter.scope_id {
+            conditions.push(format!("scope_id = ?{}", idx));
+            params.push(libsql::Value::Text(scope_id.clone()));
         }
 
         let where_clause = if conditions.is_empty() {
@@ -1021,7 +1034,7 @@ impl GapDatabase {
     ///
     /// Columns expected: timestamp, request_id, method, url, agent_id, status,
     ///                   plugin_id, plugin_sha, source_hash, request_headers,
-    ///                   rejection_stage, rejection_reason
+    ///                   rejection_stage, rejection_reason, namespace_id, scope_id
     async fn rows_to_activity(&self, rows: &mut libsql::Rows) -> Result<Vec<ActivityEntry>> {
         let mut result = Vec::new();
         while let Some(row) = rows.next().await.map_err(|e| GapError::database(e.to_string()))? {
@@ -1045,6 +1058,10 @@ impl GapDatabase {
                 row.get(10).map_err(|e| GapError::database(e.to_string()))?;
             let rejection_reason_raw: String =
                 row.get(11).map_err(|e| GapError::database(e.to_string()))?;
+            let namespace_id: String =
+                row.get(12).map_err(|e| GapError::database(e.to_string()))?;
+            let scope_id: String =
+                row.get(13).map_err(|e| GapError::database(e.to_string()))?;
 
             let timestamp = DateTime::parse_from_rfc3339(&ts_str)
                 .map_err(|e| GapError::database(format!("Invalid timestamp: {}", e)))?
@@ -1067,8 +1084,8 @@ impl GapDatabase {
                 request_headers: empty_to_none(request_headers_raw),
                 rejection_stage: empty_to_none(rejection_stage_raw),
                 rejection_reason: empty_to_none(rejection_reason_raw),
-                namespace_id: "default".to_string(),
-                scope_id: "default".to_string(),
+                namespace_id,
+                scope_id,
             });
         }
         Ok(result)
@@ -1078,7 +1095,7 @@ impl GapDatabase {
     pub async fn log_management_event(&self, entry: &ManagementLogEntry) -> Result<()> {
         self.conn
             .execute(
-                "INSERT INTO management_logs (timestamp, operation, resource_type, resource_id, detail, success, error_message) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                "INSERT INTO management_logs (timestamp, operation, resource_type, resource_id, detail, success, error_message, namespace_id, scope_id) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
                 libsql::params![
                     entry.timestamp.to_rfc3339(),
                     entry.operation.as_str(),
@@ -1086,7 +1103,9 @@ impl GapDatabase {
                     entry.resource_id.as_deref().unwrap_or(""),
                     entry.detail.as_deref().unwrap_or(""),
                     entry.success as i64,
-                    entry.error_message.as_deref().unwrap_or("")
+                    entry.error_message.as_deref().unwrap_or(""),
+                    entry.namespace_id.as_str(),
+                    entry.scope_id.as_str()
                 ],
             )
             .await
@@ -1099,7 +1118,7 @@ impl GapDatabase {
     /// All filter fields are optional. When not set, that filter is skipped.
     /// Results are ordered by id DESC (newest first). Default limit is 100.
     pub async fn query_management_log(&self, filter: &crate::types::ManagementLogFilter) -> Result<Vec<ManagementLogEntry>> {
-        let select = "SELECT timestamp, operation, resource_type, resource_id, detail, success, error_message FROM management_logs";
+        let select = "SELECT timestamp, operation, resource_type, resource_id, detail, success, error_message, namespace_id, scope_id FROM management_logs";
 
         let mut conditions: Vec<String> = Vec::new();
         let mut params: Vec<libsql::Value> = Vec::new();
@@ -1130,6 +1149,16 @@ impl GapDatabase {
             params.push(libsql::Value::Text(since.to_rfc3339()));
             idx += 1;
         }
+        if let Some(ref namespace_id) = filter.namespace_id {
+            conditions.push(format!("namespace_id = ?{}", idx));
+            params.push(libsql::Value::Text(namespace_id.clone()));
+            idx += 1;
+        }
+        if let Some(ref scope_id) = filter.scope_id {
+            conditions.push(format!("scope_id = ?{}", idx));
+            params.push(libsql::Value::Text(scope_id.clone()));
+            idx += 1;
+        }
 
         let _ = idx; // suppress unused warning
 
@@ -1153,7 +1182,7 @@ impl GapDatabase {
     /// Helper: convert management_logs rows into `Vec<ManagementLogEntry>`.
     ///
     /// Columns expected: timestamp, operation, resource_type, resource_id, detail,
-    ///                   success, error_message
+    ///                   success, error_message, namespace_id, scope_id
     async fn rows_to_management_log(&self, rows: &mut libsql::Rows) -> Result<Vec<ManagementLogEntry>> {
         let mut result = Vec::new();
         while let Some(row) = rows.next().await.map_err(|e| GapError::database(e.to_string()))? {
@@ -1164,6 +1193,8 @@ impl GapDatabase {
             let detail_raw: String = row.get(4).map_err(|e| GapError::database(e.to_string()))?;
             let success_i64: i64 = row.get(5).map_err(|e| GapError::database(e.to_string()))?;
             let error_message_raw: String = row.get(6).map_err(|e| GapError::database(e.to_string()))?;
+            let namespace_id: String = row.get(7).map_err(|e| GapError::database(e.to_string()))?;
+            let scope_id: String = row.get(8).map_err(|e| GapError::database(e.to_string()))?;
 
             let timestamp = DateTime::parse_from_rfc3339(&ts_str)
                 .map_err(|e| GapError::database(format!("Invalid timestamp: {}", e)))?
@@ -1181,8 +1212,8 @@ impl GapDatabase {
                 detail: empty_to_none(detail_raw),
                 success: success_i64 != 0,
                 error_message: empty_to_none(error_message_raw),
-                namespace_id: "default".to_string(),
-                scope_id: "default".to_string(),
+                namespace_id,
+                scope_id,
             });
         }
         Ok(result)
@@ -1286,7 +1317,7 @@ impl GapDatabase {
     // ── Header Set CRUD ────────────────────────────────────────────
 
     /// Add a header set with a generated UUID. Returns the new ID.
-    pub async fn add_header_set(&self, match_patterns: &[String], weight: i32) -> Result<String> {
+    pub async fn add_header_set(&self, match_patterns: &[String], weight: i32, ns: &str, scope: &str) -> Result<String> {
         let id = Uuid::new_v4().to_string();
         let patterns_json = serde_json::to_string(match_patterns)
             .map_err(|e| GapError::database(e.to_string()))?;
@@ -1294,8 +1325,8 @@ impl GapDatabase {
 
         self.conn
             .execute(
-                "INSERT INTO header_sets (id, match_patterns, weight, created_at, deleted) VALUES (?1, ?2, ?3, ?4, 0)",
-                libsql::params![id.as_str(), patterns_json, weight, now],
+                "INSERT INTO header_sets (id, match_patterns, weight, created_at, deleted, namespace_id, scope_id) VALUES (?1, ?2, ?3, ?4, 0, ?5, ?6)",
+                libsql::params![id.as_str(), patterns_json, weight, now, ns, scope],
             )
             .await
             .map_err(|e| GapError::database(e.to_string()))?;
@@ -1303,37 +1334,37 @@ impl GapDatabase {
     }
 
     /// Get a header set by ID (None if deleted or absent).
-    pub async fn get_header_set(&self, id: &str) -> Result<Option<HeaderSet>> {
+    pub async fn get_header_set(&self, id: &str, ns: &str, scope: &str) -> Result<Option<HeaderSet>> {
         let mut rows = self
             .conn
             .query(
-                "SELECT id, match_patterns, weight, created_at FROM header_sets WHERE id = ?1 AND deleted = 0",
-                libsql::params![id],
+                "SELECT id, match_patterns, weight, created_at FROM header_sets WHERE id = ?1 AND deleted = 0 AND namespace_id = ?2 AND scope_id = ?3",
+                libsql::params![id, ns, scope],
             )
             .await
             .map_err(|e| GapError::database(e.to_string()))?;
 
         if let Some(row) = rows.next().await.map_err(|e| GapError::database(e.to_string()))? {
-            Ok(Some(self.row_to_header_set(&row)?))
+            Ok(Some(self.row_to_header_set(&row, ns, scope)?))
         } else {
             Ok(None)
         }
     }
 
     /// List all non-deleted header sets, ordered by id.
-    pub async fn list_header_sets(&self) -> Result<Vec<HeaderSet>> {
+    pub async fn list_header_sets(&self, ns: &str, scope: &str) -> Result<Vec<HeaderSet>> {
         let mut rows = self
             .conn
             .query(
-                "SELECT id, match_patterns, weight, created_at FROM header_sets WHERE deleted = 0 ORDER BY id",
-                (),
+                "SELECT id, match_patterns, weight, created_at FROM header_sets WHERE deleted = 0 AND namespace_id = ?1 AND scope_id = ?2 ORDER BY id",
+                libsql::params![ns, scope],
             )
             .await
             .map_err(|e| GapError::database(e.to_string()))?;
 
         let mut result = Vec::new();
         while let Some(row) = rows.next().await.map_err(|e| GapError::database(e.to_string()))? {
-            result.push(self.row_to_header_set(&row)?);
+            result.push(self.row_to_header_set(&row, ns, scope)?);
         }
         Ok(result)
     }
@@ -1344,6 +1375,8 @@ impl GapDatabase {
         id: &str,
         match_patterns: Option<&[String]>,
         weight: Option<i32>,
+        ns: &str,
+        scope: &str,
     ) -> Result<()> {
         let mut sets: Vec<String> = Vec::new();
         let mut params: Vec<libsql::Value> = Vec::new();
@@ -1367,11 +1400,15 @@ impl GapDatabase {
         }
 
         let sql = format!(
-            "UPDATE header_sets SET {} WHERE id = ?{} AND deleted = 0",
+            "UPDATE header_sets SET {} WHERE id = ?{} AND deleted = 0 AND namespace_id = ?{} AND scope_id = ?{}",
             sets.join(", "),
-            idx
+            idx,
+            idx + 1,
+            idx + 2
         );
         params.push(libsql::Value::Text(id.to_string()));
+        params.push(libsql::Value::Text(ns.to_string()));
+        params.push(libsql::Value::Text(scope.to_string()));
 
         let rows_affected = self
             .conn
@@ -1386,11 +1423,11 @@ impl GapDatabase {
     }
 
     /// Soft-delete a header set and remove its headers.
-    pub async fn remove_header_set(&self, id: &str) -> Result<()> {
+    pub async fn remove_header_set(&self, id: &str, ns: &str, scope: &str) -> Result<()> {
         self.conn
             .execute(
-                "UPDATE header_sets SET deleted = 1 WHERE id = ?1 AND deleted = 0",
-                libsql::params![id],
+                "UPDATE header_sets SET deleted = 1 WHERE id = ?1 AND deleted = 0 AND namespace_id = ?2 AND scope_id = ?3",
+                libsql::params![id, ns, scope],
             )
             .await
             .map_err(|e| GapError::database(e.to_string()))?;
@@ -1412,6 +1449,8 @@ impl GapDatabase {
         header_set_id: &str,
         header_name: &str,
         header_value: &str,
+        _ns: &str,
+        _scope: &str,
     ) -> Result<()> {
         self.conn
             .execute(
@@ -1424,7 +1463,7 @@ impl GapDatabase {
     }
 
     /// Get all headers for a header set as a name->value map.
-    pub async fn get_header_set_headers(&self, header_set_id: &str) -> Result<HashMap<String, String>> {
+    pub async fn get_header_set_headers(&self, header_set_id: &str, _ns: &str, _scope: &str) -> Result<HashMap<String, String>> {
         let mut rows = self
             .conn
             .query(
@@ -1444,7 +1483,7 @@ impl GapDatabase {
     }
 
     /// List header names for a header set (names only, no values).
-    pub async fn list_header_set_header_names(&self, header_set_id: &str) -> Result<Vec<String>> {
+    pub async fn list_header_set_header_names(&self, header_set_id: &str, _ns: &str, _scope: &str) -> Result<Vec<String>> {
         let mut rows = self
             .conn
             .query(
@@ -1463,7 +1502,7 @@ impl GapDatabase {
     }
 
     /// Remove a single header from a header set.
-    pub async fn remove_header_set_header(&self, header_set_id: &str, header_name: &str) -> Result<()> {
+    pub async fn remove_header_set_header(&self, header_set_id: &str, header_name: &str, _ns: &str, _scope: &str) -> Result<()> {
         self.conn
             .execute(
                 "DELETE FROM header_set_headers WHERE header_set_id = ?1 AND header_name = ?2",
@@ -1476,7 +1515,7 @@ impl GapDatabase {
 
     /// Parse a row from header_sets into a HeaderSet.
     /// Columns expected: id, match_patterns, weight, created_at.
-    fn row_to_header_set(&self, row: &libsql::Row) -> Result<HeaderSet> {
+    fn row_to_header_set(&self, row: &libsql::Row, ns: &str, scope: &str) -> Result<HeaderSet> {
         let id: String = row.get(0).map_err(|e| GapError::database(e.to_string()))?;
         let patterns_json: String = row.get(1).map_err(|e| GapError::database(e.to_string()))?;
         let weight: i32 = row.get(2).map_err(|e| GapError::database(e.to_string()))?;
@@ -1493,8 +1532,8 @@ impl GapDatabase {
             match_patterns,
             weight,
             created_at,
-            namespace_id: "default".to_string(),
-            scope_id: "default".to_string(),
+            namespace_id: ns.to_string(),
+            scope_id: scope.to_string(),
         })
     }
 }
@@ -1512,9 +1551,9 @@ mod tests {
         let now = Utc::now();
 
         // Token without scopes (unrestricted)
-        db.add_token("gap_abc123def456", now, None).await.unwrap();
+        db.add_token("gap_abc123def456", now, None, "default", "default").await.unwrap();
 
-        let meta = db.get_token("gap_abc123def456").await.unwrap().unwrap();
+        let meta = db.get_token("gap_abc123def456", "default", "default").await.unwrap().unwrap();
         assert!(meta.scopes.is_none());
         assert!(meta.revoked_at.is_none());
         // Round-trip via RFC 3339 may lose sub-microsecond precision;
@@ -1542,11 +1581,11 @@ mod tests {
             },
         ];
 
-        db.add_token("gap_scoped_token1", now, Some(&scopes))
+        db.add_token("gap_scoped_token1", now, Some(&scopes), "default", "default")
             .await
             .unwrap();
 
-        let meta = db.get_token("gap_scoped_token1").await.unwrap().unwrap();
+        let meta = db.get_token("gap_scoped_token1", "default", "default").await.unwrap().unwrap();
         let retrieved_scopes = meta.scopes.unwrap();
         assert_eq!(retrieved_scopes.len(), 2);
         assert_eq!(retrieved_scopes[0].host_pattern, "example.com");
@@ -1563,30 +1602,30 @@ mod tests {
         let now = Utc::now();
 
         // Empty scopes = deny all (different from None = unrestricted)
-        db.add_token("gap_empty_scopes1", now, Some(&[]))
+        db.add_token("gap_empty_scopes1", now, Some(&[]), "default", "default")
             .await
             .unwrap();
 
-        let meta = db.get_token("gap_empty_scopes1").await.unwrap().unwrap();
+        let meta = db.get_token("gap_empty_scopes1", "default", "default").await.unwrap().unwrap();
         assert_eq!(meta.scopes, Some(vec![])); // Some(empty) not None
     }
 
     #[tokio::test]
     async fn test_token_get_nonexistent() {
         let db = GapDatabase::in_memory().await.unwrap();
-        assert!(db.get_token("nope").await.unwrap().is_none());
+        assert!(db.get_token("nope", "default", "default").await.unwrap().is_none());
     }
 
     #[tokio::test]
     async fn test_token_list() {
         let db = GapDatabase::in_memory().await.unwrap();
-        assert_eq!(db.list_tokens(false).await.unwrap().len(), 0);
+        assert_eq!(db.list_tokens(false, "default", "default").await.unwrap().len(), 0);
 
         let now = Utc::now();
-        db.add_token("gap_t1_abcdef01", now, None).await.unwrap();
-        db.add_token("gap_t2_abcdef02", now, None).await.unwrap();
+        db.add_token("gap_t1_abcdef01", now, None, "default", "default").await.unwrap();
+        db.add_token("gap_t2_abcdef02", now, None, "default", "default").await.unwrap();
 
-        let tokens = db.list_tokens(false).await.unwrap();
+        let tokens = db.list_tokens(false, "default", "default").await.unwrap();
         assert_eq!(tokens.len(), 2);
     }
 
@@ -1595,18 +1634,18 @@ mod tests {
         let db = GapDatabase::in_memory().await.unwrap();
         let now = Utc::now();
 
-        db.add_token("gap_t1_revoke01", now, None).await.unwrap();
-        db.add_token("gap_t2_revoke02", now, None).await.unwrap();
+        db.add_token("gap_t1_revoke01", now, None, "default", "default").await.unwrap();
+        db.add_token("gap_t2_revoke02", now, None, "default", "default").await.unwrap();
 
-        db.revoke_token("gap_t1_revoke01").await.unwrap();
+        db.revoke_token("gap_t1_revoke01", "default", "default").await.unwrap();
 
         // Not in active list
-        let tokens = db.list_tokens(false).await.unwrap();
+        let tokens = db.list_tokens(false, "default", "default").await.unwrap();
         assert_eq!(tokens.len(), 1);
         assert_eq!(tokens[0].token_value, "gap_t2_revoke02");
 
         // In full list with revoked_at set
-        let all_tokens = db.list_tokens(true).await.unwrap();
+        let all_tokens = db.list_tokens(true, "default", "default").await.unwrap();
         assert_eq!(all_tokens.len(), 2);
         let revoked = all_tokens
             .iter()
@@ -1615,7 +1654,7 @@ mod tests {
         assert!(revoked.revoked_at.is_some());
 
         // get_token returns None for revoked
-        assert!(db.get_token("gap_t1_revoke01").await.unwrap().is_none());
+        assert!(db.get_token("gap_t1_revoke01", "default", "default").await.unwrap().is_none());
     }
 
     #[tokio::test]
@@ -1623,12 +1662,12 @@ mod tests {
         let db = GapDatabase::in_memory().await.unwrap();
         let now = Utc::now();
 
-        db.add_token("gap_abc123def456", now, None).await.unwrap();
+        db.add_token("gap_abc123def456", now, None, "default", "default").await.unwrap();
 
-        let found = db.get_token_by_prefix("gap_abc123de").await.unwrap();
+        let found = db.get_token_by_prefix("gap_abc123de", "default", "default").await.unwrap();
         assert_eq!(found, Some("gap_abc123def456".to_string()));
 
-        let not_found = db.get_token_by_prefix("gap_zzz").await.unwrap();
+        let not_found = db.get_token_by_prefix("gap_zzz", "default", "default").await.unwrap();
         assert!(not_found.is_none());
     }
 
@@ -3014,18 +3053,18 @@ mod tests {
         let db = GapDatabase::in_memory().await.unwrap();
 
         // Create a header set
-        let id = db.add_header_set(&["api.example.com".to_string()], 10)
+        let id = db.add_header_set(&["api.example.com".to_string()], 10, "default", "default")
             .await
             .unwrap();
 
         // Get it back
-        let hs = db.get_header_set(&id).await.unwrap().unwrap();
+        let hs = db.get_header_set(&id, "default", "default").await.unwrap().unwrap();
         assert_eq!(hs.id, id);
         assert_eq!(hs.match_patterns, vec!["api.example.com".to_string()]);
         assert_eq!(hs.weight, 10);
 
         // List should contain it
-        let all = db.list_header_sets().await.unwrap();
+        let all = db.list_header_sets("default", "default").await.unwrap();
         assert_eq!(all.len(), 1);
         assert_eq!(all[0].id, id);
 
@@ -3034,29 +3073,31 @@ mod tests {
             &id,
             Some(&["api.example.com".to_string(), "*.example.org".to_string()]),
             None,
+            "default",
+            "default",
         )
         .await
         .unwrap();
-        let hs = db.get_header_set(&id).await.unwrap().unwrap();
+        let hs = db.get_header_set(&id, "default", "default").await.unwrap().unwrap();
         assert_eq!(hs.match_patterns.len(), 2);
 
         // Update weight
-        db.update_header_set(&id, None, Some(20))
+        db.update_header_set(&id, None, Some(20), "default", "default")
             .await
             .unwrap();
-        let hs = db.get_header_set(&id).await.unwrap().unwrap();
+        let hs = db.get_header_set(&id, "default", "default").await.unwrap().unwrap();
         assert_eq!(hs.weight, 20);
 
         // Soft delete
-        db.remove_header_set(&id).await.unwrap();
-        assert!(db.get_header_set(&id).await.unwrap().is_none());
-        assert_eq!(db.list_header_sets().await.unwrap().len(), 0);
+        db.remove_header_set(&id, "default", "default").await.unwrap();
+        assert!(db.get_header_set(&id, "default", "default").await.unwrap().is_none());
+        assert_eq!(db.list_header_sets("default", "default").await.unwrap().len(), 0);
 
         // Re-create gets a new UUID (no upsert with UUIDs)
-        let id2 = db.add_header_set(&["new.example.com".to_string()], 5)
+        let id2 = db.add_header_set(&["new.example.com".to_string()], 5, "default", "default")
             .await
             .unwrap();
-        let hs = db.get_header_set(&id2).await.unwrap().unwrap();
+        let hs = db.get_header_set(&id2, "default", "default").await.unwrap().unwrap();
         assert_eq!(hs.match_patterns, vec!["new.example.com".to_string()]);
         assert_eq!(hs.weight, 5);
     }
@@ -3066,27 +3107,27 @@ mod tests {
         let db = GapDatabase::in_memory().await.unwrap();
 
         // Create a header set
-        let id = db.add_header_set(&["api.example.com".to_string()], 0)
+        let id = db.add_header_set(&["api.example.com".to_string()], 0, "default", "default")
             .await
             .unwrap();
 
         // Set some headers
-        db.set_header_set_header(&id, "Authorization", "Bearer token123")
+        db.set_header_set_header(&id, "Authorization", "Bearer token123", "default", "default")
             .await
             .unwrap();
-        db.set_header_set_header(&id, "X-Custom", "value1")
+        db.set_header_set_header(&id, "X-Custom", "value1", "default", "default")
             .await
             .unwrap();
 
         // Get headers with values
-        let headers = db.get_header_set_headers(&id).await.unwrap();
+        let headers = db.get_header_set_headers(&id, "default", "default").await.unwrap();
         assert_eq!(headers.len(), 2);
         assert_eq!(headers.get("Authorization").unwrap(), "Bearer token123");
         assert_eq!(headers.get("X-Custom").unwrap(), "value1");
 
         // List header names
         let names = db
-            .list_header_set_header_names(&id)
+            .list_header_set_header_names(&id, "default", "default")
             .await
             .unwrap();
         assert_eq!(names.len(), 2);
@@ -3094,19 +3135,19 @@ mod tests {
         assert!(names.contains(&"X-Custom".to_string()));
 
         // Remove one header
-        db.remove_header_set_header(&id, "X-Custom")
+        db.remove_header_set_header(&id, "X-Custom", "default", "default")
             .await
             .unwrap();
         let names = db
-            .list_header_set_header_names(&id)
+            .list_header_set_header_names(&id, "default", "default")
             .await
             .unwrap();
         assert_eq!(names.len(), 1);
         assert_eq!(names[0], "Authorization");
 
         // Cascade on header set delete: removing the header set should also remove headers
-        db.remove_header_set(&id).await.unwrap();
-        let headers = db.get_header_set_headers(&id).await.unwrap();
+        db.remove_header_set(&id, "default", "default").await.unwrap();
+        let headers = db.get_header_set_headers(&id, "default", "default").await.unwrap();
         assert!(headers.is_empty());
     }
 
@@ -3245,5 +3286,100 @@ mod tests {
 
         db.remove_credential("plugin-1", "api_key", "org1", "team1").await.unwrap(); // correct scope
         assert!(db.get_credential("plugin-1", "api_key", "org1", "team1").await.unwrap().is_none()); // now gone
+    }
+
+    #[tokio::test]
+    async fn test_token_namespace_isolation() {
+        let db = GapDatabase::in_memory().await.unwrap();
+        let now = Utc::now();
+
+        // Create token in org1/team1
+        db.add_token("gap_iso_token_01", now, None, "org1", "team1").await.unwrap();
+
+        // Visible from org1/team1
+        assert!(db.get_token("gap_iso_token_01", "org1", "team1").await.unwrap().is_some());
+        assert_eq!(db.list_tokens(false, "org1", "team1").await.unwrap().len(), 1);
+        assert!(db.get_token_by_prefix("gap_iso_token", "org1", "team1").await.unwrap().is_some());
+
+        // NOT visible from org2/team1 (different namespace)
+        assert!(db.get_token("gap_iso_token_01", "org2", "team1").await.unwrap().is_none());
+        assert_eq!(db.list_tokens(false, "org2", "team1").await.unwrap().len(), 0);
+        assert!(db.get_token_by_prefix("gap_iso_token", "org2", "team1").await.unwrap().is_none());
+
+        // NOT visible from org1/team2 (different scope)
+        assert!(db.get_token("gap_iso_token_01", "org1", "team2").await.unwrap().is_none());
+        assert_eq!(db.list_tokens(false, "org1", "team2").await.unwrap().len(), 0);
+
+        // NOT visible from default/default
+        assert!(db.get_token("gap_iso_token_01", "default", "default").await.unwrap().is_none());
+        assert_eq!(db.list_tokens(false, "default", "default").await.unwrap().len(), 0);
+
+        // Verify returned entry has correct namespace/scope
+        let meta = db.get_token("gap_iso_token_01", "org1", "team1").await.unwrap().unwrap();
+        assert_eq!(meta.namespace_id, "org1");
+        assert_eq!(meta.scope_id, "team1");
+
+        let tokens = db.list_tokens(false, "org1", "team1").await.unwrap();
+        assert_eq!(tokens[0].namespace_id, "org1");
+        assert_eq!(tokens[0].scope_id, "team1");
+
+        // Revoke from wrong scope has no effect
+        db.revoke_token("gap_iso_token_01", "org1", "team2").await.unwrap();
+        assert!(db.get_token("gap_iso_token_01", "org1", "team1").await.unwrap().is_some());
+
+        // Revoke from correct scope works
+        db.revoke_token("gap_iso_token_01", "org1", "team1").await.unwrap();
+        assert!(db.get_token("gap_iso_token_01", "org1", "team1").await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn test_header_set_namespace_isolation() {
+        let db = GapDatabase::in_memory().await.unwrap();
+
+        // Add header set in org1/team1
+        let id = db.add_header_set(&["api.example.com".to_string()], 10, "org1", "team1")
+            .await
+            .unwrap();
+
+        // Visible from org1/team1
+        assert!(db.get_header_set(&id, "org1", "team1").await.unwrap().is_some());
+        assert_eq!(db.list_header_sets("org1", "team1").await.unwrap().len(), 1);
+
+        // NOT visible from org1/team2 (different scope)
+        assert!(db.get_header_set(&id, "org1", "team2").await.unwrap().is_none());
+        assert_eq!(db.list_header_sets("org1", "team2").await.unwrap().len(), 0);
+
+        // NOT visible from org2/team1 (different namespace)
+        assert!(db.get_header_set(&id, "org2", "team1").await.unwrap().is_none());
+        assert_eq!(db.list_header_sets("org2", "team1").await.unwrap().len(), 0);
+
+        // NOT visible from default/default
+        assert!(db.get_header_set(&id, "default", "default").await.unwrap().is_none());
+        assert_eq!(db.list_header_sets("default", "default").await.unwrap().len(), 0);
+
+        // Verify returned entry has correct namespace/scope
+        let hs = db.get_header_set(&id, "org1", "team1").await.unwrap().unwrap();
+        assert_eq!(hs.namespace_id, "org1");
+        assert_eq!(hs.scope_id, "team1");
+
+        let all = db.list_header_sets("org1", "team1").await.unwrap();
+        assert_eq!(all[0].namespace_id, "org1");
+        assert_eq!(all[0].scope_id, "team1");
+
+        // Update from wrong scope fails
+        assert!(db.update_header_set(&id, None, Some(99), "org1", "team2").await.is_err());
+
+        // Update from correct scope works
+        db.update_header_set(&id, None, Some(99), "org1", "team1").await.unwrap();
+        let hs = db.get_header_set(&id, "org1", "team1").await.unwrap().unwrap();
+        assert_eq!(hs.weight, 99);
+
+        // Remove from wrong scope has no effect
+        db.remove_header_set(&id, "org1", "team2").await.unwrap();
+        assert!(db.get_header_set(&id, "org1", "team1").await.unwrap().is_some());
+
+        // Remove from correct scope works
+        db.remove_header_set(&id, "org1", "team1").await.unwrap();
+        assert!(db.get_header_set(&id, "org1", "team1").await.unwrap().is_none());
     }
 }

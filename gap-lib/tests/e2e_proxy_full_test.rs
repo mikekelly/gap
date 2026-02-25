@@ -237,7 +237,7 @@ async fn setup_test_db(
     // Store agent token
     let token = AgentToken::new();
     let token_value = token.token.clone();
-    db.add_token(&token.token, token.created_at, None)
+    db.add_token(&token.token, token.created_at, None, "default", "default")
         .await
         .expect("store token");
 

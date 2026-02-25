@@ -810,7 +810,7 @@ async fn list_tokens(
 
     let include_revoked = params.get("include_revoked").map_or(false, |v| v == "true");
 
-    let token_entries = state.db.list_tokens(include_revoked).await
+    let token_entries = state.db.list_tokens(include_revoked, "default", "default").await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to list tokens: {}", e)))?;
 
     let token_list: Vec<TokenResponse> = token_entries
@@ -853,7 +853,7 @@ async fn create_token(
 
     let token = AgentToken::new();
 
-    state.db.add_token(&token.token, token.created_at, scopes.as_deref()).await
+    state.db.add_token(&token.token, token.created_at, scopes.as_deref(), "default", "default").await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to create token: {}", e)))?;
 
     emit_management_log(&state, ManagementLogEntry {
@@ -886,12 +886,12 @@ async fn delete_token(
     verify_auth(&state, &headers).await?;
 
     // Look up full token value by prefix
-    let token_value = state.db.get_token_by_prefix(&prefix).await
+    let token_value = state.db.get_token_by_prefix(&prefix, "default", "default").await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to find token: {}", e)))?
         .ok_or_else(|| (StatusCode::NOT_FOUND, format!("No active token found with prefix '{}'", prefix)))?;
 
     // Soft delete (set revoked_at)
-    state.db.revoke_token(&token_value).await
+    state.db.revoke_token(&token_value, "default", "default").await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to revoke token: {}", e)))?;
 
     // Invalidate the revoked token from cache
@@ -1296,11 +1296,11 @@ async fn create_header_set(
         return Err((StatusCode::BAD_REQUEST, "match_patterns must not be empty".to_string()));
     }
 
-    let id = state.db.add_header_set(&req.match_patterns, req.weight).await
+    let id = state.db.add_header_set(&req.match_patterns, req.weight, "default", "default").await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to create header set: {}", e)))?;
 
     for (header_name, header_value) in &req.headers {
-        state.db.set_header_set_header(&id, header_name, header_value)
+        state.db.set_header_set_header(&id, header_name, header_value, "default", "default")
             .await
             .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to set header: {}", e)))?;
     }
@@ -1327,12 +1327,12 @@ async fn list_header_sets(
 ) -> Result<Json<HeaderSetListResponse>, (StatusCode, String)> {
     verify_auth(&state, &headers).await?;
 
-    let header_sets = state.db.list_header_sets().await
+    let header_sets = state.db.list_header_sets("default", "default").await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to list header sets: {}", e)))?;
 
     let mut items = Vec::new();
     for hs in header_sets {
-        let header_names = state.db.list_header_set_header_names(&hs.id).await
+        let header_names = state.db.list_header_set_header_names(&hs.id, "default", "default").await
             .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to list headers for '{}': {}", hs.id, e)))?;
         items.push(HeaderSetListItem {
             id: hs.id,
@@ -1367,13 +1367,13 @@ async fn update_header_set(
     }
 
     // Verify exists first to return proper 404
-    let exists = state.db.get_header_set(&id).await
+    let exists = state.db.get_header_set(&id, "default", "default").await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to check header set: {}", e)))?;
     if exists.is_none() {
         return Err((StatusCode::NOT_FOUND, format!("Header set '{}' not found", id)));
     }
 
-    state.db.update_header_set(&id, req.match_patterns.as_deref(), req.weight).await
+    state.db.update_header_set(&id, req.match_patterns.as_deref(), req.weight, "default", "default").await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to update header set: {}", e)))?;
 
     emit_management_log(&state, ManagementLogEntry {
@@ -1399,7 +1399,7 @@ async fn delete_header_set(
 ) -> Result<Json<DeleteResponse>, (StatusCode, String)> {
     verify_auth(&state, &headers).await?;
 
-    state.db.remove_header_set(&id).await
+    state.db.remove_header_set(&id, "default", "default").await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to delete header set: {}", e)))?;
 
     emit_management_log(&state, ManagementLogEntry {
@@ -1429,13 +1429,13 @@ async fn set_header_set_header(
         .map_err(|e| (StatusCode::BAD_REQUEST, format!("Invalid request body: {}", e)))?;
 
     // Verify header set exists
-    let exists = state.db.get_header_set(&id).await
+    let exists = state.db.get_header_set(&id, "default", "default").await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to check header set: {}", e)))?;
     if exists.is_none() {
         return Err((StatusCode::NOT_FOUND, format!("Header set '{}' not found", id)));
     }
 
-    state.db.set_header_set_header(&id, &req.name, &req.value).await
+    state.db.set_header_set_header(&id, &req.name, &req.value, "default", "default").await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to set header: {}", e)))?;
 
     let header_name = req.name.clone();
@@ -1462,7 +1462,7 @@ async fn delete_header_set_header(
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
     verify_auth(&state, &headers).await?;
 
-    state.db.remove_header_set_header(&id, &header_name).await
+    state.db.remove_header_set_header(&id, &header_name, "default", "default").await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to delete header: {}", e)))?;
 
     emit_management_log(&state, ManagementLogEntry {
@@ -2285,7 +2285,7 @@ mod tests {
 
         // Add a token to the database directly
         let token_value = "gap_test_token_12345".to_string();
-        db.add_token(&token_value, Utc::now(), None).await.expect("add token to database");
+        db.add_token(&token_value, Utc::now(), None, "default", "default").await.expect("add token to database");
 
         // List tokens via API
         let app = create_router(state);
@@ -2357,7 +2357,7 @@ mod tests {
         let token_response: TokenResponse = serde_json::from_slice(&body_bytes).unwrap();
 
         // Verify the token was added to the database
-        let tokens = db.list_tokens(false).await.expect("list tokens from database");
+        let tokens = db.list_tokens(false, "default", "default").await.expect("list tokens from database");
         assert_eq!(tokens.len(), 1);
         // The full token value should start with the prefix
         assert!(tokens[0].token_value.starts_with(&token_response.prefix));
@@ -2384,7 +2384,7 @@ mod tests {
 
         // Create a token and add it to the database
         let token = AgentToken::new();
-        db.add_token(&token.token, token.created_at, None).await.expect("add token to database");
+        db.add_token(&token.token, token.created_at, None, "default", "default").await.expect("add token to database");
 
         // Delete (revoke) token via API using its prefix
         let app = create_router(state);
@@ -2404,11 +2404,11 @@ mod tests {
         assert_eq!(response.status(), StatusCode::OK);
 
         // Verify the token is no longer in active list (soft deleted)
-        let tokens = db.list_tokens(false).await.expect("list tokens from database");
+        let tokens = db.list_tokens(false, "default", "default").await.expect("list tokens from database");
         assert_eq!(tokens.len(), 0, "Token should not appear in active list after revocation");
 
         // But it should still exist in the full list (including revoked)
-        let all_tokens = db.list_tokens(true).await.expect("list all tokens from database");
+        let all_tokens = db.list_tokens(true, "default", "default").await.expect("list all tokens from database");
         assert_eq!(all_tokens.len(), 1, "Revoked token should still exist in full list");
         assert!(all_tokens[0].revoked_at.is_some(), "Token should have revoked_at set");
     }
@@ -3537,7 +3537,7 @@ mod tests {
         assert_eq!(resp["created"], true);
 
         // Verify stored in DB
-        let hs = db.get_header_set(hs_id).await.unwrap().expect("header set should exist");
+        let hs = db.get_header_set(hs_id, "default", "default").await.unwrap().expect("header set should exist");
         assert_eq!(hs.match_patterns, vec!["api.example.com"]);
         assert_eq!(hs.weight, 10);
     }
@@ -3641,7 +3641,7 @@ mod tests {
         assert_eq!(resp["created"], true);
 
         // Verify headers were stored in the DB
-        let names = db.list_header_set_header_names(hs_id).await.unwrap();
+        let names = db.list_header_set_header_names(hs_id, "default", "default").await.unwrap();
         assert!(names.contains(&"Authorization".to_string()), "Authorization should be stored; got: {:?}", names);
         assert!(names.contains(&"X-Custom".to_string()), "X-Custom should be stored; got: {:?}", names);
     }
@@ -3653,7 +3653,7 @@ mod tests {
         let state = ApiState::new(9443, 9080, Arc::clone(&db), Arc::new(TokenCache::new()));
         let password = setup_auth(&state).await;
 
-        let hs_id = db.add_header_set(&["api.example.com".to_string()], 0)
+        let hs_id = db.add_header_set(&["api.example.com".to_string()], 0, "default", "default")
             .await.unwrap();
 
         let app = create_router(state);
@@ -3687,11 +3687,11 @@ mod tests {
         let password = setup_auth(&state).await;
 
         // Pre-populate via DB
-        let hs_id = db.add_header_set(&["api.example.com".to_string()], 5)
+        let hs_id = db.add_header_set(&["api.example.com".to_string()], 5, "default", "default")
             .await.unwrap();
-        db.set_header_set_header(&hs_id, "Authorization", "Bearer secret-value")
+        db.set_header_set_header(&hs_id, "Authorization", "Bearer secret-value", "default", "default")
             .await.unwrap();
-        db.set_header_set_header(&hs_id, "X-Custom", "some-value")
+        db.set_header_set_header(&hs_id, "X-Custom", "some-value", "default", "default")
             .await.unwrap();
 
         let app = create_router(state);
@@ -3738,7 +3738,7 @@ mod tests {
         let state = ApiState::new(9443, 9080, Arc::clone(&db), Arc::new(TokenCache::new()));
         let password = setup_auth(&state).await;
 
-        let hs_id = db.add_header_set(&["api.example.com".to_string()], 0)
+        let hs_id = db.add_header_set(&["api.example.com".to_string()], 0, "default", "default")
             .await.unwrap();
 
         let app = create_router(state);
@@ -3765,7 +3765,7 @@ mod tests {
         assert_eq!(resp["updated"], true);
 
         // Verify updated in DB
-        let hs = db.get_header_set(&hs_id).await.unwrap().expect("should exist");
+        let hs = db.get_header_set(&hs_id, "default", "default").await.unwrap().expect("should exist");
         assert_eq!(hs.weight, 42);
     }
 
@@ -3775,7 +3775,7 @@ mod tests {
         let state = ApiState::new(9443, 9080, Arc::clone(&db), Arc::new(TokenCache::new()));
         let password = setup_auth(&state).await;
 
-        let hs_id = db.add_header_set(&["api.example.com".to_string()], 0)
+        let hs_id = db.add_header_set(&["api.example.com".to_string()], 0, "default", "default")
             .await.unwrap();
 
         let app = create_router(state);
@@ -3799,11 +3799,11 @@ mod tests {
         assert_eq!(resp["deleted"], true);
 
         // Verify removed from DB
-        let hs = db.get_header_set(&hs_id).await.unwrap();
+        let hs = db.get_header_set(&hs_id, "default", "default").await.unwrap();
         assert!(hs.is_none(), "header set should be deleted");
 
         // Verify not in list
-        let all = db.list_header_sets().await.unwrap();
+        let all = db.list_header_sets("default", "default").await.unwrap();
         assert!(all.iter().all(|h| h.id != hs_id), "should not appear in list");
     }
 
@@ -3813,7 +3813,7 @@ mod tests {
         let state = ApiState::new(9443, 9080, Arc::clone(&db), Arc::new(TokenCache::new()));
         let password = setup_auth(&state).await;
 
-        let hs_id = db.add_header_set(&["api.example.com".to_string()], 0)
+        let hs_id = db.add_header_set(&["api.example.com".to_string()], 0, "default", "default")
             .await.unwrap();
 
         let app = create_router(state);
@@ -3844,7 +3844,7 @@ mod tests {
         assert_eq!(resp["header"], "Authorization");
 
         // Verify stored in DB (by listing names)
-        let names = db.list_header_set_header_names(&hs_id).await.unwrap();
+        let names = db.list_header_set_header_names(&hs_id, "default", "default").await.unwrap();
         assert!(names.contains(&"Authorization".to_string()), "Authorization header should be stored");
     }
 
@@ -3854,11 +3854,11 @@ mod tests {
         let state = ApiState::new(9443, 9080, Arc::clone(&db), Arc::new(TokenCache::new()));
         let password = setup_auth(&state).await;
 
-        let hs_id = db.add_header_set(&["api.example.com".to_string()], 0)
+        let hs_id = db.add_header_set(&["api.example.com".to_string()], 0, "default", "default")
             .await.unwrap();
-        db.set_header_set_header(&hs_id, "Authorization", "Bearer token")
+        db.set_header_set_header(&hs_id, "Authorization", "Bearer token", "default", "default")
             .await.unwrap();
-        db.set_header_set_header(&hs_id, "X-Custom", "value")
+        db.set_header_set_header(&hs_id, "X-Custom", "value", "default", "default")
             .await.unwrap();
 
         let app = create_router(state);
@@ -3883,7 +3883,7 @@ mod tests {
         assert_eq!(resp["header"], "Authorization");
 
         // Verify Authorization removed, X-Custom still there
-        let names = db.list_header_set_header_names(&hs_id).await.unwrap();
+        let names = db.list_header_set_header_names(&hs_id, "default", "default").await.unwrap();
         assert!(!names.contains(&"Authorization".to_string()), "Authorization should be removed");
         assert!(names.contains(&"X-Custom".to_string()), "X-Custom should remain");
     }

@@ -130,7 +130,7 @@ async fn setup_test_db(pkcs8_b64: &str, key_id: &str) -> (Arc<GapDatabase>, Stri
 
     let token = AgentToken::new();
     let token_value = token.token.clone();
-    db.add_token(&token.token, token.created_at, None)
+    db.add_token(&token.token, token.created_at, None, "default", "default")
         .await
         .expect("store token");
 

@@ -184,7 +184,7 @@ impl ProxyServer {
         let db = Arc::new(GapDatabase::in_memory().await.expect("create in-memory db"));
 
         for token in &tokens {
-            db.add_token(&token.token, token.created_at, None)
+            db.add_token(&token.token, token.created_at, None, "default", "default")
                 .await
                 .expect("add token to db");
         }
@@ -472,7 +472,7 @@ async fn validate_auth(
             }
 
             // Cache miss — check database
-            if let Some(metadata) = db.get_token(&token_value).await? {
+            if let Some(metadata) = db.get_token(&token_value, "default", "default").await? {
                 let prefix = if token_value.len() >= 12 {
                     token_value[..12].to_string()
                 } else {
@@ -1177,7 +1177,7 @@ mod tests {
         let token = AgentToken::new();
         let token_value = token.token.clone();
 
-        db.add_token(&token.token, token.created_at, None)
+        db.add_token(&token.token, token.created_at, None, "default", "default")
             .await
             .expect("add token to db");
 
@@ -1193,7 +1193,7 @@ mod tests {
         let cache = TokenCache::new();
 
         let token = AgentToken::new();
-        db.add_token(&token.token, token.created_at, None)
+        db.add_token(&token.token, token.created_at, None, "default", "default")
             .await
             .expect("add token to db");
 
@@ -1904,7 +1904,7 @@ mod tests {
 
         let token = AgentToken::new();
         let token_value = token.token.clone();
-        db.add_token(&token.token, token.created_at, None)
+        db.add_token(&token.token, token.created_at, None, "default", "default")
             .await
             .expect("add token to db");
 
@@ -1934,7 +1934,7 @@ mod tests {
 
         let token = AgentToken::new();
         let token_value = token.token.clone();
-        db.add_token(&token.token, token.created_at, None)
+        db.add_token(&token.token, token.created_at, None, "default", "default")
             .await
             .expect("add token to db");
 

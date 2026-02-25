@@ -194,7 +194,7 @@ async fn setup_scoped_db(scopes: Option<&[TokenScope]>) -> (Arc<GapDatabase>, St
     // Store agent token with scopes
     let token = AgentToken::new();
     let token_value = token.token.clone();
-    db.add_token(&token.token, token.created_at, scopes)
+    db.add_token(&token.token, token.created_at, scopes, "default", "default")
         .await
         .expect("store token");
 

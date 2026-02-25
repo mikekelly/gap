@@ -304,20 +304,20 @@ async fn test_e2e_header_set_injection() {
     // Set up DB with header set
     let db = Arc::new(GapDatabase::in_memory().await.expect("create in-memory db"));
 
-    let hs_id = db.add_header_set(&["localhost".to_string()], 0)
+    let hs_id = db.add_header_set(&["localhost".to_string()], 0, "default", "default")
         .await
         .expect("add header set");
-    db.set_header_set_header(&hs_id, "Authorization", "Bearer test-secret-key")
+    db.set_header_set_header(&hs_id, "Authorization", "Bearer test-secret-key", "default", "default")
         .await
         .expect("set Authorization header");
-    db.set_header_set_header(&hs_id, "X-Custom", "my-value")
+    db.set_header_set_header(&hs_id, "X-Custom", "my-value", "default", "default")
         .await
         .expect("set X-Custom header");
 
     // Add agent token
     let token = AgentToken::new();
     let token_value = token.token.clone();
-    db.add_token(&token.token, token.created_at, None)
+    db.add_token(&token.token, token.created_at, None, "default", "default")
         .await
         .expect("store token");
 
@@ -396,17 +396,17 @@ async fn test_e2e_header_set_vs_plugin_weight() {
         .expect("set credential");
 
     // Add header set with weight=10 (higher priority)
-    let hs_id = db.add_header_set(&["localhost".to_string()], 10)
+    let hs_id = db.add_header_set(&["localhost".to_string()], 10, "default", "default")
         .await
         .expect("add header set");
-    db.set_header_set_header(&hs_id, "X-Source", "header-set")
+    db.set_header_set_header(&hs_id, "X-Source", "header-set", "default", "default")
         .await
         .expect("set X-Source header");
 
     // Add agent token
     let token = AgentToken::new();
     let token_value = token.token.clone();
-    db.add_token(&token.token, token.created_at, None)
+    db.add_token(&token.token, token.created_at, None, "default", "default")
         .await
         .expect("store token");
 
@@ -443,17 +443,17 @@ async fn test_e2e_header_set_path_matching() {
     let db = Arc::new(GapDatabase::in_memory().await.expect("create in-memory db"));
 
     // Header set matching only /api/* paths
-    let hs_id = db.add_header_set(&["localhost/api/*".to_string()], 0)
+    let hs_id = db.add_header_set(&["localhost/api/*".to_string()], 0, "default", "default")
         .await
         .expect("add header set");
-    db.set_header_set_header(&hs_id, "X-Api-Key", "secret")
+    db.set_header_set_header(&hs_id, "X-Api-Key", "secret", "default", "default")
         .await
         .expect("set X-Api-Key header");
 
     // Add agent token
     let token = AgentToken::new();
     let token_value = token.token.clone();
-    db.add_token(&token.token, token.created_at, None)
+    db.add_token(&token.token, token.created_at, None, "default", "default")
         .await
         .expect("store token");
 
@@ -543,17 +543,17 @@ async fn test_e2e_plugin_beats_header_set_by_weight() {
         .expect("set credential");
 
     // Add header set with weight=5 (lower priority)
-    let hs_id = db.add_header_set(&["localhost".to_string()], 5)
+    let hs_id = db.add_header_set(&["localhost".to_string()], 5, "default", "default")
         .await
         .expect("add header set");
-    db.set_header_set_header(&hs_id, "X-Source", "header-set")
+    db.set_header_set_header(&hs_id, "X-Source", "header-set", "default", "default")
         .await
         .expect("set X-Source header");
 
     // Add agent token
     let token = AgentToken::new();
     let token_value = token.token.clone();
-    db.add_token(&token.token, token.created_at, None)
+    db.add_token(&token.token, token.created_at, None, "default", "default")
         .await
         .expect("store token");
 
@@ -589,25 +589,25 @@ async fn test_e2e_header_set_vs_header_set_weight() {
     let db = Arc::new(GapDatabase::in_memory().await.expect("create in-memory db"));
 
     // Header set A with weight=5
-    let hs_a_id = db.add_header_set(&["localhost".to_string()], 5)
+    let hs_a_id = db.add_header_set(&["localhost".to_string()], 5, "default", "default")
         .await
         .expect("add header set A");
-    db.set_header_set_header(&hs_a_id, "X-Source", "hs-a")
+    db.set_header_set_header(&hs_a_id, "X-Source", "hs-a", "default", "default")
         .await
         .expect("set X-Source for hs-a");
 
     // Header set B with weight=10
-    let hs_b_id = db.add_header_set(&["localhost".to_string()], 10)
+    let hs_b_id = db.add_header_set(&["localhost".to_string()], 10, "default", "default")
         .await
         .expect("add header set B");
-    db.set_header_set_header(&hs_b_id, "X-Source", "hs-b")
+    db.set_header_set_header(&hs_b_id, "X-Source", "hs-b", "default", "default")
         .await
         .expect("set X-Source for hs-b");
 
     // Add agent token
     let token = AgentToken::new();
     let token_value = token.token.clone();
-    db.add_token(&token.token, token.created_at, None)
+    db.add_token(&token.token, token.created_at, None, "default", "default")
         .await
         .expect("store token");
 
@@ -644,10 +644,10 @@ async fn test_e2e_same_weight_oldest_wins() {
     let db = Arc::new(GapDatabase::in_memory().await.expect("create in-memory db"));
 
     // Header set A (created first) with weight=0
-    let hs_older_id = db.add_header_set(&["localhost".to_string()], 0)
+    let hs_older_id = db.add_header_set(&["localhost".to_string()], 0, "default", "default")
         .await
         .expect("add older header set");
-    db.set_header_set_header(&hs_older_id, "X-Source", "older")
+    db.set_header_set_header(&hs_older_id, "X-Source", "older", "default", "default")
         .await
         .expect("set X-Source for older hs");
 
@@ -655,17 +655,17 @@ async fn test_e2e_same_weight_oldest_wins() {
     tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
 
     // Header set B (created second) with weight=0
-    let hs_newer_id = db.add_header_set(&["localhost".to_string()], 0)
+    let hs_newer_id = db.add_header_set(&["localhost".to_string()], 0, "default", "default")
         .await
         .expect("add newer header set");
-    db.set_header_set_header(&hs_newer_id, "X-Source", "newer")
+    db.set_header_set_header(&hs_newer_id, "X-Source", "newer", "default", "default")
         .await
         .expect("set X-Source for newer hs");
 
     // Add agent token
     let token = AgentToken::new();
     let token_value = token.token.clone();
-    db.add_token(&token.token, token.created_at, None)
+    db.add_token(&token.token, token.created_at, None, "default", "default")
         .await
         .expect("store token");
 
@@ -702,25 +702,25 @@ async fn test_e2e_path_specific_header_set_wins_by_weight() {
     let db = Arc::new(GapDatabase::in_memory().await.expect("create in-memory db"));
 
     // Header set A: path-specific with higher weight
-    let hs_specific_id = db.add_header_set(&["localhost/api/v1/*".to_string()], 10)
+    let hs_specific_id = db.add_header_set(&["localhost/api/v1/*".to_string()], 10, "default", "default")
         .await
         .expect("add specific header set");
-    db.set_header_set_header(&hs_specific_id, "X-Source", "specific")
+    db.set_header_set_header(&hs_specific_id, "X-Source", "specific", "default", "default")
         .await
         .expect("set X-Source for specific hs");
 
     // Header set B: catch-all with lower weight
-    let hs_catchall_id = db.add_header_set(&["localhost".to_string()], 5)
+    let hs_catchall_id = db.add_header_set(&["localhost".to_string()], 5, "default", "default")
         .await
         .expect("add catchall header set");
-    db.set_header_set_header(&hs_catchall_id, "X-Source", "catchall")
+    db.set_header_set_header(&hs_catchall_id, "X-Source", "catchall", "default", "default")
         .await
         .expect("set X-Source for catchall hs");
 
     // Add agent token
     let token = AgentToken::new();
     let token_value = token.token.clone();
-    db.add_token(&token.token, token.created_at, None)
+    db.add_token(&token.token, token.created_at, None, "default", "default")
         .await
         .expect("store token");
 

@@ -122,7 +122,7 @@ pub async fn find_matching_handler(
     db: &GapDatabase,
 ) -> Result<Option<MatchResult>> {
     let plugin_entries = db.list_plugins("default", "default").await?;
-    let header_sets = db.list_header_sets().await?;
+    let header_sets = db.list_header_sets("default", "default").await?;
 
     let mut candidates: Vec<MatchCandidate> = Vec::new();
 
@@ -469,7 +469,7 @@ mod tests {
         };
         let plugin_id = db.add_plugin(&entry, plugin_code, "default", "default").await.unwrap();
 
-        db.add_header_set(&["api.example.com".to_string()], 5)
+        db.add_header_set(&["api.example.com".to_string()], 5, "default", "default")
             .await
             .unwrap();
 
@@ -489,7 +489,7 @@ mod tests {
         let db = GapDatabase::in_memory().await.unwrap();
 
         // Header set created first (will have an earlier timestamp)
-        db.add_header_set(&["api.example.com".to_string()], 5)
+        db.add_header_set(&["api.example.com".to_string()], 5, "default", "default")
             .await
             .unwrap();
 
@@ -533,7 +533,7 @@ mod tests {
         // Header set matches, no plugins
         let db = GapDatabase::in_memory().await.unwrap();
 
-        db.add_header_set(&["api.example.com".to_string()], 0)
+        db.add_header_set(&["api.example.com".to_string()], 0, "default", "default")
             .await
             .unwrap();
 
@@ -558,10 +558,10 @@ mod tests {
         // Test that path patterns work in find_matching_handler
         let db = GapDatabase::in_memory().await.unwrap();
 
-        db.add_header_set(&["api.example.com/v1/chat".to_string()], 10)
+        db.add_header_set(&["api.example.com/v1/chat".to_string()], 10, "default", "default")
             .await
             .unwrap();
-        db.add_header_set(&["api.example.com/v1/*".to_string()], 5)
+        db.add_header_set(&["api.example.com/v1/*".to_string()], 5, "default", "default")
             .await
             .unwrap();
 
