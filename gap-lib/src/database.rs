@@ -1513,6 +1513,86 @@ impl GapDatabase {
         Ok(())
     }
 
+    // ── Namespace discovery ─────────────────────────────────────────
+
+    /// Return distinct namespace_ids that have tokens or active plugins.
+    pub async fn list_distinct_namespaces(&self) -> Result<Vec<String>> {
+        let sql = "SELECT DISTINCT namespace_id FROM tokens \
+                   UNION \
+                   SELECT DISTINCT namespace_id FROM plugin_versions WHERE deleted = 0";
+        let mut rows = self.conn.query(sql, ())
+            .await
+            .map_err(|e| GapError::database(e.to_string()))?;
+        let mut result = Vec::new();
+        while let Some(row) = rows.next().await.map_err(|e| GapError::database(e.to_string()))? {
+            let ns: String = row.get(0).map_err(|e| GapError::database(e.to_string()))?;
+            result.push(ns);
+        }
+        result.sort();
+        result.dedup();
+        Ok(result)
+    }
+
+    /// Return distinct scope_ids within a given namespace.
+    pub async fn list_namespace_scopes(&self, namespace_id: &str) -> Result<Vec<String>> {
+        let sql = "SELECT DISTINCT scope_id FROM tokens WHERE namespace_id = ?1 \
+                   UNION \
+                   SELECT DISTINCT scope_id FROM plugin_versions WHERE namespace_id = ?1 AND deleted = 0";
+        let mut rows = self.conn.query(sql, libsql::params![namespace_id])
+            .await
+            .map_err(|e| GapError::database(e.to_string()))?;
+        let mut result = Vec::new();
+        while let Some(row) = rows.next().await.map_err(|e| GapError::database(e.to_string()))? {
+            let scope: String = row.get(0).map_err(|e| GapError::database(e.to_string()))?;
+            result.push(scope);
+        }
+        result.sort();
+        result.dedup();
+        Ok(result)
+    }
+
+    /// Return resource counts for a given namespace and scope.
+    pub async fn get_scope_resource_counts(&self, ns: &str, scope: &str) -> Result<serde_json::Value> {
+        let plugin_count: i64 = {
+            let mut rows = self.conn.query(
+                "SELECT COUNT(*) FROM plugin_versions WHERE namespace_id = ?1 AND scope_id = ?2 AND deleted = 0",
+                libsql::params![ns, scope],
+            ).await.map_err(|e| GapError::database(e.to_string()))?;
+            if let Some(row) = rows.next().await.map_err(|e| GapError::database(e.to_string()))? {
+                row.get(0).map_err(|e| GapError::database(e.to_string()))?
+            } else {
+                0
+            }
+        };
+        let token_count: i64 = {
+            let mut rows = self.conn.query(
+                "SELECT COUNT(*) FROM tokens WHERE namespace_id = ?1 AND scope_id = ?2 AND revoked_at IS NULL",
+                libsql::params![ns, scope],
+            ).await.map_err(|e| GapError::database(e.to_string()))?;
+            if let Some(row) = rows.next().await.map_err(|e| GapError::database(e.to_string()))? {
+                row.get(0).map_err(|e| GapError::database(e.to_string()))?
+            } else {
+                0
+            }
+        };
+        let header_set_count: i64 = {
+            let mut rows = self.conn.query(
+                "SELECT COUNT(*) FROM header_sets WHERE namespace_id = ?1 AND scope_id = ?2",
+                libsql::params![ns, scope],
+            ).await.map_err(|e| GapError::database(e.to_string()))?;
+            if let Some(row) = rows.next().await.map_err(|e| GapError::database(e.to_string()))? {
+                row.get(0).map_err(|e| GapError::database(e.to_string()))?
+            } else {
+                0
+            }
+        };
+        Ok(serde_json::json!({
+            "plugins": plugin_count,
+            "tokens": token_count,
+            "header_sets": header_set_count,
+        }))
+    }
+
     /// Parse a row from header_sets into a HeaderSet.
     /// Columns expected: id, match_patterns, weight, created_at.
     fn row_to_header_set(&self, row: &libsql::Row, ns: &str, scope: &str) -> Result<HeaderSet> {

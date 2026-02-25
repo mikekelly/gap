@@ -47,6 +47,10 @@ struct Args {
     /// Path to Ed25519 public key PEM file for request signing verification
     #[arg(long, global = true)]
     signing_key: Option<String>,
+
+    /// Enable namespace mode (strict namespace routing)
+    #[arg(long, default_value = "false", global = true, env = "GAP_NAMESPACE_MODE")]
+    namespace_mode: bool,
 }
 
 #[derive(Subcommand)]
@@ -398,6 +402,7 @@ async fn main() -> anyhow::Result<()> {
     api_state.management_tx = Some(management_tx);
     api_state.signing_config = signing_config;
     api_state.nonce_cache = nonce_cache;
+    api_state.namespace_mode = args.namespace_mode;
 
     // Load persisted password hash from database (if server was previously initialized)
     if let Ok(Some(hash)) = db.get_password_hash().await {
@@ -669,6 +674,13 @@ mod tests {
         let args = Args::parse_from(["gap-server"]);
         assert_eq!(args.proxy_port, 9443);
         assert_eq!(args.api_port, 9080);
+        assert!(!args.namespace_mode);
+    }
+
+    #[test]
+    fn test_args_namespace_mode() {
+        let args = Args::parse_from(["gap-server", "--namespace-mode"]);
+        assert!(args.namespace_mode);
     }
 
     #[test]
@@ -682,6 +694,18 @@ mod tests {
     fn test_args_data_dir() {
         let args = Args::parse_from(["gap-server", "--data-dir", "/var/lib/gap"]);
         assert_eq!(args.data_dir, Some("/var/lib/gap".to_string()));
+    }
+
+    #[test]
+    fn test_args_namespace_mode_default_false() {
+        let args = Args::parse_from(["gap-server"]);
+        assert!(!args.namespace_mode);
+    }
+
+    #[test]
+    fn test_args_namespace_mode_flag() {
+        let args = Args::parse_from(["gap-server", "--namespace-mode"]);
+        assert!(args.namespace_mode);
     }
 
     #[test]

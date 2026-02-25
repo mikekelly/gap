@@ -54,6 +54,8 @@ pub struct ApiState {
     pub signing_config: Option<Arc<crate::signing::SigningConfig>>,
     /// Nonce cache for replay protection (shared with signing middleware)
     pub nonce_cache: Arc<crate::signing::NonceCache>,
+    /// When true, legacy (un-namespaced) routes are rejected with 400
+    pub namespace_mode: bool,
 }
 
 impl ApiState {
@@ -70,6 +72,7 @@ impl ApiState {
             token_cache,
             signing_config: None,
             nonce_cache: Arc::new(crate::signing::NonceCache::new()),
+            namespace_mode: false,
         }
     }
 
@@ -93,12 +96,125 @@ impl ApiState {
             token_cache,
             signing_config: None,
             nonce_cache: Arc::new(crate::signing::NonceCache::new()),
+            namespace_mode: false,
         }
     }
 
     pub async fn set_password_hash(&self, hash: String) {
         *self.password_hash.write().await = Some(hash);
     }
+}
+
+/// Namespace + scope context extracted by the namespace middleware.
+#[derive(Debug, Clone)]
+pub struct NsScope {
+    pub namespace_id: String,
+    pub scope_id: String,
+}
+
+impl Default for NsScope {
+    fn default() -> Self {
+        Self {
+            namespace_id: "default".to_string(),
+            scope_id: "default".to_string(),
+        }
+    }
+}
+
+#[axum::async_trait]
+impl<S> axum::extract::FromRequestParts<S> for NsScope
+where
+    S: Send + Sync,
+{
+    type Rejection = (StatusCode, String);
+
+    async fn from_request_parts(
+        parts: &mut axum::http::request::Parts,
+        _state: &S,
+    ) -> Result<Self, Self::Rejection> {
+        parts
+            .extensions
+            .get::<NsScope>()
+            .cloned()
+            .ok_or_else(|| {
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "NsScope not set".to_string(),
+                )
+            })
+    }
+}
+
+/// Middleware that handles namespace routing.
+///
+/// - Canonical paths `/namespaces/{ns}/scopes/{scope}/...` are rewritten to strip the prefix,
+///   and the NsScope is stored in request extensions.
+/// - Discovery paths (`/namespaces`, `/namespaces/:ns`, `/namespaces/:ns/scopes/:scope`)
+///   pass through with a default NsScope.
+/// - Legacy paths: allowed with default NsScope when namespace_mode is false,
+///   rejected with 400 when namespace_mode is true (except `/status`, `/init`).
+async fn namespace_middleware(
+    State(state): State<ApiState>,
+    mut request: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> Result<Response, (StatusCode, String)> {
+    let path = request.uri().path().to_string();
+
+    // Namespace discovery routes — pass through without NsScope requirement
+    if path == "/namespaces"
+        || (path.starts_with("/namespaces/") && !path.contains("/scopes/"))
+    {
+        request.extensions_mut().insert(NsScope::default());
+        return Ok(next.run(request).await);
+    }
+
+    // Check for canonical namespace path: /namespaces/{ns}/scopes/{scope}/...
+    if path.starts_with("/namespaces/") {
+        let segments: Vec<&str> = path.splitn(6, '/').collect();
+        // segments: ["", "namespaces", ns, "scopes", scope, rest...]
+        if segments.len() >= 5 && segments[1] == "namespaces" && segments[3] == "scopes" {
+            let ns = segments[2].to_string();
+            let scope_val = segments[4].to_string();
+
+            // If there's no trailing resource, this is a scope info discovery route
+            if segments.len() == 5 || (segments.len() == 6 && segments[5].is_empty()) {
+                request.extensions_mut().insert(NsScope {
+                    namespace_id: ns,
+                    scope_id: scope_val,
+                });
+                return Ok(next.run(request).await);
+            }
+
+            let rest = format!("/{}", segments[5]);
+
+            // Rewrite URI to strip namespace prefix
+            let mut parts = request.uri().clone().into_parts();
+            parts.path_and_query = Some(rest.parse().unwrap());
+            *request.uri_mut() = axum::http::Uri::from_parts(parts).unwrap();
+
+            request.extensions_mut().insert(NsScope {
+                namespace_id: ns,
+                scope_id: scope_val,
+            });
+            return Ok(next.run(request).await);
+        }
+    }
+
+    // Legacy path
+    if path == "/status" || path == "/init" {
+        request.extensions_mut().insert(NsScope::default());
+        return Ok(next.run(request).await);
+    }
+
+    if state.namespace_mode {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "Namespace mode is enabled. Use /namespaces/:ns/scopes/:scope/... routes".to_string(),
+        ));
+    }
+
+    request.extensions_mut().insert(NsScope::default());
+    Ok(next.run(request).await)
 }
 
 /// Status response
@@ -153,7 +269,7 @@ async fn verify_auth(
 }
 
 /// Plugin info
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct PluginInfo {
     pub id: String,
     pub match_patterns: Vec<String>,
@@ -161,7 +277,7 @@ pub struct PluginInfo {
 }
 
 /// Plugin list response
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct PluginsResponse {
     pub plugins: Vec<PluginInfo>,
 }
@@ -352,9 +468,13 @@ async fn verify_signing(
     Ok(next.run(request).await)
 }
 
-/// Create the API router
+/// Create the API router.
+///
+/// The namespace middleware is applied as a tower layer AROUND the Router,
+/// so it runs BEFORE route matching. This allows it to rewrite
+/// `/namespaces/:ns/scopes/:scope/...` to `/...` before routing occurs.
 pub fn create_router(state: ApiState) -> Router {
-    Router::new()
+    let inner_router = Router::new()
         .route("/status", get(get_status))
         .route("/init", post(init))
         .route("/plugins", get(get_plugins).post(post_plugins))
@@ -377,8 +497,21 @@ pub fn create_router(state: ApiState) -> Router {
         .route("/header-sets/:id", axum::routing::patch(update_header_set).delete(delete_header_set))
         .route("/header-sets/:id/headers", post(set_header_set_header))
         .route("/header-sets/:id/headers/:header_name", delete(delete_header_set_header))
+        // Namespace discovery routes
+        .route("/namespaces", get(list_namespaces))
+        .route("/namespaces/:ns", get(get_namespace_scopes))
+        .route("/namespaces/:ns/scopes/:scope", get(get_scope_info))
+        // Signing middleware runs after routing (as a handler wrapper)
         .layer(axum::middleware::from_fn_with_state(state.clone(), verify_signing))
-        .with_state(state)
+        .with_state(state.clone());
+
+    // Namespace middleware wraps the entire router so it runs BEFORE route matching.
+    // We use `Router::new().fallback_service()` to create a new Router that delegates
+    // all requests to the namespace middleware, which rewrites URIs before forwarding
+    // to the inner router.
+    use tower::Layer;
+    let ns_layer = axum::middleware::from_fn_with_state(state, namespace_middleware);
+    Router::new().fallback_service(ns_layer.layer(inner_router))
 }
 
 /// GET /status - Server status (no auth required)
@@ -455,12 +588,13 @@ async fn init(
 /// GET /plugins - List installed plugins (requires auth)
 async fn get_plugins(
     State(state): State<ApiState>,
+    ns_scope: NsScope,
     headers: HeaderMap,
 ) -> Result<Json<PluginsResponse>, (StatusCode, String)> {
     verify_auth(&state, &headers).await?;
 
     // Get plugins from database
-    let plugin_entries = state.db.list_plugins("default", "default").await
+    let plugin_entries = state.db.list_plugins(&ns_scope.namespace_id, &ns_scope.scope_id).await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to list plugins: {}", e)))?;
 
     // Convert PluginEntry to PluginInfo
@@ -479,12 +613,13 @@ async fn get_plugins(
 /// POST /plugins - List installed plugins (requires auth, same as GET)
 async fn post_plugins(
     State(state): State<ApiState>,
+    ns_scope: NsScope,
     headers: HeaderMap,
 ) -> Result<Json<PluginsResponse>, (StatusCode, String)> {
     verify_auth(&state, &headers).await?;
 
     // Get plugins from database
-    let plugin_entries = state.db.list_plugins("default", "default").await
+    let plugin_entries = state.db.list_plugins(&ns_scope.namespace_id, &ns_scope.scope_id).await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to list plugins: {}", e)))?;
 
     // Convert PluginEntry to PluginInfo
@@ -505,6 +640,7 @@ async fn post_plugins(
 #[axum::debug_handler]
 async fn install_plugin(
     State(state): State<ApiState>,
+    ns_scope: NsScope,
     headers: HeaderMap,
     body: Bytes,
 ) -> std::result::Result<Json<InstallResponse>, (StatusCode, String)> {
@@ -516,7 +652,7 @@ async fn install_plugin(
     let plugin_source = parse_plugin_name(&req.source)?;
 
     // Clone, validate, and store plugin — returns generated UUID
-    let (plugin_id, plugin, commit_sha) = clone_and_validate_plugin(&state, &plugin_source).await?;
+    let (plugin_id, plugin, commit_sha) = clone_and_validate_plugin(&state, &plugin_source, &ns_scope).await?;
 
     tracing::info!("Installed plugin: {} (id: {}, matches: {:?}, commit: {})", plugin_source, plugin_id, plugin.match_patterns, commit_sha);
 
@@ -528,8 +664,8 @@ async fn install_plugin(
         detail: Some(serde_json::json!({"repo": req.source}).to_string()),
         success: true,
         error_message: None,
-        namespace_id: "default".to_string(),
-        scope_id: "default".to_string(),
+        namespace_id: ns_scope.namespace_id,
+        scope_id: ns_scope.scope_id,
     });
 
     Ok(Json(InstallResponse {
@@ -544,6 +680,7 @@ async fn install_plugin(
 #[axum::debug_handler]
 async fn register_plugin(
     State(state): State<ApiState>,
+    ns_scope: NsScope,
     headers: HeaderMap,
     body: Bytes,
 ) -> std::result::Result<Json<RegisterResponse>, (StatusCode, String)> {
@@ -573,10 +710,10 @@ async fn register_plugin(
         dangerously_permit_http: plugin.dangerously_permit_http,
         weight: 0,
         installed_at: None,
-        namespace_id: "default".to_string(),
-        scope_id: "default".to_string(),
+        namespace_id: ns_scope.namespace_id.clone(),
+        scope_id: ns_scope.scope_id.clone(),
     };
-    let plugin_id = state.db.add_plugin(&plugin_entry, &transformed_code, "default", "default").await
+    let plugin_id = state.db.add_plugin(&plugin_entry, &transformed_code, &ns_scope.namespace_id, &ns_scope.scope_id).await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to store plugin: {}", e)))?;
 
     tracing::info!("Registered plugin: {} (matches: {:?})", plugin_id, plugin.match_patterns);
@@ -589,8 +726,8 @@ async fn register_plugin(
         detail: None,
         success: true,
         error_message: None,
-        namespace_id: "default".to_string(),
-        scope_id: "default".to_string(),
+        namespace_id: ns_scope.namespace_id,
+        scope_id: ns_scope.scope_id,
     });
 
     Ok(Json(RegisterResponse {
@@ -603,13 +740,14 @@ async fn register_plugin(
 #[axum::debug_handler]
 async fn uninstall_plugin(
     State(state): State<ApiState>,
+    ns_scope: NsScope,
     Path(id): Path<String>,
     headers: HeaderMap,
 ) -> std::result::Result<Json<UninstallResponse>, (StatusCode, String)> {
     verify_auth(&state, &headers).await?;
 
     // Check if plugin exists
-    let exists = state.db.has_plugin(&id, "default", "default").await
+    let exists = state.db.has_plugin(&id, &ns_scope.namespace_id, &ns_scope.scope_id).await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to check plugin: {}", e)))?;
 
     if !exists {
@@ -620,7 +758,7 @@ async fn uninstall_plugin(
     }
 
     // Remove plugin from database (removes metadata + source, preserves credentials)
-    state.db.remove_plugin(&id, "default", "default").await
+    state.db.remove_plugin(&id, &ns_scope.namespace_id, &ns_scope.scope_id).await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to remove plugin: {}", e)))?;
 
     tracing::info!("Uninstalled plugin: {}", id);
@@ -633,8 +771,8 @@ async fn uninstall_plugin(
         detail: None,
         success: true,
         error_message: None,
-        namespace_id: "default".to_string(),
-        scope_id: "default".to_string(),
+        namespace_id: ns_scope.namespace_id,
+        scope_id: ns_scope.scope_id,
     });
 
     Ok(Json(UninstallResponse {
@@ -647,13 +785,14 @@ async fn uninstall_plugin(
 #[axum::debug_handler]
 async fn update_plugin_from_github(
     State(state): State<ApiState>,
+    ns_scope: NsScope,
     Path(id): Path<String>,
     headers: HeaderMap,
 ) -> std::result::Result<Json<UpdateResponse>, (StatusCode, String)> {
     verify_auth(&state, &headers).await?;
 
     // Look up existing plugin to get its source (GitHub slug)
-    let existing = state.db.get_plugin(&id, "default", "default").await
+    let existing = state.db.get_plugin(&id, &ns_scope.namespace_id, &ns_scope.scope_id).await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to check plugin: {}", e)))?;
 
     let existing = existing.ok_or_else(|| {
@@ -665,11 +804,11 @@ async fn update_plugin_from_github(
     })?;
 
     // Remove old plugin from database (but keep credentials)
-    state.db.remove_plugin(&id, "default", "default").await
+    state.db.remove_plugin(&id, &ns_scope.namespace_id, &ns_scope.scope_id).await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to remove old plugin: {}", e)))?;
 
     // Clone, validate, and store new version
-    let (new_id, plugin, commit_sha) = clone_and_validate_plugin(&state, &plugin_source).await?;
+    let (new_id, plugin, commit_sha) = clone_and_validate_plugin(&state, &plugin_source, &ns_scope).await?;
 
     tracing::info!("Updated plugin: {} -> {} (matches: {:?}, commit: {})", id, new_id, plugin.match_patterns, commit_sha);
 
@@ -681,8 +820,8 @@ async fn update_plugin_from_github(
         detail: None,
         success: true,
         error_message: None,
-        namespace_id: "default".to_string(),
-        scope_id: "default".to_string(),
+        namespace_id: ns_scope.namespace_id,
+        scope_id: ns_scope.scope_id,
     });
 
     Ok(Json(UpdateResponse {
@@ -709,6 +848,7 @@ fn parse_plugin_name(name: &str) -> std::result::Result<String, (StatusCode, Str
 async fn clone_and_validate_plugin(
     state: &ApiState,
     plugin_source: &str,
+    ns_scope: &NsScope,
 ) -> std::result::Result<(String, gap_lib::types::GAPPlugin, String), (StatusCode, String)> {
     use gap_lib::plugin_runtime::PluginRuntime;
     use git2::{build::RepoBuilder, Cred, FetchOptions, RemoteCallbacks};
@@ -772,10 +912,10 @@ async fn clone_and_validate_plugin(
         dangerously_permit_http: plugin.dangerously_permit_http,
         weight: 0,
         installed_at: None,
-        namespace_id: "default".to_string(),
-        scope_id: "default".to_string(),
+        namespace_id: ns_scope.namespace_id.clone(),
+        scope_id: ns_scope.scope_id.clone(),
     };
-    let plugin_id = state.db.add_plugin(&plugin_entry, &transformed_code, "default", "default").await
+    let plugin_id = state.db.add_plugin(&plugin_entry, &transformed_code, &ns_scope.namespace_id, &ns_scope.scope_id).await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to store plugin: {}", e)))?;
 
     Ok((plugin_id, plugin, commit_sha))
@@ -803,6 +943,7 @@ fn transform_es6_export(code: &str) -> String {
 /// GET /tokens - List agent tokens (requires auth)
 async fn list_tokens(
     State(state): State<ApiState>,
+    ns_scope: NsScope,
     headers: HeaderMap,
     Query(params): Query<HashMap<String, String>>,
 ) -> Result<Json<TokensResponse>, (StatusCode, String)> {
@@ -810,7 +951,7 @@ async fn list_tokens(
 
     let include_revoked = params.get("include_revoked").map_or(false, |v| v == "true");
 
-    let token_entries = state.db.list_tokens(include_revoked, "default", "default").await
+    let token_entries = state.db.list_tokens(include_revoked, &ns_scope.namespace_id, &ns_scope.scope_id).await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to list tokens: {}", e)))?;
 
     let token_list: Vec<TokenResponse> = token_entries
@@ -837,6 +978,7 @@ async fn list_tokens(
 /// POST /tokens - Create new agent token (requires auth)
 async fn create_token(
     State(state): State<ApiState>,
+    ns_scope: NsScope,
     headers: HeaderMap,
     body: Bytes,
 ) -> Result<Json<TokenResponse>, (StatusCode, String)> {
@@ -853,7 +995,7 @@ async fn create_token(
 
     let token = AgentToken::new();
 
-    state.db.add_token(&token.token, token.created_at, scopes.as_deref(), "default", "default").await
+    state.db.add_token(&token.token, token.created_at, scopes.as_deref(), &ns_scope.namespace_id, &ns_scope.scope_id).await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to create token: {}", e)))?;
 
     emit_management_log(&state, ManagementLogEntry {
@@ -864,8 +1006,8 @@ async fn create_token(
         detail: scopes.as_ref().map(|s| serde_json::to_string(s).unwrap_or_default()),
         success: true,
         error_message: None,
-        namespace_id: "default".to_string(),
-        scope_id: "default".to_string(),
+        namespace_id: ns_scope.namespace_id,
+        scope_id: ns_scope.scope_id,
     });
 
     Ok(Json(TokenResponse {
@@ -880,18 +1022,19 @@ async fn create_token(
 /// DELETE /tokens/:prefix - Revoke agent token (requires auth)
 async fn delete_token(
     State(state): State<ApiState>,
+    ns_scope: NsScope,
     Path(prefix): Path<String>,
     headers: HeaderMap,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
     verify_auth(&state, &headers).await?;
 
     // Look up full token value by prefix
-    let token_value = state.db.get_token_by_prefix(&prefix, "default", "default").await
+    let token_value = state.db.get_token_by_prefix(&prefix, &ns_scope.namespace_id, &ns_scope.scope_id).await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to find token: {}", e)))?
         .ok_or_else(|| (StatusCode::NOT_FOUND, format!("No active token found with prefix '{}'", prefix)))?;
 
     // Soft delete (set revoked_at)
-    state.db.revoke_token(&token_value, "default", "default").await
+    state.db.revoke_token(&token_value, &ns_scope.namespace_id, &ns_scope.scope_id).await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to revoke token: {}", e)))?;
 
     // Invalidate the revoked token from cache
@@ -905,8 +1048,8 @@ async fn delete_token(
         detail: None,
         success: true,
         error_message: None,
-        namespace_id: "default".to_string(),
-        scope_id: "default".to_string(),
+        namespace_id: ns_scope.namespace_id,
+        scope_id: ns_scope.scope_id,
     });
 
     Ok(Json(serde_json::json!({
@@ -918,6 +1061,7 @@ async fn delete_token(
 /// POST /credentials/:plugin_id/:key - Set credential (requires auth)
 async fn set_credential(
     State(state): State<ApiState>,
+    ns_scope: NsScope,
     Path((plugin_id, key)): Path<(String, String)>,
     headers: HeaderMap,
     body: Bytes,
@@ -927,7 +1071,7 @@ async fn set_credential(
         .map_err(|e| (StatusCode::BAD_REQUEST, format!("Invalid request body: {}", e)))?;
 
     // Store credential in database
-    state.db.set_credential(&plugin_id, &key, &req.value, "default", "default")
+    state.db.set_credential(&plugin_id, &key, &req.value, &ns_scope.namespace_id, &ns_scope.scope_id)
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to set credential: {}", e)))?;
 
@@ -941,8 +1085,8 @@ async fn set_credential(
         detail: None, // NEVER log credential values
         success: true,
         error_message: None,
-        namespace_id: "default".to_string(),
-        scope_id: "default".to_string(),
+        namespace_id: ns_scope.namespace_id,
+        scope_id: ns_scope.scope_id,
     });
 
     Ok(Json(serde_json::json!({
@@ -955,13 +1099,14 @@ async fn set_credential(
 /// DELETE /credentials/:plugin_id/:key - Delete credential (requires auth)
 async fn delete_credential(
     State(state): State<ApiState>,
+    ns_scope: NsScope,
     Path((plugin_id, key)): Path<(String, String)>,
     headers: HeaderMap,
 ) -> Result<StatusCode, (StatusCode, String)> {
     verify_auth(&state, &headers).await?;
 
     // Remove credential from database
-    state.db.remove_credential(&plugin_id, &key, "default", "default")
+    state.db.remove_credential(&plugin_id, &key, &ns_scope.namespace_id, &ns_scope.scope_id)
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to remove credential: {}", e)))?;
 
@@ -975,8 +1120,8 @@ async fn delete_credential(
         detail: None,
         success: true,
         error_message: None,
-        namespace_id: "default".to_string(),
-        scope_id: "default".to_string(),
+        namespace_id: ns_scope.namespace_id,
+        scope_id: ns_scope.scope_id,
     });
 
     Ok(StatusCode::OK)
@@ -1003,12 +1148,15 @@ fn query_to_filter(q: &ActivityQuery) -> gap_lib::ActivityFilter {
 /// GET /activity - Get recent activity (requires auth, supports query param filters)
 async fn get_activity(
     State(state): State<ApiState>,
+    ns_scope: NsScope,
     Query(query): Query<ActivityQuery>,
     headers: HeaderMap,
 ) -> Result<Json<ActivityResponse>, (StatusCode, String)> {
     verify_auth(&state, &headers).await?;
 
-    let filter = query_to_filter(&query);
+    let mut filter = query_to_filter(&query);
+    filter.namespace_id = Some(ns_scope.namespace_id);
+    filter.scope_id = Some(ns_scope.scope_id);
     let entries = state.db.query_activity(&filter).await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to get activity: {}", e)))?;
     Ok(Json(ActivityResponse { entries }))
@@ -1080,6 +1228,7 @@ fn matches_filter(entry: &ActivityEntry, filter: &ActivityStreamFilter) -> bool 
 /// GET /activity/stream - Stream activity entries via Server-Sent Events (requires auth)
 async fn activity_stream(
     State(state): State<ApiState>,
+    _ns_scope: NsScope,
     Query(filter): Query<ActivityStreamFilter>,
     headers: HeaderMap,
 ) -> Result<Sse<impl Stream<Item = Result<Event, Infallible>>>, (StatusCode, String)> {
@@ -1154,12 +1303,15 @@ fn management_query_to_filter(q: &ManagementLogQuery) -> gap_lib::ManagementLogF
 /// GET /management-log - Get management audit log entries (requires auth)
 async fn get_management_log(
     State(state): State<ApiState>,
+    ns_scope: NsScope,
     Query(query): Query<ManagementLogQuery>,
     headers: HeaderMap,
 ) -> Result<Json<ManagementLogResponse>, (StatusCode, String)> {
     verify_auth(&state, &headers).await?;
 
-    let filter = management_query_to_filter(&query);
+    let mut filter = management_query_to_filter(&query);
+    filter.namespace_id = Some(ns_scope.namespace_id);
+    filter.scope_id = Some(ns_scope.scope_id);
     let entries = state.db.query_management_log(&filter).await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to get management log: {}", e)))?;
     Ok(Json(ManagementLogResponse { entries }))
@@ -1168,6 +1320,7 @@ async fn get_management_log(
 /// GET /management-log/stream - Stream management log entries via SSE (requires auth)
 async fn management_log_stream(
     State(state): State<ApiState>,
+    _ns_scope: NsScope,
     Query(filter): Query<ManagementLogStreamFilter>,
     headers: HeaderMap,
 ) -> Result<Sse<impl Stream<Item = Result<Event, Infallible>>>, (StatusCode, String)> {
@@ -1285,6 +1438,7 @@ struct UpdatePluginResponse {
 /// POST /header-sets - Create a header set (requires auth)
 async fn create_header_set(
     State(state): State<ApiState>,
+    ns_scope: NsScope,
     headers: HeaderMap,
     body: Bytes,
 ) -> Result<Json<CreateHeaderSetResponse>, (StatusCode, String)> {
@@ -1296,11 +1450,11 @@ async fn create_header_set(
         return Err((StatusCode::BAD_REQUEST, "match_patterns must not be empty".to_string()));
     }
 
-    let id = state.db.add_header_set(&req.match_patterns, req.weight, "default", "default").await
+    let id = state.db.add_header_set(&req.match_patterns, req.weight, &ns_scope.namespace_id, &ns_scope.scope_id).await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to create header set: {}", e)))?;
 
     for (header_name, header_value) in &req.headers {
-        state.db.set_header_set_header(&id, header_name, header_value, "default", "default")
+        state.db.set_header_set_header(&id, header_name, header_value, &ns_scope.namespace_id, &ns_scope.scope_id)
             .await
             .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to set header: {}", e)))?;
     }
@@ -1313,8 +1467,8 @@ async fn create_header_set(
         detail: None,
         success: true,
         error_message: None,
-        namespace_id: "default".to_string(),
-        scope_id: "default".to_string(),
+        namespace_id: ns_scope.namespace_id,
+        scope_id: ns_scope.scope_id,
     });
 
     Ok(Json(CreateHeaderSetResponse { id, created: true }))
@@ -1323,16 +1477,17 @@ async fn create_header_set(
 /// GET /header-sets - List header sets (requires auth)
 async fn list_header_sets(
     State(state): State<ApiState>,
+    ns_scope: NsScope,
     headers: HeaderMap,
 ) -> Result<Json<HeaderSetListResponse>, (StatusCode, String)> {
     verify_auth(&state, &headers).await?;
 
-    let header_sets = state.db.list_header_sets("default", "default").await
+    let header_sets = state.db.list_header_sets(&ns_scope.namespace_id, &ns_scope.scope_id).await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to list header sets: {}", e)))?;
 
     let mut items = Vec::new();
     for hs in header_sets {
-        let header_names = state.db.list_header_set_header_names(&hs.id, "default", "default").await
+        let header_names = state.db.list_header_set_header_names(&hs.id, &ns_scope.namespace_id, &ns_scope.scope_id).await
             .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to list headers for '{}': {}", hs.id, e)))?;
         items.push(HeaderSetListItem {
             id: hs.id,
@@ -1348,6 +1503,7 @@ async fn list_header_sets(
 /// PATCH /header-sets/:id - Update a header set (requires auth)
 async fn update_header_set(
     State(state): State<ApiState>,
+    ns_scope: NsScope,
     Path(id): Path<String>,
     headers: HeaderMap,
     body: Bytes,
@@ -1367,13 +1523,13 @@ async fn update_header_set(
     }
 
     // Verify exists first to return proper 404
-    let exists = state.db.get_header_set(&id, "default", "default").await
+    let exists = state.db.get_header_set(&id, &ns_scope.namespace_id, &ns_scope.scope_id).await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to check header set: {}", e)))?;
     if exists.is_none() {
         return Err((StatusCode::NOT_FOUND, format!("Header set '{}' not found", id)));
     }
 
-    state.db.update_header_set(&id, req.match_patterns.as_deref(), req.weight, "default", "default").await
+    state.db.update_header_set(&id, req.match_patterns.as_deref(), req.weight, &ns_scope.namespace_id, &ns_scope.scope_id).await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to update header set: {}", e)))?;
 
     emit_management_log(&state, ManagementLogEntry {
@@ -1384,8 +1540,8 @@ async fn update_header_set(
         detail: None,
         success: true,
         error_message: None,
-        namespace_id: "default".to_string(),
-        scope_id: "default".to_string(),
+        namespace_id: ns_scope.namespace_id,
+        scope_id: ns_scope.scope_id,
     });
 
     Ok(Json(serde_json::json!({"id": id, "updated": true})))
@@ -1394,12 +1550,13 @@ async fn update_header_set(
 /// DELETE /header-sets/:id - Delete a header set (requires auth)
 async fn delete_header_set(
     State(state): State<ApiState>,
+    ns_scope: NsScope,
     Path(id): Path<String>,
     headers: HeaderMap,
 ) -> Result<Json<DeleteResponse>, (StatusCode, String)> {
     verify_auth(&state, &headers).await?;
 
-    state.db.remove_header_set(&id, "default", "default").await
+    state.db.remove_header_set(&id, &ns_scope.namespace_id, &ns_scope.scope_id).await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to delete header set: {}", e)))?;
 
     emit_management_log(&state, ManagementLogEntry {
@@ -1410,8 +1567,8 @@ async fn delete_header_set(
         detail: None,
         success: true,
         error_message: None,
-        namespace_id: "default".to_string(),
-        scope_id: "default".to_string(),
+        namespace_id: ns_scope.namespace_id,
+        scope_id: ns_scope.scope_id,
     });
 
     Ok(Json(DeleteResponse { deleted: true }))
@@ -1420,6 +1577,7 @@ async fn delete_header_set(
 /// POST /header-sets/:id/headers - Set a header on a header set (requires auth)
 async fn set_header_set_header(
     State(state): State<ApiState>,
+    ns_scope: NsScope,
     Path(id): Path<String>,
     headers: HeaderMap,
     body: Bytes,
@@ -1429,13 +1587,13 @@ async fn set_header_set_header(
         .map_err(|e| (StatusCode::BAD_REQUEST, format!("Invalid request body: {}", e)))?;
 
     // Verify header set exists
-    let exists = state.db.get_header_set(&id, "default", "default").await
+    let exists = state.db.get_header_set(&id, &ns_scope.namespace_id, &ns_scope.scope_id).await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to check header set: {}", e)))?;
     if exists.is_none() {
         return Err((StatusCode::NOT_FOUND, format!("Header set '{}' not found", id)));
     }
 
-    state.db.set_header_set_header(&id, &req.name, &req.value, "default", "default").await
+    state.db.set_header_set_header(&id, &req.name, &req.value, &ns_scope.namespace_id, &ns_scope.scope_id).await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to set header: {}", e)))?;
 
     let header_name = req.name.clone();
@@ -1447,8 +1605,8 @@ async fn set_header_set_header(
         detail: Some(header_name.clone()),
         success: true,
         error_message: None,
-        namespace_id: "default".to_string(),
-        scope_id: "default".to_string(),
+        namespace_id: ns_scope.namespace_id,
+        scope_id: ns_scope.scope_id,
     });
 
     Ok(Json(serde_json::json!({"header_set": id, "header": header_name, "set": true})))
@@ -1457,12 +1615,13 @@ async fn set_header_set_header(
 /// DELETE /header-sets/:id/headers/:header_name - Delete a header from a header set (requires auth)
 async fn delete_header_set_header(
     State(state): State<ApiState>,
+    ns_scope: NsScope,
     Path((id, header_name)): Path<(String, String)>,
     headers: HeaderMap,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
     verify_auth(&state, &headers).await?;
 
-    state.db.remove_header_set_header(&id, &header_name, "default", "default").await
+    state.db.remove_header_set_header(&id, &header_name, &ns_scope.namespace_id, &ns_scope.scope_id).await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to delete header: {}", e)))?;
 
     emit_management_log(&state, ManagementLogEntry {
@@ -1473,8 +1632,8 @@ async fn delete_header_set_header(
         detail: Some(header_name.clone()),
         success: true,
         error_message: None,
-        namespace_id: "default".to_string(),
-        scope_id: "default".to_string(),
+        namespace_id: ns_scope.namespace_id,
+        scope_id: ns_scope.scope_id,
     });
 
     Ok(Json(serde_json::json!({"header_set": id, "header": header_name, "deleted": true})))
@@ -1483,6 +1642,7 @@ async fn delete_header_set_header(
 /// PATCH /plugins/:id - Update plugin weight (requires auth)
 async fn update_plugin(
     State(state): State<ApiState>,
+    ns_scope: NsScope,
     Path(id): Path<String>,
     headers: HeaderMap,
     body: Bytes,
@@ -1491,13 +1651,13 @@ async fn update_plugin(
     let req: UpdatePluginRequest = serde_json::from_slice(&body)
         .map_err(|e| (StatusCode::BAD_REQUEST, format!("Invalid request body: {}", e)))?;
 
-    let exists = state.db.has_plugin(&id, "default", "default").await
+    let exists = state.db.has_plugin(&id, &ns_scope.namespace_id, &ns_scope.scope_id).await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to check plugin: {}", e)))?;
     if !exists {
         return Err((StatusCode::NOT_FOUND, format!("Plugin '{}' is not installed.", id)));
     }
 
-    state.db.update_plugin_weight(&id, req.weight, "default", "default").await
+    state.db.update_plugin_weight(&id, req.weight, &ns_scope.namespace_id, &ns_scope.scope_id).await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to update plugin weight: {}", e)))?;
 
     emit_management_log(&state, ManagementLogEntry {
@@ -1508,11 +1668,61 @@ async fn update_plugin(
         detail: Some(format!("weight={}", req.weight)),
         success: true,
         error_message: None,
-        namespace_id: "default".to_string(),
-        scope_id: "default".to_string(),
+        namespace_id: ns_scope.namespace_id,
+        scope_id: ns_scope.scope_id,
     });
 
     Ok(Json(UpdatePluginResponse { id, updated: true }))
+}
+
+// ── Namespace discovery handlers ────────────────────────────────────────
+
+/// GET /namespaces - List distinct namespaces (requires auth)
+async fn list_namespaces(
+    State(state): State<ApiState>,
+    headers: HeaderMap,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    verify_auth(&state, &headers).await?;
+    let namespaces = state
+        .db
+        .list_distinct_namespaces()
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("{}", e)))?;
+    Ok(Json(serde_json::json!({ "namespaces": namespaces })))
+}
+
+/// GET /namespaces/:ns - List scopes within a namespace (requires auth)
+async fn get_namespace_scopes(
+    State(state): State<ApiState>,
+    Path(ns): Path<String>,
+    headers: HeaderMap,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    verify_auth(&state, &headers).await?;
+    let scopes = state
+        .db
+        .list_namespace_scopes(&ns)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("{}", e)))?;
+    Ok(Json(serde_json::json!({ "namespace": ns, "scopes": scopes })))
+}
+
+/// GET /namespaces/:ns/scopes/:scope - Get scope resource counts (requires auth)
+async fn get_scope_info(
+    State(state): State<ApiState>,
+    Path((ns, scope)): Path<(String, String)>,
+    headers: HeaderMap,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    verify_auth(&state, &headers).await?;
+    let counts = state
+        .db
+        .get_scope_resource_counts(&ns, &scope)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("{}", e)))?;
+    Ok(Json(serde_json::json!({
+        "namespace": ns,
+        "scope": scope,
+        "resources": counts,
+    })))
 }
 
 #[cfg(test)]
@@ -4128,5 +4338,312 @@ mod tests {
                 "Signing middleware rejected a valid signature: {}", body_str);
         }
         assert_eq!(status, StatusCode::OK, "Expected OK, got {}: {}", status, body_str);
+    }
+
+    // ── Namespace mode tests ────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn test_namespace_mode_rejects_legacy() {
+        // When namespace_mode=true, GET /plugins returns 400
+        let db = create_test_db().await;
+        let mut state = ApiState::new(9443, 9080, db, Arc::new(TokenCache::new()));
+        state.namespace_mode = true;
+        let password = setup_auth(&state).await;
+        let app = create_router(state);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/plugins")
+                    .header("Authorization", format!("Bearer {}", password))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body_bytes = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let body_str = String::from_utf8_lossy(&body_bytes);
+        assert!(body_str.contains("Namespace mode is enabled"), "Body: {}", body_str);
+    }
+
+    #[tokio::test]
+    async fn test_namespace_mode_allows_canonical() {
+        // When namespace_mode=true, GET /namespaces/org1/scopes/team1/plugins returns 200
+        let db = create_test_db().await;
+        let mut state = ApiState::new(9443, 9080, db, Arc::new(TokenCache::new()));
+        state.namespace_mode = true;
+        let password = setup_auth(&state).await;
+        let app = create_router(state);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/namespaces/org1/scopes/team1/plugins")
+                    .header("Authorization", format!("Bearer {}", password))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn test_legacy_routes_work_when_mode_false() {
+        // When namespace_mode=false (default), legacy routes still work
+        let db = create_test_db().await;
+        let state = ApiState::new(9443, 9080, db, Arc::new(TokenCache::new()));
+        assert!(!state.namespace_mode);
+        let password = setup_auth(&state).await;
+        let app = create_router(state);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/tokens")
+                    .header("Authorization", format!("Bearer {}", password))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn test_namespace_isolation_via_api() {
+        // Install plugin in ns1/scope1, verify not listed in ns1/scope2
+        let db = create_test_db().await;
+        let state = ApiState::new(9443, 9080, Arc::clone(&db), Arc::new(TokenCache::new()));
+        let password = setup_auth(&state).await;
+
+        // Register a plugin in ns1/scope1 via the canonical route
+        let plugin_code = r#"var plugin = {
+            name: "test-plugin",
+            matchPatterns: ["*.example.com"],
+            credentialSchema: ["api_key"],
+            transform: function(req, creds) { return req; }
+        };"#;
+        let body = serde_json::json!({ "code": plugin_code });
+
+        let app = create_router(state.clone());
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/namespaces/ns1/scopes/scope1/plugins/register")
+                    .header("content-type", "application/json")
+                    .header("Authorization", format!("Bearer {}", password))
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK, "Plugin registration should succeed");
+
+        // Verify plugin is listed in ns1/scope1
+        let app = create_router(state.clone());
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/namespaces/ns1/scopes/scope1/plugins")
+                    .header("Authorization", format!("Bearer {}", password))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body_bytes = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let plugins: PluginsResponse = serde_json::from_slice(&body_bytes).unwrap();
+        assert_eq!(plugins.plugins.len(), 1, "Should have one plugin in ns1/scope1");
+
+        // Verify plugin is NOT listed in ns1/scope2
+        let app = create_router(state.clone());
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/namespaces/ns1/scopes/scope2/plugins")
+                    .header("Authorization", format!("Bearer {}", password))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body_bytes = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let plugins: PluginsResponse = serde_json::from_slice(&body_bytes).unwrap();
+        assert_eq!(plugins.plugins.len(), 0, "Should have no plugins in ns1/scope2");
+    }
+
+    #[tokio::test]
+    async fn test_namespace_discovery() {
+        // Create tokens in different namespaces/scopes, verify discovery endpoints
+        let db = create_test_db().await;
+        let state = ApiState::new(9443, 9080, Arc::clone(&db), Arc::new(TokenCache::new()));
+        let password = setup_auth(&state).await;
+
+        // Create tokens in different namespaces via the canonical route
+        let app = create_router(state.clone());
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/namespaces/org1/scopes/team1/tokens")
+                    .header("Authorization", format!("Bearer {}", password))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK, "Token creation in org1/team1 should succeed");
+
+        let app = create_router(state.clone());
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/namespaces/org2/scopes/team2/tokens")
+                    .header("Authorization", format!("Bearer {}", password))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK, "Token creation in org2/team2 should succeed");
+
+        // List namespaces
+        let app = create_router(state.clone());
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/namespaces")
+                    .header("Authorization", format!("Bearer {}", password))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body_bytes = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body_bytes).unwrap();
+        let namespaces = json["namespaces"].as_array().unwrap();
+        assert!(namespaces.iter().any(|ns| ns == "org1"), "Should include org1");
+        assert!(namespaces.iter().any(|ns| ns == "org2"), "Should include org2");
+
+        // List scopes in org1
+        let app = create_router(state.clone());
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/namespaces/org1")
+                    .header("Authorization", format!("Bearer {}", password))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body_bytes = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body_bytes).unwrap();
+        let scopes = json["scopes"].as_array().unwrap();
+        assert!(scopes.iter().any(|s| s == "team1"), "org1 should have team1 scope");
+        assert!(!scopes.iter().any(|s| s == "team2"), "org1 should NOT have team2 scope");
+
+        // Get scope info
+        let app = create_router(state.clone());
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/namespaces/org1/scopes/team1")
+                    .header("Authorization", format!("Bearer {}", password))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body_bytes = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body_bytes).unwrap();
+        assert_eq!(json["namespace"], "org1");
+        assert_eq!(json["scope"], "team1");
+        assert_eq!(json["resources"]["tokens"], 1);
+    }
+
+    #[tokio::test]
+    async fn test_namespace_mode_allows_status_and_init() {
+        // /status and /init should always work, even in namespace_mode
+        let db = create_test_db().await;
+        let mut state = ApiState::new(9443, 9080, db, Arc::new(TokenCache::new()));
+        state.namespace_mode = true;
+        let app = create_router(state);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/status")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn test_namespace_mode_allows_discovery_routes() {
+        // Discovery routes should work even in namespace_mode
+        let db = create_test_db().await;
+        let mut state = ApiState::new(9443, 9080, db, Arc::new(TokenCache::new()));
+        state.namespace_mode = true;
+        let password = setup_auth(&state).await;
+        let app = create_router(state);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/namespaces")
+                    .header("Authorization", format!("Bearer {}", password))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn test_canonical_route_creates_token_in_correct_scope() {
+        // Token created via canonical route should be in the specified namespace/scope
+        let db = create_test_db().await;
+        let state = ApiState::new(9443, 9080, Arc::clone(&db), Arc::new(TokenCache::new()));
+        let password = setup_auth(&state).await;
+
+        let app = create_router(state.clone());
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/namespaces/myns/scopes/myscope/tokens")
+                    .header("Authorization", format!("Bearer {}", password))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+
+        // Token should be in myns/myscope, not in default/default
+        let tokens = db.list_tokens(false, "myns", "myscope").await.unwrap();
+        assert_eq!(tokens.len(), 1, "Should have one token in myns/myscope");
+
+        let default_tokens = db.list_tokens(false, "default", "default").await.unwrap();
+        assert_eq!(default_tokens.len(), 0, "Should have no tokens in default/default");
     }
 }
