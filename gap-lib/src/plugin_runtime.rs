@@ -1355,12 +1355,12 @@ mod tests {
             weight: 0,
             installed_at: None,
         };
-        db.add_plugin(&entry, plugin_code).await.unwrap();
+        let plugin_id = db.add_plugin(&entry, plugin_code).await.unwrap();
 
         let mut runtime = PluginRuntime::new().unwrap();
-        let plugin = runtime.load_plugin("test-plugin", &db).await.unwrap();
+        let plugin = runtime.load_plugin(&plugin_id, &db).await.unwrap();
 
-        assert_eq!(plugin.id, "test-plugin");
+        assert_eq!(plugin.id, plugin_id);
         assert_eq!(plugin.match_patterns, vec!["api.example.com"]);
         assert_eq!(plugin.credential_schema, vec!["api_key"]);
     }

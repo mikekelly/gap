@@ -308,11 +308,11 @@ mod tests {
             weight: 0,
             installed_at: None,
         };
-        db.add_plugin(&entry, plugin_code).await.unwrap();
+        let plugin_id = db.add_plugin(&entry, plugin_code).await.unwrap();
 
         let result = find_matching_plugin("api.example.com", &db).await.unwrap();
         assert!(result.is_some());
-        assert_eq!(result.unwrap().id, "test");
+        assert_eq!(result.unwrap().id, plugin_id);
     }
 
     #[tokio::test]
@@ -338,11 +338,11 @@ mod tests {
             weight: 0,
             installed_at: None,
         };
-        db.add_plugin(&entry, plugin_code).await.unwrap();
+        let plugin_id = db.add_plugin(&entry, plugin_code).await.unwrap();
 
         let result = find_matching_plugin("bucket.s3.amazonaws.com", &db).await.unwrap();
         assert!(result.is_some());
-        assert_eq!(result.unwrap().id, "s3");
+        assert_eq!(result.unwrap().id, plugin_id);
     }
 
     #[tokio::test]
@@ -421,11 +421,11 @@ mod tests {
             weight: 0,
             installed_at: None,
         };
-        db.add_plugin(&entry3, valid_code).await.unwrap();
+        let match_plugin_id = db.add_plugin(&entry3, valid_code).await.unwrap();
 
         let result = find_matching_plugin("api.example.com", &db).await.unwrap();
         assert!(result.is_some());
-        assert_eq!(result.unwrap().id, "match");
+        assert_eq!(result.unwrap().id, match_plugin_id);
     }
 
     // ── find_matching_handler tests ─────────────────────────────────
@@ -453,7 +453,7 @@ mod tests {
             weight: 10,
             installed_at: None,
         };
-        db.add_plugin(&entry, plugin_code).await.unwrap();
+        let plugin_id = db.add_plugin(&entry, plugin_code).await.unwrap();
 
         db.add_header_set(&["api.example.com".to_string()], 5)
             .await
@@ -464,7 +464,7 @@ mod tests {
             .unwrap();
         assert!(result.is_some());
         match result.unwrap() {
-            MatchResult::Plugin(p) => assert_eq!(p.id, "high-weight"),
+            MatchResult::Plugin(p) => assert_eq!(p.id, plugin_id),
             MatchResult::HeaderSet(_) => panic!("Expected Plugin, got HeaderSet"),
         }
     }
