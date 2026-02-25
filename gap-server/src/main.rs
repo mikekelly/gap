@@ -697,18 +697,6 @@ mod tests {
     }
 
     #[test]
-    fn test_args_namespace_mode_default_false() {
-        let args = Args::parse_from(["gap-server"]);
-        assert!(!args.namespace_mode);
-    }
-
-    #[test]
-    fn test_args_namespace_mode_flag() {
-        let args = Args::parse_from(["gap-server", "--namespace-mode"]);
-        assert!(args.namespace_mode);
-    }
-
-    #[test]
     #[cfg(target_os = "macos")]
     fn test_status_subcommand_parses() {
         let args = Args::parse_from(["gap-server", "status"]);
