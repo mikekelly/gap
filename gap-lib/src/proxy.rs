@@ -412,7 +412,7 @@ async fn handle_connection(
         debug!("Upstream TLS established");
 
         // Bidirectional proxy with HTTP transformation via hyper
-        proxy_via_hyper(agent_stream, upstream_stream, hostname, port, db, validated_token.prefix.clone(), validated_token.scopes.clone(), is_h2, true, activity_tx).await?;
+        proxy_via_hyper(agent_stream, upstream_stream, hostname, port, db, validated_token.prefix.clone(), validated_token.scopes.clone(), is_h2, true, activity_tx, validated_token.namespace_id.clone(), validated_token.scope_id.clone()).await?;
     } else {
         // --- Plain HTTP path: no TLS on either side ---
         debug!("Plain HTTP detected through CONNECT tunnel to {}:{}", hostname, port);
@@ -424,7 +424,7 @@ async fn handle_connection(
         debug!("Upstream plain TCP established");
 
         // Proxy via hyper with use_tls=false (HTTP/1.1 only for plain HTTP)
-        proxy_via_hyper(stream, upstream_stream, hostname, port, db, validated_token.prefix.clone(), validated_token.scopes.clone(), false, false, activity_tx).await?;
+        proxy_via_hyper(stream, upstream_stream, hostname, port, db, validated_token.prefix.clone(), validated_token.scopes.clone(), false, false, activity_tx, validated_token.namespace_id.clone(), validated_token.scope_id.clone()).await?;
     }
 
     Ok(())
@@ -481,8 +481,8 @@ async fn validate_auth(
                 let validated = ValidatedToken {
                     prefix,
                     scopes: metadata.scopes,
-                    namespace_id: "default".to_string(),
-                    scope_id: "default".to_string(),
+                    namespace_id: metadata.namespace_id.clone(),
+                    scope_id: metadata.scope_id.clone(),
                 };
                 // Populate cache
                 token_cache.insert(token_value, validated.clone());
@@ -615,6 +615,8 @@ async fn proxy_via_hyper<A, U>(
     is_h2: bool,
     use_tls: bool,
     activity_tx: Option<tokio::sync::broadcast::Sender<ActivityEntry>>,
+    ns: String,
+    scope: String,
 ) -> Result<()>
 where
     A: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
@@ -644,6 +646,8 @@ where
             let token_scopes = token_scopes.clone();
             let mut sender = sender.clone();
             let activity_tx = activity_tx_h2.clone();
+            let ns = ns.clone();
+            let scope = scope.clone();
 
             async move {
                 // Per-request scope check (path + method)
@@ -687,7 +691,7 @@ where
                     .unwrap_or_else(|| "/".to_string());
 
                 let transform_result = crate::proxy_transforms::transform_request(
-                    gap_req, &hostname, Some(connect_port), &req_path, &db, use_tls
+                    gap_req, &hostname, Some(connect_port), &req_path, &db, use_tls, &ns, &scope
                 ).instrument(span.clone()).await;
 
                 let (gap_req, plugin_info) = match transform_result {
@@ -704,6 +708,8 @@ where
                         let token_prefix_err = token_prefix.clone();
                         let pre_headers_err = pre_headers_json.clone();
                         let pre_body_err = pre_body.clone();
+                        let ns_err = ns.clone();
+                        let scope_err = scope.clone();
                         tokio::spawn(async move {
                             let entry = ActivityEntry {
                                 timestamp: chrono::Utc::now(),
@@ -718,8 +724,8 @@ where
                                 request_headers: None,
                                 rejection_stage: Some(rejection_stage),
                                 rejection_reason: Some(rejection_reason),
-                                namespace_id: "default".to_string(),
-                                scope_id: "default".to_string(),
+                                namespace_id: ns_err,
+                                scope_id: scope_err,
                             };
                             if let Err(e) = db_log.log_activity(&entry).await {
                                 tracing::warn!("Failed to log rejected activity: {}", e);
@@ -800,8 +806,8 @@ where
                         request_headers: plugin_info.scrubbed_headers.clone(),
                         rejection_stage: None,
                         rejection_reason: None,
-                        namespace_id: "default".to_string(),
-                        scope_id: "default".to_string(),
+                        namespace_id: ns.clone(),
+                        scope_id: scope.clone(),
                     };
                     if let Err(e) = db_log.log_activity(&entry).await {
                         tracing::warn!("Failed to log activity: {}", e);
@@ -851,6 +857,8 @@ where
             let token_scopes = token_scopes.clone();
             let sender = Arc::clone(&sender);
             let activity_tx = activity_tx_h1.clone();
+            let ns = ns.clone();
+            let scope = scope.clone();
 
             async move {
                 // Per-request scope check (path + method)
@@ -894,7 +902,7 @@ where
                     .unwrap_or_else(|| "/".to_string());
 
                 let transform_result = crate::proxy_transforms::transform_request(
-                    gap_req, &hostname, Some(connect_port), &req_path, &db, use_tls
+                    gap_req, &hostname, Some(connect_port), &req_path, &db, use_tls, &ns, &scope
                 ).instrument(span.clone()).await;
 
                 let (gap_req, plugin_info) = match transform_result {
@@ -911,6 +919,8 @@ where
                         let token_prefix_err = token_prefix.clone();
                         let pre_headers_err = pre_headers_json.clone();
                         let pre_body_err = pre_body.clone();
+                        let ns_err = ns.clone();
+                        let scope_err = scope.clone();
                         tokio::spawn(async move {
                             let entry = ActivityEntry {
                                 timestamp: chrono::Utc::now(),
@@ -925,8 +935,8 @@ where
                                 request_headers: None,
                                 rejection_stage: Some(rejection_stage),
                                 rejection_reason: Some(rejection_reason),
-                                namespace_id: "default".to_string(),
-                                scope_id: "default".to_string(),
+                                namespace_id: ns_err,
+                                scope_id: scope_err,
                             };
                             if let Err(e) = db_log.log_activity(&entry).await {
                                 tracing::warn!("Failed to log rejected activity: {}", e);
@@ -1008,8 +1018,8 @@ where
                         request_headers: plugin_info.scrubbed_headers.clone(),
                         rejection_stage: None,
                         rejection_reason: None,
-                        namespace_id: "default".to_string(),
-                        scope_id: "default".to_string(),
+                        namespace_id: ns.clone(),
+                        scope_id: scope.clone(),
                     };
                     if let Err(e) = db_log.log_activity(&entry).await {
                         tracing::warn!("Failed to log activity: {}", e);
@@ -1440,6 +1450,8 @@ mod tests {
                 false, // is_h2 = false for H1
                 true,  // use_tls = true (HTTPS)
                 None,  // no activity broadcast
+                "default".to_string(),
+                "default".to_string(),
             )
             .await
         });
@@ -1600,6 +1612,8 @@ mod tests {
                 false, // is_h2 = false for H1
                 false, // use_tls = false (plain HTTP)
                 None,  // no activity broadcast
+                "default".to_string(),
+                "default".to_string(),
             )
             .await
         });
@@ -1716,6 +1730,8 @@ mod tests {
                 false,
                 true,
                 None,
+                "default".to_string(),
+                "default".to_string(),
             )
             .await
         });

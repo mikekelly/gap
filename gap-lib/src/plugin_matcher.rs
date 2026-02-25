@@ -120,9 +120,11 @@ pub async fn find_matching_handler(
     port: Option<u16>,
     path: &str,
     db: &GapDatabase,
+    ns: &str,
+    scope: &str,
 ) -> Result<Option<MatchResult>> {
-    let plugin_entries = db.list_plugins("default", "default").await?;
-    let header_sets = db.list_header_sets("default", "default").await?;
+    let plugin_entries = db.list_plugins(ns, scope).await?;
+    let header_sets = db.list_header_sets(ns, scope).await?;
 
     let mut candidates: Vec<MatchCandidate> = Vec::new();
 
@@ -175,7 +177,7 @@ pub async fn find_matching_handler(
     match winner.kind {
         CandidateKind::Plugin { id, entry } => {
             // Load plugin source only for the winner
-            let plugin_code = db.get_plugin_source(&id, "default", "default").await?;
+            let plugin_code = db.get_plugin_source(&id, ns, scope).await?;
             if let Some(code) = plugin_code {
                 let mut runtime = PluginRuntime::new()?;
                 if let Ok(mut plugin) = runtime.load_plugin_from_code(&id, &code) {
@@ -199,7 +201,7 @@ pub async fn find_matching_plugin(
     host: &str,
     db: &GapDatabase,
 ) -> Result<Option<GAPPlugin>> {
-    match find_matching_handler(host, None, "/", db).await? {
+    match find_matching_handler(host, None, "/", db, "default", "default").await? {
         Some(MatchResult::Plugin(p)) => Ok(Some(p)),
         _ => Ok(None),
     }
@@ -473,7 +475,7 @@ mod tests {
             .await
             .unwrap();
 
-        let result = find_matching_handler("api.example.com", None, "/", &db)
+        let result = find_matching_handler("api.example.com", None, "/", &db, "default", "default")
             .await
             .unwrap();
         assert!(result.is_some());
@@ -518,7 +520,7 @@ mod tests {
         };
         db.add_plugin(&entry, plugin_code, "default", "default").await.unwrap();
 
-        let result = find_matching_handler("api.example.com", None, "/", &db)
+        let result = find_matching_handler("api.example.com", None, "/", &db, "default", "default")
             .await
             .unwrap();
         assert!(result.is_some());
@@ -537,7 +539,7 @@ mod tests {
             .await
             .unwrap();
 
-        let result = find_matching_handler("api.example.com", None, "/", &db)
+        let result = find_matching_handler("api.example.com", None, "/", &db, "default", "default")
             .await
             .unwrap();
         assert!(result.is_some());
@@ -547,7 +549,7 @@ mod tests {
         }
 
         // Non-matching host returns None
-        let result = find_matching_handler("other.com", None, "/", &db)
+        let result = find_matching_handler("other.com", None, "/", &db, "default", "default")
             .await
             .unwrap();
         assert!(result.is_none());
@@ -566,7 +568,7 @@ mod tests {
             .unwrap();
 
         // Exact path match wins (higher weight=10 vs weight=5)
-        let result = find_matching_handler("api.example.com", None, "/v1/chat", &db)
+        let result = find_matching_handler("api.example.com", None, "/v1/chat", &db, "default", "default")
             .await
             .unwrap();
         match result.unwrap() {
@@ -575,7 +577,7 @@ mod tests {
         }
 
         // Wildcard match for different path (only weight=5 set matches)
-        let result = find_matching_handler("api.example.com", None, "/v1/completions", &db)
+        let result = find_matching_handler("api.example.com", None, "/v1/completions", &db, "default", "default")
             .await
             .unwrap();
         match result.unwrap() {
@@ -584,7 +586,7 @@ mod tests {
         }
 
         // No match for unrelated path
-        let result = find_matching_handler("api.example.com", None, "/v2/chat", &db)
+        let result = find_matching_handler("api.example.com", None, "/v2/chat", &db, "default", "default")
             .await
             .unwrap();
         assert!(result.is_none());

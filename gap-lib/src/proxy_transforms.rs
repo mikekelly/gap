@@ -18,10 +18,12 @@ use tracing::{debug, warn};
 async fn load_plugin_credentials(
     plugin_name: &str,
     db: &GapDatabase,
+    ns: &str,
+    scope: &str,
 ) -> Result<GAPCredentials> {
     let mut credentials = GAPCredentials::new();
 
-    if let Some(plugin_creds) = db.get_plugin_credentials(plugin_name, "default", "default").await? {
+    if let Some(plugin_creds) = db.get_plugin_credentials(plugin_name, ns, scope).await? {
         for (field, value) in plugin_creds {
             credentials.set(&field, &value);
         }
@@ -224,10 +226,12 @@ pub async fn transform_request(
     path: &str,
     db: &GapDatabase,
     use_tls: bool,
+    ns: &str,
+    scope: &str,
 ) -> Result<(GAPRequest, PluginInfo)> {
     // Find matching handler (plugin or header set)
     // SECURITY: Only allow connections to hosts with registered handlers
-    let handler = match find_matching_handler(hostname, port, path, db).await? {
+    let handler = match find_matching_handler(hostname, port, path, db, ns, scope).await? {
         Some(h) => h,
         None => {
             warn!("BLOCKED: Host {} has no matching plugin or header set - not allowed", hostname);
@@ -261,7 +265,7 @@ pub async fn transform_request(
             }
 
             // Load credentials for the plugin
-            let credentials = load_plugin_credentials(&plugin.id, db).await?;
+            let credentials = load_plugin_credentials(&plugin.id, db, ns, scope).await?;
 
             // SECURITY: Only allow connections when credentials are configured
             if credentials.credentials.is_empty() {
@@ -278,7 +282,7 @@ pub async fn transform_request(
             debug!("Loaded {} credential fields for plugin {}", credentials.credentials.len(), plugin.id);
 
             // Load plugin code from database
-            let plugin_code = db.get_plugin_source(&plugin.id, "default", "default").await?
+            let plugin_code = db.get_plugin_source(&plugin.id, ns, scope).await?
                 .ok_or_else(|| GapError::plugin(format!("Plugin code not found for {}", plugin.id)))?;
 
             // Execute transform
@@ -320,7 +324,7 @@ pub async fn transform_request(
             }
 
             // Load headers for this set
-            let header_values = db.get_header_set_headers(&header_set.id, "default", "default").await?;
+            let header_values = db.get_header_set_headers(&header_set.id, ns, scope).await?;
 
             if header_values.is_empty() {
                 warn!(
@@ -384,7 +388,7 @@ pub async fn parse_and_transform(
         }
     };
     let (transformed_request, _plugin_info) =
-        transform_request(request, hostname, None, &req_path, db, true).await?;
+        transform_request(request, hostname, None, &req_path, db, true, "default", "default").await?;
 
     // Serialize back to HTTP
     let transformed_bytes = serialize_http_request(&transformed_request)?;
@@ -411,7 +415,7 @@ mod tests {
             .await
             .expect("set credential");
 
-        let credentials = load_plugin_credentials("exa", &db)
+        let credentials = load_plugin_credentials("exa", &db, "default", "default")
             .await
             .expect("load credentials");
 
@@ -459,7 +463,7 @@ mod tests {
         let request = GAPRequest::new("GET", "https://api.test.com/data")
             .with_header("Host", "api.test.com");
 
-        let (result, plugin_info) = transform_request(request, "api.test.com", None, "/", &db, true)
+        let (result, plugin_info) = transform_request(request, "api.test.com", None, "/", &db, true, "default", "default")
             .await
             .expect("transform should succeed");
 
@@ -482,7 +486,7 @@ mod tests {
         let request = GAPRequest::new("GET", "https://evil.com/data")
             .with_header("Host", "evil.com");
 
-        let result = transform_request(request, "evil.com", None, "/", &db, true).await;
+        let result = transform_request(request, "evil.com", None, "/", &db, true, "default", "default").await;
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("not allowed"));
     }
@@ -517,7 +521,7 @@ mod tests {
         let request = GAPRequest::new("GET", "https://api.nocreds.com/data")
             .with_header("Host", "api.nocreds.com");
 
-        let result = transform_request(request, "api.nocreds.com", None, "/", &db, true).await;
+        let result = transform_request(request, "api.nocreds.com", None, "/", &db, true, "default", "default").await;
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("credentials"));
     }
@@ -664,7 +668,7 @@ mod tests {
         let request = GAPRequest::new("GET", "https://api.test.com/data")
             .with_header("Host", "api.test.com");
 
-        let (_result, plugin_info) = transform_request(request, "api.test.com", None, "/", &db, true)
+        let (_result, plugin_info) = transform_request(request, "api.test.com", None, "/", &db, true, "default", "default")
             .await
             .expect("transform should succeed");
 
@@ -689,7 +693,7 @@ mod tests {
             .with_header("Host", "api.test.com");
 
         // use_tls=false should be blocked because plugin doesn't permit HTTP
-        let result = transform_request(request, "api.test.com", None, "/", &db, false).await;
+        let result = transform_request(request, "api.test.com", None, "/", &db, false, "default", "default").await;
         assert!(result.is_err());
         let err_msg = result.unwrap_err().to_string();
         assert!(
@@ -735,7 +739,7 @@ mod tests {
             .with_header("Host", "api.httpok.com");
 
         // use_tls=false should be allowed because plugin permits HTTP
-        let (result, plugin_info) = transform_request(request, "api.httpok.com", None, "/", &db, false)
+        let (result, plugin_info) = transform_request(request, "api.httpok.com", None, "/", &db, false, "default", "default")
             .await
             .expect("transform should succeed with dangerously_permit_http=true");
 
@@ -756,7 +760,7 @@ mod tests {
             .with_header("Host", "api.test.com");
 
         // use_tls=true should always work regardless of dangerously_permit_http
-        let (result, _) = transform_request(request, "api.test.com", None, "/", &db, true)
+        let (result, _) = transform_request(request, "api.test.com", None, "/", &db, true, "default", "default")
             .await
             .expect("HTTPS transform should succeed even without permit flag");
 
@@ -876,7 +880,7 @@ mod tests {
         let request = GAPRequest::new("GET", "https://api.test.com/data")
             .with_header("Host", "api.test.com");
 
-        let (_result, plugin_info) = transform_request(request, "api.test.com", None, "/", &db, true)
+        let (_result, plugin_info) = transform_request(request, "api.test.com", None, "/", &db, true, "default", "default")
             .await
             .expect("transform should succeed");
 
@@ -905,7 +909,7 @@ mod tests {
         let request = GAPRequest::new("GET", "https://api.hs.com/data")
             .with_header("Host", "api.hs.com");
 
-        let (result, plugin_info) = transform_request(request, "api.hs.com", None, "/", &db, true)
+        let (result, plugin_info) = transform_request(request, "api.hs.com", None, "/", &db, true, "default", "default")
             .await
             .expect("header set transform should succeed");
 
@@ -941,7 +945,7 @@ mod tests {
             .with_header("Host", "api.httphs.com");
 
         // use_tls=false should be blocked for header sets
-        let result = transform_request(request, "api.httphs.com", None, "/", &db, false).await;
+        let result = transform_request(request, "api.httphs.com", None, "/", &db, false, "default", "default").await;
         assert!(result.is_err());
         let err_msg = result.unwrap_err().to_string();
         assert!(
@@ -963,7 +967,7 @@ mod tests {
         let request = GAPRequest::new("GET", "https://api.empty.com/data")
             .with_header("Host", "api.empty.com");
 
-        let result = transform_request(request, "api.empty.com", None, "/", &db, true).await;
+        let result = transform_request(request, "api.empty.com", None, "/", &db, true, "default", "default").await;
         assert!(result.is_err());
         let err_msg = result.unwrap_err().to_string();
         assert!(
@@ -987,7 +991,7 @@ mod tests {
         let request = GAPRequest::new("GET", "https://api.scrub.com/data")
             .with_header("Host", "api.scrub.com");
 
-        let (_result, plugin_info) = transform_request(request, "api.scrub.com", None, "/", &db, true)
+        let (_result, plugin_info) = transform_request(request, "api.scrub.com", None, "/", &db, true, "default", "default")
             .await
             .expect("header set transform should succeed");
 
