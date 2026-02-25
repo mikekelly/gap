@@ -420,8 +420,9 @@ mod tests {
         assert_eq!(credentials.get("secret"), Some(&"test-secret-value".to_string()));
     }
 
-    /// Helper to set up a plugin + credentials in database for testing
-    async fn setup_test_plugin(db: &GapDatabase) {
+    /// Helper to set up a plugin + credentials in database for testing.
+    /// Returns the UUID assigned to the plugin by the database.
+    async fn setup_test_plugin(db: &GapDatabase) -> String {
         let plugin_code = r#"
         var plugin = {
             name: "test-api",
@@ -443,14 +444,15 @@ mod tests {
             weight: 0,
             installed_at: None,
         };
-        db.add_plugin(&plugin_entry, plugin_code).await.unwrap();
-        db.set_credential("test-api", "api_key", "secret-key-123").await.unwrap();
+        let plugin_id = db.add_plugin(&plugin_entry, plugin_code).await.unwrap();
+        db.set_credential(&plugin_id, "api_key", "secret-key-123").await.unwrap();
+        plugin_id
     }
 
     #[tokio::test]
     async fn test_transform_request_applies_plugin() {
         let db = GapDatabase::in_memory().await.unwrap();
-        setup_test_plugin(&db).await;
+        let plugin_id = setup_test_plugin(&db).await;
 
         let request = GAPRequest::new("GET", "https://api.test.com/data")
             .with_header("Host", "api.test.com");
@@ -467,8 +469,8 @@ mod tests {
         // Method and URL should be preserved
         assert_eq!(result.method, "GET");
         assert_eq!(result.url, "https://api.test.com/data");
-        // Plugin info should be populated
-        assert_eq!(plugin_info.id, "test-api");
+        // Plugin info should carry the UUID assigned by the database
+        assert_eq!(plugin_info.id, plugin_id);
     }
 
     #[tokio::test]
@@ -720,8 +722,8 @@ mod tests {
             weight: 0,
             installed_at: None,
         };
-        db.add_plugin(&plugin_entry, plugin_code).await.unwrap();
-        db.set_credential("http-ok", "api_key", "http-secret").await.unwrap();
+        let plugin_id = db.add_plugin(&plugin_entry, plugin_code).await.unwrap();
+        db.set_credential(&plugin_id, "api_key", "http-secret").await.unwrap();
 
         let request = GAPRequest::new("GET", "http://api.httpok.com/data")
             .with_header("Host", "api.httpok.com");
@@ -735,7 +737,7 @@ mod tests {
             result.get_header("Authorization"),
             Some(&"Bearer http-secret".to_string())
         );
-        assert_eq!(plugin_info.id, "http-ok");
+        assert_eq!(plugin_info.id, plugin_id);
     }
 
     #[tokio::test]
@@ -884,13 +886,13 @@ mod tests {
         let db = GapDatabase::in_memory().await.unwrap();
 
         // Create a header set matching the host
-        db.add_header_set("test-hs", &["api.hs.com".to_string()], 0)
+        let header_set_id = db.add_header_set(&["api.hs.com".to_string()], 0)
             .await
             .unwrap();
-        db.set_header_set_header("test-hs", "Authorization", "Bearer hs-secret-123")
+        db.set_header_set_header(&header_set_id, "Authorization", "Bearer hs-secret-123")
             .await
             .unwrap();
-        db.set_header_set_header("test-hs", "X-Custom", "custom-value")
+        db.set_header_set_header(&header_set_id, "X-Custom", "custom-value")
             .await
             .unwrap();
 
@@ -913,7 +915,7 @@ mod tests {
         // Original headers preserved
         assert_eq!(result.get_header("Host"), Some(&"api.hs.com".to_string()));
         // Plugin info should identify the header set
-        assert_eq!(plugin_info.id, "test-hs");
+        assert_eq!(plugin_info.id, header_set_id);
         assert!(plugin_info.commit_sha.is_none());
         assert!(plugin_info.source_hash.is_none());
     }
@@ -922,10 +924,10 @@ mod tests {
     async fn test_transform_request_header_set_blocks_http() {
         let db = GapDatabase::in_memory().await.unwrap();
 
-        db.add_header_set("http-hs", &["api.httphs.com".to_string()], 0)
+        let header_set_id = db.add_header_set(&["api.httphs.com".to_string()], 0)
             .await
             .unwrap();
-        db.set_header_set_header("http-hs", "Authorization", "Bearer secret")
+        db.set_header_set_header(&header_set_id, "Authorization", "Bearer secret")
             .await
             .unwrap();
 
@@ -948,7 +950,7 @@ mod tests {
         let db = GapDatabase::in_memory().await.unwrap();
 
         // Header set with no headers configured
-        db.add_header_set("empty-hs", &["api.empty.com".to_string()], 0)
+        db.add_header_set(&["api.empty.com".to_string()], 0)
             .await
             .unwrap();
 
@@ -969,10 +971,10 @@ mod tests {
     async fn test_transform_request_header_set_scrubs_values() {
         let db = GapDatabase::in_memory().await.unwrap();
 
-        db.add_header_set("scrub-hs", &["api.scrub.com".to_string()], 0)
+        let header_set_id = db.add_header_set(&["api.scrub.com".to_string()], 0)
             .await
             .unwrap();
-        db.set_header_set_header("scrub-hs", "Authorization", "Bearer scrub-secret-val")
+        db.set_header_set_header(&header_set_id, "Authorization", "Bearer scrub-secret-val")
             .await
             .unwrap();
 
