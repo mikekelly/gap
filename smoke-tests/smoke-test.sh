@@ -206,7 +206,9 @@ log_step "Phase 4.1: Installing plugin with 'gap install mikekelly/test-gap'"
 INSTALL_OUTPUT=$("$GAP" --server "http://localhost:$API_PORT" install mikekelly/test-gap 2>&1)
 
 if echo "$INSTALL_OUTPUT" | grep -q "installed successfully"; then
-    log_success "Plugin installed: mikekelly/test-gap"
+    # Capture UUID from output: "Plugin '{UUID}' (mikekelly/test-gap) installed successfully."
+    TEST_GAP_ID=$(echo "$INSTALL_OUTPUT" | grep -oE "[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}" | head -1)
+    log_success "Plugin installed: mikekelly/test-gap (id: $TEST_GAP_ID)"
 else
     log_error "Plugin installation failed: $INSTALL_OUTPUT"
     exit 1
@@ -216,10 +218,9 @@ fi
 log_step "Phase 4.2: Listing plugins with 'gap plugins'"
 PLUGINS_OUTPUT=$("$GAP" --server "http://localhost:$API_PORT" plugins 2>&1)
 
-if echo "$PLUGINS_OUTPUT" | grep -q "mikekelly/test-gap"; then
-    log_success "Plugin appears in list"
-    # Show plugin details
-    echo "$PLUGINS_OUTPUT" | grep -A5 "mikekelly/test-gap" | head -6
+if echo "$PLUGINS_OUTPUT" | grep -q "$TEST_GAP_ID"; then
+    log_success "Plugin appears in list (UUID: $TEST_GAP_ID)"
+    echo "$PLUGINS_OUTPUT" | grep -A3 "$TEST_GAP_ID" | head -4
 else
     log_error "Plugin not found in list: $PLUGINS_OUTPUT"
     exit 1
@@ -231,7 +232,9 @@ log_step "Phase 4.3: Installing second plugin with 'gap install mikekelly/exa-ga
 INSTALL_EXA_OUTPUT=$("$GAP" --server "http://localhost:$API_PORT" install mikekelly/exa-gap 2>&1)
 
 if echo "$INSTALL_EXA_OUTPUT" | grep -q "installed successfully"; then
-    log_success "Plugin installed: mikekelly/exa-gap"
+    # Capture UUID from output: "Plugin '{UUID}' (mikekelly/exa-gap) installed successfully."
+    EXA_GAP_ID=$(echo "$INSTALL_EXA_OUTPUT" | grep -oE "[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}" | head -1)
+    log_success "Plugin installed: mikekelly/exa-gap (id: $EXA_GAP_ID)"
 else
     log_error "Plugin installation failed: $INSTALL_EXA_OUTPUT"
     exit 1
@@ -241,23 +244,23 @@ fi
 log_step "Phase 4.4: Verifying both plugins appear in list"
 PLUGINS_BOTH=$("$GAP" --server "http://localhost:$API_PORT" plugins 2>&1)
 
-if echo "$PLUGINS_BOTH" | grep -q "mikekelly/test-gap"; then
-    log_success "First plugin still in list"
+if echo "$PLUGINS_BOTH" | grep -q "$TEST_GAP_ID"; then
+    log_success "First plugin still in list (UUID: $TEST_GAP_ID)"
 else
     log_error "First plugin not found: $PLUGINS_BOTH"
     exit 1
 fi
 
-if echo "$PLUGINS_BOTH" | grep -q "mikekelly/exa-gap"; then
-    log_success "Second plugin in list"
+if echo "$PLUGINS_BOTH" | grep -q "$EXA_GAP_ID"; then
+    log_success "Second plugin in list (UUID: $EXA_GAP_ID)"
 else
     log_error "Second plugin not found: $PLUGINS_BOTH"
     exit 1
 fi
 
 # 4.5: Update plugin
-log_step "Phase 4.5: Updating plugin with 'gap update mikekelly/test-gap'"
-UPDATE_OUTPUT=$("$GAP" --server "http://localhost:$API_PORT" update mikekelly/test-gap 2>&1)
+log_step "Phase 4.5: Updating plugin with 'gap update $TEST_GAP_ID'"
+UPDATE_OUTPUT=$("$GAP" --server "http://localhost:$API_PORT" update "$TEST_GAP_ID" 2>&1)
 
 if echo "$UPDATE_OUTPUT" | grep -qi "updated successfully\|already up to date\|up-to-date"; then
     log_success "Plugin update completed"
@@ -273,8 +276,8 @@ else
 fi
 
 # 4.6: Uninstall plugin
-log_step "Phase 4.6: Uninstalling plugin with 'gap uninstall mikekelly/exa-gap'"
-UNINSTALL_OUTPUT=$("$GAP" --server "http://localhost:$API_PORT" uninstall mikekelly/exa-gap 2>&1)
+log_step "Phase 4.6: Uninstalling plugin with 'gap uninstall $EXA_GAP_ID'"
+UNINSTALL_OUTPUT=$("$GAP" --server "http://localhost:$API_PORT" uninstall "$EXA_GAP_ID" 2>&1)
 
 if echo "$UNINSTALL_OUTPUT" | grep -qi "uninstalled successfully\|removed successfully\|deleted successfully"; then
     log_success "Plugin uninstalled: mikekelly/exa-gap"
@@ -287,8 +290,8 @@ fi
 log_step "Phase 4.7: Verifying plugin removed from list"
 PLUGINS_AFTER_UNINSTALL=$("$GAP" --server "http://localhost:$API_PORT" plugins 2>&1)
 
-if echo "$PLUGINS_AFTER_UNINSTALL" | grep -q "mikekelly/exa-gap"; then
-    log_error "Plugin still appears after uninstall"
+if echo "$PLUGINS_AFTER_UNINSTALL" | grep -q "$EXA_GAP_ID"; then
+    log_error "Plugin still appears after uninstall (UUID: $EXA_GAP_ID)"
     exit 1
 else
     log_success "Plugin successfully removed from list"
@@ -305,12 +308,16 @@ else
     exit 1
 fi
 
+# Capture new EXA_GAP_ID from re-install output (new UUID assigned)
+EXA_GAP_ID=$(echo "$REINSTALL_OUTPUT" | grep -oE '[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}' | head -1)
+log_info "exa-gap new UUID: $EXA_GAP_ID"
+
 # 4.9: Verify re-installed plugin appears in list
 log_step "Phase 4.9: Verifying re-installed plugin in list"
 PLUGINS_AFTER_REINSTALL=$("$GAP" --server "http://localhost:$API_PORT" plugins 2>&1)
 
-if echo "$PLUGINS_AFTER_REINSTALL" | grep -q "mikekelly/exa-gap"; then
-    log_success "Re-installed plugin appears in list"
+if [ -n "$EXA_GAP_ID" ] && echo "$PLUGINS_AFTER_REINSTALL" | grep -q "$EXA_GAP_ID"; then
+    log_success "Re-installed plugin appears in list (UUID: $EXA_GAP_ID)"
 else
     log_error "Re-installed plugin not found: $PLUGINS_AFTER_REINSTALL"
     exit 1
@@ -335,11 +342,11 @@ log_step "Phase 5: Credential Management"
 echo "-----------------------------------"
 
 # 5.1: Set apiKey credential
-log_step "Phase 5.1: Setting credential with 'gap set mikekelly/test-gap:apiKey'"
+log_step "Phase 5.1: Setting credential with 'gap set $TEST_GAP_ID:apiKey'"
 TEST_API_KEY="test-api-key-$(date +%s)"
 export GAP_CREDENTIAL_VALUE="$TEST_API_KEY"
 
-SET_OUTPUT=$("$GAP" --server "http://localhost:$API_PORT" set "mikekelly/test-gap:apiKey" 2>&1)
+SET_OUTPUT=$("$GAP" --server "http://localhost:$API_PORT" set "$TEST_GAP_ID:apiKey" 2>&1)
 
 if echo "$SET_OUTPUT" | grep -qi "set successfully\|success"; then
     log_success "apiKey credential set successfully"
@@ -349,11 +356,11 @@ else
 fi
 
 # 5.2: Set clientId credential
-log_step "Phase 5.2: Setting credential with 'gap set mikekelly/test-gap:clientId'"
+log_step "Phase 5.2: Setting credential with 'gap set $TEST_GAP_ID:clientId'"
 TEST_CLIENT_ID="test-client-id-$(date +%s)"
 export GAP_CREDENTIAL_VALUE="$TEST_CLIENT_ID"
 
-SET_OUTPUT=$("$GAP" --server "http://localhost:$API_PORT" set "mikekelly/test-gap:clientId" 2>&1)
+SET_OUTPUT=$("$GAP" --server "http://localhost:$API_PORT" set "$TEST_GAP_ID:clientId" 2>&1)
 
 if echo "$SET_OUTPUT" | grep -qi "set successfully\|success"; then
     log_success "clientId credential set successfully"

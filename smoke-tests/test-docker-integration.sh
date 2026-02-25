@@ -166,12 +166,13 @@ INSTALL_RESPONSE=$(curl -ks -X POST "$GAP_SERVER_URL/plugins/install" \
     -H "Content-Type: application/json" \
     -H "Authorization: Bearer $PW_HASH" \
     -d "{
-        \"name\": \"mikekelly/exa-gap\"
+        \"source\": \"mikekelly/exa-gap\"
     }")
 
-if echo "$INSTALL_RESPONSE" | grep -q '"name"'; then
-    PLUGIN_NAME=$(echo "$INSTALL_RESPONSE" | jq -r '.name')
-    log_pass "Plugin installed: $PLUGIN_NAME"
+if echo "$INSTALL_RESPONSE" | grep -q '"id"'; then
+    PLUGIN_ID=$(echo "$INSTALL_RESPONSE" | jq -r '.id')
+    PLUGIN_SOURCE=$(echo "$INSTALL_RESPONSE" | jq -r '.source')
+    log_pass "Plugin installed: $PLUGIN_SOURCE (id: $PLUGIN_ID)"
 else
     log_fail "Failed to install plugin: $INSTALL_RESPONSE"
 fi
@@ -181,24 +182,22 @@ echo ""
 echo "Test 10: List plugins"
 echo "====================="
 
-PLUGINS_RESPONSE=$(curl -ks -X POST "$GAP_SERVER_URL/plugins" \
-    -H "Content-Type: application/json" \
-    -H "Authorization: Bearer $PW_HASH" \
-    -d "{}")
+PLUGINS_RESPONSE=$(curl -ks "$GAP_SERVER_URL/plugins" \
+    -H "Authorization: Bearer $PW_HASH")
 
 if echo "$PLUGINS_RESPONSE" | grep -q '"plugins"'; then
     PLUGIN_COUNT=$(echo "$PLUGINS_RESPONSE" | jq '.plugins | length')
     log_pass "Plugin listing works (found $PLUGIN_COUNT plugins)"
 
-    # Verify the installed plugin appears in the list
-    if echo "$PLUGINS_RESPONSE" | jq -e ".plugins[] | select(.name == \"$PLUGIN_NAME\")" > /dev/null 2>&1; then
+    # Verify the installed plugin appears in the list by ID
+    if echo "$PLUGINS_RESPONSE" | jq -e ".plugins[] | select(.id == \"$PLUGIN_ID\")" > /dev/null 2>&1; then
         log_pass "Installed plugin appears in plugin list"
     else
         log_fail "Installed plugin does not appear in plugin list"
     fi
 
     # Verify plugin metadata is present (match_patterns and credential_schema)
-    PLUGIN_DATA=$(echo "$PLUGINS_RESPONSE" | jq -r ".plugins[] | select(.name == \"$PLUGIN_NAME\")")
+    PLUGIN_DATA=$(echo "$PLUGINS_RESPONSE" | jq -r ".plugins[] | select(.id == \"$PLUGIN_ID\")")
     if echo "$PLUGIN_DATA" | jq -e '.match_patterns' > /dev/null 2>&1; then
         HOSTS=$(echo "$PLUGIN_DATA" | jq -r '.match_patterns | join(", ")')
         log_pass "Plugin metadata includes match_patterns: $HOSTS"
@@ -439,7 +438,7 @@ else
         done
 
         # Check audit fields (may be null but should be present as keys)
-        for field in request_id plugin_name plugin_sha source_hash request_headers; do
+        for field in request_id plugin_id plugin_sha source_hash request_headers; do
             if ! echo "$ENTRY_KEYS" | jq -e "index(\"$field\")" > /dev/null 2>&1; then
                 MISSING_FIELDS+=("$field")
             fi
@@ -491,11 +490,10 @@ SIGNING_PLUGIN_CODE='var plugin = {
     }
 };'
 
-# Register the plugin
+# Register the plugin (only code is needed — no name field in register API)
 REGISTER_BODY=$(jq -n \
-    --arg name "signing-test" \
     --arg code "$SIGNING_PLUGIN_CODE" \
-    '{name: $name, code: $code}')
+    '{code: $code}')
 
 REGISTER_RESPONSE=$(curl -ks -X POST "$GAP_SERVER_URL/plugins/register" \
     -H "Content-Type: application/json" \
@@ -503,7 +501,8 @@ REGISTER_RESPONSE=$(curl -ks -X POST "$GAP_SERVER_URL/plugins/register" \
     -d "$REGISTER_BODY")
 
 if echo "$REGISTER_RESPONSE" | jq -e '.registered == true' > /dev/null 2>&1; then
-    log_pass "Signing plugin registered successfully"
+    SIGNING_PLUGIN_ID=$(echo "$REGISTER_RESPONSE" | jq -r '.id')
+    log_pass "Signing plugin registered successfully (id: $SIGNING_PLUGIN_ID)"
 else
     log_fail "Failed to register signing plugin: $REGISTER_RESPONSE"
 fi
@@ -512,14 +511,14 @@ fi
 PLUGINS_RESPONSE=$(curl -ks "$GAP_SERVER_URL/plugins" \
     -H "Authorization: Bearer $PW_HASH")
 
-if echo "$PLUGINS_RESPONSE" | jq -e '.plugins[] | select(.name == "signing-test")' > /dev/null 2>&1; then
+if echo "$PLUGINS_RESPONSE" | jq -e ".plugins[] | select(.id == \"$SIGNING_PLUGIN_ID\")" > /dev/null 2>&1; then
     log_pass "Signing plugin appears in plugin list"
 else
     log_fail "Signing plugin not found in plugin list: $PLUGINS_RESPONSE"
 fi
 
 # Verify match_patterns
-SIGNING_MATCH=$(echo "$PLUGINS_RESPONSE" | jq -r '.plugins[] | select(.name == "signing-test") | .match_patterns[]' 2>/dev/null)
+SIGNING_MATCH=$(echo "$PLUGINS_RESPONSE" | jq -r ".plugins[] | select(.id == \"$SIGNING_PLUGIN_ID\") | .match_patterns[]" 2>/dev/null)
 if [ "$SIGNING_MATCH" = "api.example.com" ]; then
     log_pass "Plugin match_patterns correct: $SIGNING_MATCH"
 else
@@ -527,7 +526,7 @@ else
 fi
 
 # Verify credential_schema contains the expected fields
-SCHEMA_FIELDS=$(echo "$PLUGINS_RESPONSE" | jq -r '.plugins[] | select(.name == "signing-test") | .credential_schema[]' 2>/dev/null | sort | tr '\n' ',')
+SCHEMA_FIELDS=$(echo "$PLUGINS_RESPONSE" | jq -r ".plugins[] | select(.id == \"$SIGNING_PLUGIN_ID\") | .credential_schema[]" 2>/dev/null | sort | tr '\n' ',')
 if [ "$SCHEMA_FIELDS" = "key_id,private_key," ]; then
     log_pass "Plugin credential_schema has expected fields: private_key, key_id"
 else
@@ -535,12 +534,12 @@ else
 fi
 
 # Set credentials and verify they're accepted
-PRIVKEY_STATUS=$(curl -ks -o /dev/null -w "%{http_code}" -X POST "$GAP_SERVER_URL/credentials/signing-test/private_key" \
+PRIVKEY_STATUS=$(curl -ks -o /dev/null -w "%{http_code}" -X POST "$GAP_SERVER_URL/credentials/$SIGNING_PLUGIN_ID/private_key" \
     -H "Content-Type: application/json" \
     -H "Authorization: Bearer $PW_HASH" \
     -d '{"value": "MC4CAQAwBQYDK2VwBCIEIDBPFaFarmSYSvNyKLfqMZnJchAPhXGR0h4l209vFoVN"}')
 
-KEYID_STATUS=$(curl -ks -o /dev/null -w "%{http_code}" -X POST "$GAP_SERVER_URL/credentials/signing-test/key_id" \
+KEYID_STATUS=$(curl -ks -o /dev/null -w "%{http_code}" -X POST "$GAP_SERVER_URL/credentials/$SIGNING_PLUGIN_ID/key_id" \
     -H "Content-Type: application/json" \
     -H "Authorization: Bearer $PW_HASH" \
     -d '{"value": "test-key-1"}')
@@ -554,7 +553,7 @@ fi
 # Register without auth should fail
 NOAUTH_STATUS=$(curl -ks -o /dev/null -w "%{http_code}" -X POST "$GAP_SERVER_URL/plugins/register" \
     -H "Content-Type: application/json" \
-    -d "$REGISTER_BODY")
+    -d '{"code": "var plugin = { name: \"test\", matchPatterns: [], credentialSchema: {fields: []}, transform: function(r,c){return r;} };"}')
 
 if [ "$NOAUTH_STATUS" = "401" ]; then
     log_pass "Register without auth correctly returns 401"
@@ -654,10 +653,11 @@ echo "==========================="
 RESPONSE=$(curl -ks -X POST "$GAP_SERVER_URL/header-sets" \
     -H "Content-Type: application/json" \
     -H "Authorization: Bearer $PW_HASH" \
-    -d '{"name": "test-header-set", "match_patterns": ["api.example.com"], "weight": 5}')
+    -d '{"match_patterns": ["api.example.com"], "weight": 5}')
 
 if echo "$RESPONSE" | jq -e '.created == true' > /dev/null 2>&1; then
-    log_pass "Header set created successfully"
+    HEADER_SET_ID=$(echo "$RESPONSE" | jq -r '.id')
+    log_pass "Header set created successfully (id: $HEADER_SET_ID)"
 else
     log_fail "Failed to create header set: $RESPONSE"
 fi
@@ -669,7 +669,7 @@ echo "===================================================="
 
 NOAUTH_STATUS=$(curl -ks -o /dev/null -w "%{http_code}" -X POST "$GAP_SERVER_URL/header-sets" \
     -H "Content-Type: application/json" \
-    -d '{"name": "noauth-hs", "match_patterns": ["example.com"]}')
+    -d '{"match_patterns": ["example.com"]}')
 
 if [ "$NOAUTH_STATUS" = "401" ]; then
     log_pass "Create header set without auth correctly returns 401"
@@ -683,7 +683,7 @@ echo "Test 25: Add headers to header set"
 echo "==================================="
 
 # Add first header
-RESPONSE=$(curl -ks -X POST "$GAP_SERVER_URL/header-sets/test-header-set/headers" \
+RESPONSE=$(curl -ks -X POST "$GAP_SERVER_URL/header-sets/$HEADER_SET_ID/headers" \
     -H "Content-Type: application/json" \
     -H "Authorization: Bearer $PW_HASH" \
     -d '{"name": "Authorization", "value": "Bearer sk-test-key-123"}')
@@ -695,7 +695,7 @@ else
 fi
 
 # Add second header
-curl -ks -X POST "$GAP_SERVER_URL/header-sets/test-header-set/headers" \
+curl -ks -X POST "$GAP_SERVER_URL/header-sets/$HEADER_SET_ID/headers" \
     -H "Content-Type: application/json" \
     -H "Authorization: Bearer $PW_HASH" \
     -d '{"name": "X-Custom-Header", "value": "custom-value"}' > /dev/null
@@ -708,7 +708,7 @@ echo "================================================================"
 RESPONSE=$(curl -ks "$GAP_SERVER_URL/header-sets" \
     -H "Authorization: Bearer $PW_HASH")
 
-if echo "$RESPONSE" | jq -e '.header_sets[] | select(.name == "test-header-set") | .headers | length == 2' > /dev/null 2>&1; then
+if echo "$RESPONSE" | jq -e ".header_sets[] | select(.id == \"$HEADER_SET_ID\") | .headers | length == 2" > /dev/null 2>&1; then
     log_pass "Header set listed with 2 header names"
 else
     log_fail "Header set listing unexpected: $RESPONSE"
@@ -726,7 +726,7 @@ echo ""
 echo "Test 27: Update header set weight"
 echo "=================================="
 
-RESPONSE=$(curl -ks -X PATCH "$GAP_SERVER_URL/header-sets/test-header-set" \
+RESPONSE=$(curl -ks -X PATCH "$GAP_SERVER_URL/header-sets/$HEADER_SET_ID" \
     -H "Content-Type: application/json" \
     -H "Authorization: Bearer $PW_HASH" \
     -d '{"weight": 10}')
@@ -742,8 +742,8 @@ echo ""
 echo "Test 28: Update plugin weight"
 echo "=============================="
 
-# Use the signing-test plugin registered in Test 18
-RESPONSE=$(curl -ks -X PATCH "$GAP_SERVER_URL/plugins/signing-test" \
+# Use the signing plugin registered in Test 18 (referenced by its UUID)
+RESPONSE=$(curl -ks -X PATCH "$GAP_SERVER_URL/plugins/$SIGNING_PLUGIN_ID" \
     -H "Content-Type: application/json" \
     -H "Authorization: Bearer $PW_HASH" \
     -d '{"weight": 20}')
@@ -759,7 +759,7 @@ echo ""
 echo "Test 29: Delete header from header set"
 echo "======================================="
 
-RESPONSE=$(curl -ks -X DELETE "$GAP_SERVER_URL/header-sets/test-header-set/headers/X-Custom-Header" \
+RESPONSE=$(curl -ks -X DELETE "$GAP_SERVER_URL/header-sets/$HEADER_SET_ID/headers/X-Custom-Header" \
     -H "Authorization: Bearer $PW_HASH")
 
 if echo "$RESPONSE" | jq -e '.deleted == true' > /dev/null 2>&1; then
@@ -773,7 +773,7 @@ echo ""
 echo "Test 30: Delete header set"
 echo "==========================="
 
-RESPONSE=$(curl -ks -X DELETE "$GAP_SERVER_URL/header-sets/test-header-set" \
+RESPONSE=$(curl -ks -X DELETE "$GAP_SERVER_URL/header-sets/$HEADER_SET_ID" \
     -H "Authorization: Bearer $PW_HASH")
 
 if echo "$RESPONSE" | jq -e '.deleted == true' > /dev/null 2>&1; then
