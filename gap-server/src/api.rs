@@ -50,6 +50,10 @@ pub struct ApiState {
     pub management_tx: Option<tokio::sync::broadcast::Sender<ManagementLogEntry>>,
     /// In-memory token cache shared with proxy for immediate revocation
     pub token_cache: Arc<TokenCache>,
+    /// Optional signing config for request signature verification
+    pub signing_config: Option<Arc<crate::signing::SigningConfig>>,
+    /// Nonce cache for replay protection (shared with signing middleware)
+    pub nonce_cache: Arc<crate::signing::NonceCache>,
 }
 
 impl ApiState {
@@ -64,6 +68,8 @@ impl ApiState {
             activity_tx: None,
             management_tx: None,
             token_cache,
+            signing_config: None,
+            nonce_cache: Arc::new(crate::signing::NonceCache::new()),
         }
     }
 
@@ -85,6 +91,8 @@ impl ApiState {
             activity_tx: Some(activity_tx),
             management_tx: Some(management_tx),
             token_cache,
+            signing_config: None,
+            nonce_cache: Arc::new(crate::signing::NonceCache::new()),
         }
     }
 
@@ -304,6 +312,46 @@ impl IntoResponse for ApiError {
     }
 }
 
+/// Middleware that verifies Ed25519 request signatures when signing is enabled.
+///
+/// When `signing_config` is `None` in the API state, all requests pass through
+/// unchanged. When enabled, requests to all endpoints except `/status` and `/init`
+/// must include valid `x-gap-timestamp`, `x-gap-nonce`, and `x-gap-signature` headers.
+async fn verify_signing(
+    State(state): State<ApiState>,
+    request: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> Result<Response, (StatusCode, String)> {
+    // If signing not enabled, pass through
+    let signing_config = match &state.signing_config {
+        Some(config) => config,
+        None => return Ok(next.run(request).await),
+    };
+
+    // Exempt /status and /init from signing
+    let path = request.uri().path();
+    if path == "/status" || path == "/init" {
+        return Ok(next.run(request).await);
+    }
+
+    // Need to buffer the body for signature verification
+    let (parts, body) = request.into_parts();
+    let body_bytes = axum::body::to_bytes(body, 10 * 1024 * 1024) // 10MB limit
+        .await
+        .map_err(|e| (StatusCode::BAD_REQUEST, format!("Failed to read body: {}", e)))?;
+
+    // Verify signature
+    let method = parts.method.as_str();
+    let path = parts.uri.path();
+    crate::signing::verify_request_signature(
+        method, path, &body_bytes, &parts.headers, signing_config, &state.nonce_cache,
+    ).map_err(|e| (StatusCode::UNAUTHORIZED, format!("Signature verification failed: {}", e)))?;
+
+    // Reconstruct request with buffered body
+    let request = axum::extract::Request::from_parts(parts, axum::body::Body::from(body_bytes));
+    Ok(next.run(request).await)
+}
+
 /// Create the API router
 pub fn create_router(state: ApiState) -> Router {
     Router::new()
@@ -329,6 +377,7 @@ pub fn create_router(state: ApiState) -> Router {
         .route("/header-sets/:id", axum::routing::patch(update_header_set).delete(delete_header_set))
         .route("/header-sets/:id/headers", post(set_header_set_header))
         .route("/header-sets/:id/headers/:header_name", delete(delete_header_set_header))
+        .layer(axum::middleware::from_fn_with_state(state.clone(), verify_signing))
         .with_state(state)
 }
 
@@ -3824,5 +3873,194 @@ mod tests {
         let plugins = db.list_plugins().await.unwrap();
         let plugin = plugins.iter().find(|p| p.id == plugin_id).unwrap();
         assert_eq!(plugin.weight, 100);
+    }
+
+    // ── Signing middleware tests ──────────────────────────────────────
+
+    /// Helper: create a test Ed25519 keypair and return (keypair, raw public key bytes)
+    fn test_signing_keypair() -> (ring::signature::Ed25519KeyPair, Vec<u8>) {
+        use ring::rand::SystemRandom;
+        use ring::signature::{Ed25519KeyPair, KeyPair};
+        let rng = SystemRandom::new();
+        let pkcs8 = Ed25519KeyPair::generate_pkcs8(&rng).unwrap();
+        let keypair = Ed25519KeyPair::from_pkcs8(pkcs8.as_ref()).unwrap();
+        let public_key = keypair.public_key().as_ref().to_vec();
+        (keypair, public_key)
+    }
+
+    /// Helper: create a SigningConfig from raw public key bytes
+    fn test_signing_config(public_key: &[u8]) -> crate::signing::SigningConfig {
+        use ring::signature::{self, UnparsedPublicKey};
+        crate::signing::SigningConfig {
+            public_keys: vec![(
+                "test-key".to_string(),
+                UnparsedPublicKey::new(&signature::ED25519, public_key.to_vec()),
+            )],
+        }
+    }
+
+    /// Helper: sign a request and return headers with signature
+    fn sign_test_request(
+        keypair: &ring::signature::Ed25519KeyPair,
+        method: &str,
+        path: &str,
+        body: &[u8],
+        nonce: &str,
+    ) -> Vec<(&'static str, String)> {
+        use std::time::{SystemTime, UNIX_EPOCH};
+        let timestamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64;
+        let digest = crate::signing::compute_content_digest(body);
+        let canonical = crate::signing::build_canonical_string(
+            method, path, &digest, &timestamp.to_string(), nonce,
+        );
+        let sig = keypair.sign(canonical.as_bytes());
+        let sig_b64 = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, sig.as_ref());
+        vec![
+            ("x-gap-timestamp", timestamp.to_string()),
+            ("x-gap-nonce", nonce.to_string()),
+            ("x-gap-signature", sig_b64),
+        ]
+    }
+
+    #[tokio::test]
+    async fn test_signing_disabled_passes_through() {
+        // When signing_config is None, all requests should pass through
+        let db = create_test_db().await;
+        let state = ApiState::new(9443, 9080, db, Arc::new(TokenCache::new()));
+        // signing_config defaults to None
+        assert!(state.signing_config.is_none());
+        let app = create_router(state);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/status")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn test_signing_enabled_status_exempt() {
+        // /status should be exempt from signing even when signing is enabled
+        let db = create_test_db().await;
+        let (_, pub_key) = test_signing_keypair();
+        let mut state = ApiState::new(9443, 9080, db, Arc::new(TokenCache::new()));
+        state.signing_config = Some(Arc::new(test_signing_config(&pub_key)));
+        let app = create_router(state);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/status")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn test_signing_enabled_init_exempt() {
+        // /init should be exempt from signing even when signing is enabled
+        let db = create_test_db().await;
+        let (_, pub_key) = test_signing_keypair();
+        let mut state = ApiState::new(9443, 9080, db, Arc::new(TokenCache::new()));
+        state.signing_config = Some(Arc::new(test_signing_config(&pub_key)));
+        let app = create_router(state);
+
+        // /init requires a POST with password; it won't succeed but it should
+        // NOT be rejected with 401 Unauthorized (signing). It should get past
+        // the signing middleware and fail with a different status (400 bad request
+        // for missing body, etc.)
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/init")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"password":"test"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        // Should NOT be 401 — the signing middleware should let it through
+        assert_ne!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn test_signing_enabled_rejects_unsigned_request() {
+        // An unsigned request to a non-exempt endpoint should be rejected with 401
+        let db = create_test_db().await;
+        let (_, pub_key) = test_signing_keypair();
+        let mut state = ApiState::new(9443, 9080, db, Arc::new(TokenCache::new()));
+        state.signing_config = Some(Arc::new(test_signing_config(&pub_key)));
+        let app = create_router(state);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/tokens")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        let body_bytes = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let body_str = String::from_utf8_lossy(&body_bytes);
+        assert!(body_str.contains("Signature verification failed"));
+    }
+
+    #[tokio::test]
+    async fn test_signing_enabled_accepts_valid_signature() {
+        // A properly signed request should pass through the middleware
+        let db = create_test_db().await;
+        let (keypair, pub_key) = test_signing_keypair();
+        let mut state = ApiState::new(9443, 9080, Arc::clone(&db), Arc::new(TokenCache::new()));
+        state.signing_config = Some(Arc::new(test_signing_config(&pub_key)));
+
+        // Set up auth so the endpoint itself doesn't reject us
+        let password = setup_auth(&state).await;
+        let app = create_router(state);
+
+        let body = b"";
+        let headers = sign_test_request(&keypair, "GET", "/tokens", body, "nonce-tokens-1");
+
+        let mut req = Request::builder()
+            .uri("/tokens")
+            .header("Authorization", format!("Bearer {}", password));
+
+        for (name, value) in &headers {
+            req = req.header(*name, value.as_str());
+        }
+
+        let response = app
+            .oneshot(req.body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+
+        let status = response.status();
+        let body_bytes = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let body_str = String::from_utf8_lossy(&body_bytes);
+
+        // Should get past signing middleware — may be 200 OK (tokens list)
+        // If 401, check it's from auth (not signing)
+        if status == StatusCode::UNAUTHORIZED {
+            assert!(!body_str.contains("Signature verification failed"),
+                "Signing middleware rejected a valid signature: {}", body_str);
+        }
+        assert_eq!(status, StatusCode::OK, "Expected OK, got {}: {}", status, body_str);
     }
 }

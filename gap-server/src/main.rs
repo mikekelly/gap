@@ -43,6 +43,10 @@ struct Args {
     /// Address to bind proxy and API (use 0.0.0.0 for Docker/network access)
     #[arg(long, default_value = "127.0.0.1", global = true)]
     bind_address: String,
+
+    /// Path to Ed25519 public key PEM file for request signing verification
+    #[arg(long, global = true)]
+    signing_key: Option<String>,
 }
 
 #[derive(Subcommand)]
@@ -355,6 +359,34 @@ async fn main() -> anyhow::Result<()> {
     server_config.alpn_protocols = vec![b"h2".to_vec(), b"http/1.1".to_vec()];
     let tls_config = axum_server::tls_rustls::RustlsConfig::from_config(Arc::new(server_config));
 
+    // Load signing config if a public key path is provided (CLI arg or env var)
+    let signing_key_path = args.signing_key.clone()
+        .or_else(|| std::env::var("GAP_SIGNING_PUBLIC_KEY").ok());
+    let signing_config = if let Some(key_path) = &signing_key_path {
+        let pem_bytes = std::fs::read(key_path)
+            .map_err(|e| anyhow::anyhow!("Failed to read signing key file '{}': {}", key_path, e))?;
+        let (key_id, public_key) = crate::signing::load_public_key_pem(&pem_bytes)?;
+        tracing::info!("Signing verification enabled with key: {}", key_id);
+        Some(Arc::new(crate::signing::SigningConfig {
+            public_keys: vec![(key_id, public_key)],
+        }))
+    } else {
+        None
+    };
+
+    // Create nonce cache for replay protection and spawn cleanup task
+    let nonce_cache = Arc::new(crate::signing::NonceCache::new());
+    {
+        let nonce_cache = Arc::clone(&nonce_cache);
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(std::time::Duration::from_secs(60));
+            loop {
+                interval.tick().await;
+                nonce_cache.cleanup(std::time::Duration::from_secs(300));
+            }
+        });
+    }
+
     // Create API state with database, activity broadcast, and shared token cache
     let mut api_state = api::ApiState::new(
         config.proxy_port,
@@ -364,6 +396,8 @@ async fn main() -> anyhow::Result<()> {
     );
     api_state.activity_tx = Some(activity_tx);
     api_state.management_tx = Some(management_tx);
+    api_state.signing_config = signing_config;
+    api_state.nonce_cache = nonce_cache;
 
     // Load persisted password hash from database (if server was previously initialized)
     if let Ok(Some(hash)) = db.get_password_hash().await {
