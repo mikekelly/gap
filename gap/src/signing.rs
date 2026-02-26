@@ -1,7 +1,7 @@
-//! Client-side Ed25519 request signing.
+//! Client-side Ed25519 request signing (RFC 9421 HTTP Message Signatures).
 //!
 //! Signs outgoing management API requests with an Ed25519 private key.
-//! The canonical string format and content digest computation MUST match
+//! The signature base and content digest computation MUST match
 //! the server's implementation in `gap-server/src/signing.rs`.
 
 use base64::Engine;
@@ -9,34 +9,46 @@ use ring::signature::{Ed25519KeyPair, KeyPair};
 use sha2::{Digest, Sha256};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-/// Headers produced by signing a request.
+/// Headers produced by signing a request (RFC 9421 format).
 pub struct SignedHeaders {
-    pub timestamp: String,
-    pub nonce: String,
-    pub signature: String,
-    pub key_id: String,
+    pub content_digest: String,  // "sha-256=:BASE64:"
+    pub signature_input: String, // "sig1=(...);created=...;nonce=...;keyid=...;alg=\"ed25519\""
+    pub signature: String,       // "sig1=:BASE64:"
 }
 
-/// Build the canonical string for signing (must match server's format).
+/// Build the RFC 9421 signature params string.
+///
+/// The covered components are always `("@method" "@path" "content-digest")`.
+///
+/// Returns a string like:
+/// `("@method" "@path" "content-digest");created=1709000000;nonce="abc123";keyid="6a3b42c10443f618";alg="ed25519"`
+pub fn build_signature_params(created: i64, nonce: &str, keyid: &str) -> String {
+    format!(
+        "(\"@method\" \"@path\" \"content-digest\");created={};nonce=\"{}\";keyid=\"{}\";alg=\"ed25519\"",
+        created, nonce, keyid
+    )
+}
+
+/// Build the RFC 9421 signature base (the string that gets signed).
 ///
 /// Format:
 /// ```text
-/// @method: POST
-/// @path: /plugins
-/// content-digest: sha-256=:BASE64_HASH:
-/// x-gap-timestamp: 1709000000
-/// x-gap-nonce: abc123
+/// "@method": POST
+/// "@path": /plugins
+/// "content-digest": sha-256=:BASE64:
+/// "@signature-params": ("@method" "@path" "content-digest");created=...;nonce="...";keyid="...";alg="ed25519"
 /// ```
-pub fn build_canonical_string(
+///
+/// Each line is `"component-name": value`, joined by `\n`.
+pub fn build_signature_base(
     method: &str,
     path: &str,
     content_digest: &str,
-    timestamp: &str,
-    nonce: &str,
+    signature_params: &str,
 ) -> String {
     format!(
-        "@method: {}\n@path: {}\ncontent-digest: {}\nx-gap-timestamp: {}\nx-gap-nonce: {}",
-        method, path, content_digest, timestamp, nonce
+        "\"@method\": {}\n\"@path\": {}\n\"content-digest\": {}\n\"@signature-params\": {}",
+        method, path, content_digest, signature_params
     )
 }
 
@@ -53,7 +65,7 @@ pub fn compute_content_digest(body: &[u8]) -> String {
 
 /// Sign a request and return the headers to attach.
 ///
-/// Computes the content digest, builds the canonical string, signs it
+/// Computes the content digest, builds the RFC 9421 signature base, signs it
 /// with the Ed25519 keypair, and returns all required headers.
 pub fn sign_request(
     keypair: &Ed25519KeyPair,
@@ -64,26 +76,26 @@ pub fn sign_request(
     let timestamp = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap()
-        .as_secs()
-        .to_string();
+        .as_secs() as i64;
     let nonce = generate_nonce();
-    let digest = compute_content_digest(body);
-    let canonical = build_canonical_string(method, path, &digest, &timestamp, &nonce);
-    let signature = keypair.sign(canonical.as_bytes());
-    let sig_b64 = base64::engine::general_purpose::STANDARD.encode(signature.as_ref());
+    let content_digest = compute_content_digest(body);
 
-    // Key ID: truncated SHA-256 hash of the raw public key bytes
+    // Key ID: truncated SHA-256 hash of raw public key bytes
     let pub_key_bytes = keypair.public_key().as_ref();
     let mut hasher = Sha256::new();
     hasher.update(pub_key_bytes);
     let key_hash = hasher.finalize();
     let key_id = hex::encode(&key_hash[..8]);
 
+    let sig_params = build_signature_params(timestamp, &nonce, &key_id);
+    let sig_base = build_signature_base(method, path, &content_digest, &sig_params);
+    let signature = keypair.sign(sig_base.as_bytes());
+    let sig_b64 = base64::engine::general_purpose::STANDARD.encode(signature.as_ref());
+
     SignedHeaders {
-        timestamp,
-        nonce,
-        signature: sig_b64,
-        key_id,
+        content_digest,
+        signature_input: format!("sig1={}", sig_params),
+        signature: format!("sig1=:{}:", sig_b64),
     }
 }
 
@@ -141,17 +153,30 @@ mod tests {
     }
 
     #[test]
-    fn test_build_canonical_string_format() {
-        let result = build_canonical_string("POST", "/plugins", "sha-256=:abc123:", "1709000000", "nonce1");
-        let expected = "@method: POST\n@path: /plugins\ncontent-digest: sha-256=:abc123:\nx-gap-timestamp: 1709000000\nx-gap-nonce: nonce1";
-        assert_eq!(result, expected);
+    fn test_build_signature_params() {
+        let params = build_signature_params(1709000000, "abc123", "6a3b42c10443f618");
+        assert_eq!(
+            params,
+            "(\"@method\" \"@path\" \"content-digest\");created=1709000000;nonce=\"abc123\";keyid=\"6a3b42c10443f618\";alg=\"ed25519\""
+        );
     }
 
     #[test]
-    fn test_build_canonical_string_get() {
-        let result = build_canonical_string("GET", "/tokens", "sha-256=:xyz:", "123", "n");
-        assert!(result.starts_with("@method: GET\n"));
-        assert!(result.contains("@path: /tokens\n"));
+    fn test_build_signature_base() {
+        let params = build_signature_params(1709000000, "abc123", "6a3b42c10443f618");
+        let base = build_signature_base("POST", "/plugins", "sha-256=:dGVzdA==:", &params);
+        let expected = "\"@method\": POST\n\"@path\": /plugins\n\"content-digest\": sha-256=:dGVzdA==:\n\"@signature-params\": (\"@method\" \"@path\" \"content-digest\");created=1709000000;nonce=\"abc123\";keyid=\"6a3b42c10443f618\";alg=\"ed25519\"";
+        assert_eq!(base, expected);
+    }
+
+    #[test]
+    fn test_build_signature_base_get() {
+        let params = build_signature_params(123, "n", "keyabc");
+        let base = build_signature_base("GET", "/tokens", "sha-256=:xyz:", &params);
+        assert!(base.starts_with("\"@method\": GET\n"));
+        assert!(base.contains("\"@path\": /tokens\n"));
+        assert!(base.contains("\"content-digest\": sha-256=:xyz:\n"));
+        assert!(base.contains("\"@signature-params\":"));
     }
 
     #[test]
@@ -183,7 +208,6 @@ mod tests {
     #[test]
     fn test_compute_content_digest_matches_server() {
         // Verify our digest matches what the server would compute
-        // by checking a known value
         let body = b"the quick brown fox";
         let digest = compute_content_digest(body);
 
@@ -202,23 +226,39 @@ mod tests {
         let keypair = test_keypair();
         let headers = sign_request(&keypair, "POST", "/plugins", b"body");
 
-        // Timestamp should be a valid number
-        let ts: u64 = headers.timestamp.parse().expect("timestamp should be a number");
-        assert!(ts > 0);
+        // content_digest should have standard format
+        assert!(headers.content_digest.starts_with("sha-256=:"));
+        assert!(headers.content_digest.ends_with(':'));
 
-        // Nonce should be 32 hex chars (16 bytes)
-        assert_eq!(headers.nonce.len(), 32);
-        assert!(headers.nonce.chars().all(|c| c.is_ascii_hexdigit()));
+        // signature_input should start with "sig1=("
+        assert!(
+            headers.signature_input.starts_with("sig1=("),
+            "signature_input should start with sig1=(, got: {}",
+            headers.signature_input
+        );
+        assert!(headers.signature_input.contains(";created="));
+        assert!(headers.signature_input.contains(";nonce=\""));
+        assert!(headers.signature_input.contains(";keyid=\""));
+        assert!(headers.signature_input.contains(";alg=\"ed25519\""));
 
-        // Signature should be valid base64
+        // signature should be "sig1=:BASE64:"
+        assert!(
+            headers.signature.starts_with("sig1=:"),
+            "signature should start with sig1=:, got: {}",
+            headers.signature
+        );
+        assert!(
+            headers.signature.ends_with(':'),
+            "signature should end with :, got: {}",
+            headers.signature
+        );
+
+        // Verify the inner base64 is valid and decodes to 64 bytes (Ed25519 sig)
+        let inner = &headers.signature["sig1=:".len()..headers.signature.len() - 1];
         let sig_bytes = base64::engine::general_purpose::STANDARD
-            .decode(&headers.signature)
-            .expect("signature should be valid base64");
+            .decode(inner)
+            .expect("inner signature should be valid base64");
         assert_eq!(sig_bytes.len(), 64, "Ed25519 signature should be 64 bytes");
-
-        // Key ID should be 16 hex chars (8 bytes of SHA-256 hash)
-        assert_eq!(headers.key_id.len(), 16);
-        assert!(headers.key_id.chars().all(|c| c.is_ascii_hexdigit()));
     }
 
     #[test]
@@ -226,35 +266,44 @@ mod tests {
         let keypair = test_keypair();
         let headers = sign_request(&keypair, "GET", "/status", b"");
 
-        // Verify key_id is derived from the public key correctly
+        // Verify key_id is embedded in signature_input and matches public key
         let pub_key_bytes = keypair.public_key().as_ref();
         let mut hasher = Sha256::new();
         hasher.update(pub_key_bytes);
         let key_hash = hasher.finalize();
         let expected_key_id = hex::encode(&key_hash[..8]);
 
-        assert_eq!(headers.key_id, expected_key_id);
+        let keyid_needle = format!(";keyid=\"{}\"", expected_key_id);
+        assert!(
+            headers.signature_input.contains(&keyid_needle),
+            "signature_input should contain keyid={}, got: {}",
+            expected_key_id,
+            headers.signature_input
+        );
     }
 
     #[test]
     fn test_sign_request_signature_verifiable() {
         // The signature produced by sign_request should be verifiable
-        // using the server's verification logic
+        // using the server's verification logic (RFC 9421 format)
         let keypair = test_keypair();
         let body = b"test body";
         let headers = sign_request(&keypair, "POST", "/test", body);
 
+        // Parse signature_input to extract params
+        let sig_params_str = headers
+            .signature_input
+            .strip_prefix("sig1=")
+            .expect("should have sig1= prefix");
+
         // Reconstruct what the server would do to verify
         let digest = compute_content_digest(body);
-        let canonical = build_canonical_string(
-            "POST",
-            "/test",
-            &digest,
-            &headers.timestamp,
-            &headers.nonce,
-        );
+        let sig_base = build_signature_base("POST", "/test", &digest, sig_params_str);
+
+        // Extract raw signature bytes from "sig1=:BASE64:"
+        let inner = &headers.signature["sig1=:".len()..headers.signature.len() - 1];
         let sig_bytes = base64::engine::general_purpose::STANDARD
-            .decode(&headers.signature)
+            .decode(inner)
             .unwrap();
 
         // Verify using ring's public key verification
@@ -263,7 +312,7 @@ mod tests {
             keypair.public_key().as_ref(),
         );
         pub_key
-            .verify(canonical.as_bytes(), &sig_bytes)
+            .verify(sig_base.as_bytes(), &sig_bytes)
             .expect("Signature should be verifiable with the corresponding public key");
     }
 
@@ -343,10 +392,12 @@ mod tests {
         let keypair = load_private_key_pem(pem.as_bytes()).unwrap();
         let headers = sign_request(&keypair, "POST", "/test", b"body");
 
-        // Verify signature is valid
-        assert!(!headers.signature.is_empty());
+        // Verify signature is in correct format and valid
+        assert!(headers.signature.starts_with("sig1=:"));
+        assert!(headers.signature.ends_with(':'));
+        let inner = &headers.signature["sig1=:".len()..headers.signature.len() - 1];
         let sig_bytes = base64::engine::general_purpose::STANDARD
-            .decode(&headers.signature)
+            .decode(inner)
             .unwrap();
         assert_eq!(sig_bytes.len(), 64);
     }

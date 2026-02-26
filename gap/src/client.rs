@@ -131,10 +131,9 @@ impl ApiClient {
         if let Some(keypair) = &self.signing_keypair {
             let signed = crate::signing::sign_request(keypair, "POST", &full_path, &body_bytes);
             request = request
-                .header("x-gap-timestamp", &signed.timestamp)
-                .header("x-gap-nonce", &signed.nonce)
-                .header("x-gap-signature", &signed.signature)
-                .header("x-gap-key-id", &signed.key_id);
+                .header("content-digest", &signed.content_digest)
+                .header("signature-input", &signed.signature_input)
+                .header("signature", &signed.signature);
         }
 
         let response = request
@@ -171,10 +170,9 @@ impl ApiClient {
         if let Some(keypair) = &self.signing_keypair {
             let signed = crate::signing::sign_request(keypair, "GET", &full_path, b"");
             request = request
-                .header("x-gap-timestamp", &signed.timestamp)
-                .header("x-gap-nonce", &signed.nonce)
-                .header("x-gap-signature", &signed.signature)
-                .header("x-gap-key-id", &signed.key_id);
+                .header("content-digest", &signed.content_digest)
+                .header("signature-input", &signed.signature_input)
+                .header("signature", &signed.signature);
         }
 
         let response = request
@@ -201,10 +199,9 @@ impl ApiClient {
         if let Some(keypair) = &self.signing_keypair {
             let signed = crate::signing::sign_request(keypair, "DELETE", &full_path, b"");
             request = request
-                .header("x-gap-timestamp", &signed.timestamp)
-                .header("x-gap-nonce", &signed.nonce)
-                .header("x-gap-signature", &signed.signature)
-                .header("x-gap-key-id", &signed.key_id);
+                .header("content-digest", &signed.content_digest)
+                .header("signature-input", &signed.signature_input)
+                .header("signature", &signed.signature);
         }
 
         let response = request
