@@ -27,6 +27,32 @@ cargo run --bin gap  # Run CLI
 cargo run --bin gap-server  # Run server
 ```
 
+## Testing
+
+**Run everything:**
+```bash
+bin/all-tests
+```
+
+**Quick local check (no Docker):**
+```bash
+bin/all-tests --no-docker   # Rust + Go unit tests only (~17s)
+```
+
+**Individual suites:**
+```bash
+cargo test --workspace                                                            # Rust unit/integration
+cd management-go && go test ./...                                                 # Go unit
+docker compose --profile test up --build --abort-on-container-exit               # Docker bash (password auth)
+docker compose --profile test-signing up --build --abort-on-container-exit       # Docker bash (signing)
+docker compose --profile go-test up --build --abort-on-container-exit            # Docker Go (password auth)
+docker compose --profile go-test-signing up --build --abort-on-container-exit    # Docker Go (signing)
+```
+
+**Flags for `bin/all-tests`:** `--no-docker`, `--rust-only`, `--go-only`, `--docker-only`
+
+**Note:** Docker tests require `GAP_ENCRYPTION_KEY` to be set — `bin/all-tests` generates one automatically. If running docker suites manually, export one: `export GAP_ENCRYPTION_KEY=$(openssl rand -hex 32)`
+
 ## Top 5 Critical Gotchas
 
 1. **Wildcard matching is single-level only**: `*.s3.amazonaws.com` matches `bucket.s3.amazonaws.com` but rejects both `s3.amazonaws.com` (no subdomain) and `evil.com.s3.amazonaws.com` (multiple levels). This is a security feature.

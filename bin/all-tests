@@ -1,0 +1,159 @@
+#!/usr/bin/env bash
+# Run every test suite in the GAP project.
+#
+# Usage:
+#   bin/all-tests                # run everything
+#   bin/all-tests --no-docker    # skip Docker tests (Rust + Go only)
+#   bin/all-tests --rust-only    # only run Rust tests
+#   bin/all-tests --go-only      # only run Go tests
+#   bin/all-tests --docker-only  # only run Docker tests
+
+set -uo pipefail
+
+# ── Colours ───────────────────────────────────────────────────────────────────
+if [ -t 1 ]; then
+    RED='\033[0;31m'
+    GREEN='\033[0;32m'
+    CYAN='\033[0;36m'
+    BOLD='\033[1m'
+    NC='\033[0m'
+else
+    RED='' GREEN='' CYAN='' BOLD='' NC=''
+fi
+
+header() {
+    echo -e "\n${CYAN}${BOLD}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+    echo -e "${CYAN}${BOLD}  $*${NC}"
+    echo -e "${CYAN}${BOLD}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+}
+
+# ── Parse flags ───────────────────────────────────────────────────────────────
+RUN_RUST=true
+RUN_GO=true
+RUN_DOCKER=true
+
+for arg in "$@"; do
+    case "$arg" in
+        --no-docker)
+            RUN_DOCKER=false
+            ;;
+        --rust-only)
+            RUN_RUST=true; RUN_GO=false; RUN_DOCKER=false
+            ;;
+        --go-only)
+            RUN_RUST=false; RUN_GO=true; RUN_DOCKER=false
+            ;;
+        --docker-only)
+            RUN_RUST=false; RUN_GO=false; RUN_DOCKER=true
+            ;;
+        -h|--help)
+            sed -n '2,7p' "$0"
+            exit 0
+            ;;
+        *)
+            echo "Unknown flag: $arg" >&2
+            echo "Run 'bin/all-tests --help' for usage." >&2
+            exit 1
+            ;;
+    esac
+done
+
+# ── Resolve repo root ─────────────────────────────────────────────────────────
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(dirname "$SCRIPT_DIR")"
+cd "$REPO_ROOT"
+
+# ── Encryption key (required by Docker tests) ─────────────────────────────────
+# Docker containers run Linux (no macOS keychain), so supply a random key.
+# The same key is reused across all Docker suites in this run.
+if [ "$RUN_DOCKER" = true ]; then
+    export GAP_ENCRYPTION_KEY
+    GAP_ENCRYPTION_KEY="$(openssl rand -hex 32)"
+fi
+
+# ── Result tracking ───────────────────────────────────────────────────────────
+PASSED=()
+FAILED=()
+
+print_summary() {
+    echo ""
+    echo -e "${BOLD}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+    echo -e "${BOLD}  Summary${NC}"
+    echo -e "${BOLD}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+    for s in "${PASSED[@]+"${PASSED[@]}"}"; do
+        echo -e "  ${GREEN}PASS${NC}  $s"
+    done
+    for s in "${FAILED[@]+"${FAILED[@]}"}"; do
+        echo -e "  ${RED}FAIL${NC}  $s"
+    done
+    echo ""
+    if [ "${#FAILED[@]}" -eq 0 ]; then
+        echo -e "${GREEN}${BOLD}  All suites passed.${NC}"
+    else
+        echo -e "${RED}${BOLD}  ${#FAILED[@]} suite(s) failed.${NC}"
+    fi
+    echo ""
+}
+
+run_suite() {
+    local name="$1"
+    shift
+    header "$name"
+    if "$@"; then
+        echo -e "\n${GREEN}${BOLD}  PASS${NC}  $name"
+        PASSED+=("$name")
+    else
+        echo -e "\n${RED}${BOLD}  FAIL${NC}  $name"
+        FAILED+=("$name")
+        print_summary
+        exit 1
+    fi
+}
+
+# ── Docker helper: bring up a profile and tear it down after ──────────────────
+docker_suite() {
+    local profile="$1"
+    local exit_from="$2"
+    local rc=0
+
+    # Clean up any stale containers from a previous run
+    docker compose --profile "$profile" down -v 2>/dev/null || true
+
+    docker compose --profile "$profile" up \
+        --build \
+        --abort-on-container-exit \
+        --exit-code-from "$exit_from" || rc=$?
+
+    docker compose --profile "$profile" down -v 2>/dev/null || true
+    return $rc
+}
+
+# ── Suite 1: Rust unit / integration tests ────────────────────────────────────
+if [ "$RUN_RUST" = true ]; then
+    run_suite "Rust: cargo test --workspace" \
+        cargo test --workspace
+fi
+
+# ── Suite 2: Go unit tests ────────────────────────────────────────────────────
+if [ "$RUN_GO" = true ]; then
+    run_suite "Go: go test ./... (management-go)" \
+        bash -c "cd '$REPO_ROOT/management-go' && go test ./..."
+fi
+
+# ── Suite 3: Docker bash integration tests (password auth) ────────────────────
+if [ "$RUN_DOCKER" = true ]; then
+    run_suite "Docker: bash integration tests (password auth)" \
+        docker_suite test test-runner
+
+    run_suite "Docker: bash integration tests (signing)" \
+        docker_suite test-signing test-runner-signing
+
+    run_suite "Docker: Go integration tests (password auth)" \
+        docker_suite go-test go-test-runner
+
+    run_suite "Docker: Go integration tests (signing)" \
+        docker_suite go-test-signing go-test-runner-signing
+fi
+
+# ── Final summary ─────────────────────────────────────────────────────────────
+print_summary

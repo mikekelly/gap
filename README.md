@@ -417,8 +417,52 @@ Contributions welcome! See the codebase structure:
 - `gap-server/` - Server daemon
 - `gap/` - CLI tool
 
+### Testing
+
+Run every test suite (Rust, Go, and all Docker integration tests):
+
 ```bash
-cargo test        # Run tests
+bin/all-tests
+```
+
+Skip the Docker tests for a fast local feedback loop:
+
+```bash
+bin/all-tests --no-docker
+```
+
+Available flags:
+
+| Flag | Description |
+|------|-------------|
+| `--no-docker` | Skip all Docker tests; run Rust + Go only |
+| `--rust-only` | Only run Rust unit/integration tests |
+| `--go-only` | Only run Go unit tests (`management-go`) |
+| `--docker-only` | Only run Docker integration tests |
+
+Individual test suites:
+
+```bash
+# Rust unit + integration tests
+cargo test --workspace
+
+# Go unit tests
+cd management-go && go test ./...
+
+# Docker bash integration tests (password auth)
+docker compose --profile test up --build --abort-on-container-exit
+
+# Docker bash integration tests (request signing)
+docker compose --profile test-signing up --build --abort-on-container-exit
+
+# Docker Go integration tests (password auth)
+docker compose --profile go-test up --build --abort-on-container-exit
+
+# Docker Go integration tests (request signing)
+docker compose --profile go-test-signing up --build --abort-on-container-exit
+```
+
+```bash
 cargo clippy      # Lint
 ```
 
