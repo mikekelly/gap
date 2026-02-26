@@ -28,35 +28,61 @@ use tracing::{debug, error, info, Instrument};
 
 /// In-memory cache of validated tokens to avoid DB lookups on every request.
 /// Shared between proxy and API so revocations take effect immediately.
+///
+/// In horizontal deployment mode, caching is disabled (`new_disabled()`) because
+/// multiple instances share a Postgres database and cached tokens could become stale.
 #[derive(Debug)]
 pub struct TokenCache {
     inner: RwLock<HashMap<String, ValidatedToken>>,
+    disabled: bool,
 }
 
 impl TokenCache {
     pub fn new() -> Self {
         Self {
             inner: RwLock::new(HashMap::new()),
+            disabled: false,
+        }
+    }
+
+    /// Create a disabled cache where all operations are no-ops.
+    /// Used in horizontal mode where multiple instances share a database.
+    pub fn new_disabled() -> Self {
+        Self {
+            inner: RwLock::new(HashMap::new()),
+            disabled: true,
         }
     }
 
     /// Look up a token by its full value. Returns cloned ValidatedToken if cached.
     pub fn get(&self, token_value: &str) -> Option<ValidatedToken> {
+        if self.disabled {
+            return None;
+        }
         self.inner.read().unwrap().get(token_value).cloned()
     }
 
     /// Cache a validated token.
     pub fn insert(&self, token_value: String, token: ValidatedToken) {
+        if self.disabled {
+            return;
+        }
         self.inner.write().unwrap().insert(token_value, token);
     }
 
     /// Remove a specific token from cache.
     pub fn invalidate(&self, token_value: &str) {
+        if self.disabled {
+            return;
+        }
         self.inner.write().unwrap().remove(token_value);
     }
 
     /// Clear the entire cache (used on revoke-by-prefix since we don't know the full value).
     pub fn clear(&self) {
+        if self.disabled {
+            return;
+        }
         self.inner.write().unwrap().clear();
     }
 }

@@ -17,6 +17,19 @@ use gap_lib::{database::GapDatabase, key_provider::KeyProvider, tls::Certificate
 use clap::{Parser, Subcommand};
 use std::sync::Arc;
 
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum DeploymentMode {
+    Single,
+    Horizontal,
+}
+
+fn parse_deployment_mode() -> DeploymentMode {
+    match std::env::var("GAP_DEPLOYMENT_MODE").unwrap_or_default().as_str() {
+        "horizontal" => DeploymentMode::Horizontal,
+        _ => DeploymentMode::Single,
+    }
+}
+
 #[derive(Parser)]
 #[command(name = "gap-server")]
 #[command(author, version, about = "Gated Agent Proxy Server", long_about = None)]
@@ -258,59 +271,89 @@ async fn main() -> anyhow::Result<()> {
         tracing::info!("Running in bootstrap mode — CA and encryption key will be auto-generated if not provided");
     }
 
-    // Open database
-    let db_path = {
-        std::fs::create_dir_all(&data_dir)?;
-        data_dir.join("gap.db")
-    };
-
-    // Log database file state before open attempt
-    let db_path_check = db_path.clone();
-    if db_path_check.exists() {
-        if let Ok(metadata) = std::fs::metadata(&db_path_check) {
-            tracing::info!(
-                path = %db_path_check.display(),
-                size_bytes = metadata.len(),
-                modified = ?metadata.modified().ok(),
-                "Existing database file found"
-            );
-        }
-    } else {
-        tracing::info!(path = %db_path_check.display(), "No existing database file — will create new");
+    // Detect deployment mode (single vs horizontal)
+    let deployment_mode = parse_deployment_mode();
+    if deployment_mode == DeploymentMode::Horizontal {
+        tracing::info!("Running in horizontal deployment mode");
     }
 
-    let db_path_str = db_path.to_str().unwrap();
+    // Open database
+    let db = if deployment_mode == DeploymentMode::Horizontal {
+        // Horizontal mode: use Postgres
+        let state_store = std::env::var("GAP_STATE_STORE").unwrap_or_default();
+        if state_store != "postgres" {
+            anyhow::bail!("Horizontal mode requires GAP_STATE_STORE=postgres");
+        }
+        let postgres_url = std::env::var("GAP_POSTGRES_URL")
+            .map_err(|_| anyhow::anyhow!("Horizontal mode requires GAP_POSTGRES_URL"))?;
+        let schema = std::env::var("GAP_POSTGRES_SCHEMA").unwrap_or_else(|_| "gap".to_string());
+        let pool_max: u32 = std::env::var("GAP_POSTGRES_POOL_MAX")
+            .unwrap_or_else(|_| "20".to_string())
+            .parse()
+            .map_err(|_| anyhow::anyhow!("GAP_POSTGRES_POOL_MAX must be a number"))?;
+        let pool_min: u32 = std::env::var("GAP_POSTGRES_POOL_MIN")
+            .unwrap_or_else(|_| "2".to_string())
+            .parse()
+            .map_err(|_| anyhow::anyhow!("GAP_POSTGRES_POOL_MIN must be a number"))?;
 
-    // Key provider selection precedence:
-    // 1. GAP_ENCRYPTION_KEY env var -> EnvKeyProvider -> encrypted DB
-    // 2. GAP_DISABLE_ENCRYPTION=1 -> unencrypted DB (dev/testing only)
-    // 3. macOS (default) -> KeychainKeyProvider -> encrypted DB
-    // 4. None of the above -> error (no encryption key available)
-    //
-    // NOTE: --data-dir / GAP_DATA_DIR control DB file path only, not encryption.
-    let db = match select_db_mode() {
-        DbMode::EnvKey => {
-            let provider = gap_lib::EnvKeyProvider;
-            let key = provider.get_key().await?;
-            tracing::info!(key_fingerprint = %key_fingerprint(&key), "Using encryption key from GAP_ENCRYPTION_KEY");
-            Arc::new(GapDatabase::open(db_path_str, &key).await?)
+        tracing::info!(url = %postgres_url, schema = %schema, pool_max, pool_min, "Connecting to Postgres (horizontal mode)");
+        Arc::new(GapDatabase::open_postgres(&postgres_url, &schema, pool_max, pool_min).await?)
+    } else {
+        // Single mode: use libSQL
+        let db_path = {
+            std::fs::create_dir_all(&data_dir)?;
+            data_dir.join("gap.db")
+        };
+
+        // Log database file state before open attempt
+        let db_path_check = db_path.clone();
+        if db_path_check.exists() {
+            if let Ok(metadata) = std::fs::metadata(&db_path_check) {
+                tracing::info!(
+                    path = %db_path_check.display(),
+                    size_bytes = metadata.len(),
+                    modified = ?metadata.modified().ok(),
+                    "Existing database file found"
+                );
+            }
+        } else {
+            tracing::info!(path = %db_path_check.display(), "No existing database file — will create new");
         }
-        DbMode::Unencrypted => {
-            tracing::warn!("Database encryption disabled");
-            Arc::new(GapDatabase::open_unencrypted(db_path_str).await?)
-        }
-        #[cfg(target_os = "macos")]
-        DbMode::Keychain => {
-            let provider = gap_lib::key_provider::KeychainKeyProvider;
-            let key = provider.get_key().await?;
-            tracing::info!(key_fingerprint = %key_fingerprint(&key), "Using encryption key from macOS keychain");
-            Arc::new(GapDatabase::open(db_path_str, &key).await?)
-        }
-        DbMode::Error => {
-            anyhow::bail!("No encryption key available. Set GAP_ENCRYPTION_KEY to provide one.");
-        }
+
+        let db_path_str = db_path.to_str().unwrap();
+
+        // Key provider selection precedence:
+        // 1. GAP_ENCRYPTION_KEY env var -> EnvKeyProvider -> encrypted DB
+        // 2. GAP_DISABLE_ENCRYPTION=1 -> unencrypted DB (dev/testing only)
+        // 3. macOS (default) -> KeychainKeyProvider -> encrypted DB
+        // 4. None of the above -> error (no encryption key available)
+        //
+        // NOTE: --data-dir / GAP_DATA_DIR control DB file path only, not encryption.
+        let db = match select_db_mode() {
+            DbMode::EnvKey => {
+                let provider = gap_lib::EnvKeyProvider;
+                let key = provider.get_key().await?;
+                tracing::info!(key_fingerprint = %key_fingerprint(&key), "Using encryption key from GAP_ENCRYPTION_KEY");
+                Arc::new(GapDatabase::open(db_path_str, &key).await?)
+            }
+            DbMode::Unencrypted => {
+                tracing::warn!("Database encryption disabled");
+                Arc::new(GapDatabase::open_unencrypted(db_path_str).await?)
+            }
+            #[cfg(target_os = "macos")]
+            DbMode::Keychain => {
+                let provider = gap_lib::key_provider::KeychainKeyProvider;
+                let key = provider.get_key().await?;
+                tracing::info!(key_fingerprint = %key_fingerprint(&key), "Using encryption key from macOS keychain");
+                Arc::new(GapDatabase::open(db_path_str, &key).await?)
+            }
+            DbMode::Error => {
+                anyhow::bail!("No encryption key available. Set GAP_ENCRYPTION_KEY to provide one.");
+            }
+        };
+        tracing::info!("Database opened at {}", db_path.display());
+        db
     };
-    tracing::info!("Database opened at {}", db_path.display());
 
     // Load or generate CA certificate
     let ca = load_or_generate_ca(&db).await?;
@@ -331,7 +374,12 @@ async fn main() -> anyhow::Result<()> {
     let resolver = gap_lib::DynamicCertResolver::new(Arc::new(mgmt_ca));
 
     // Shared token cache between proxy and API for immediate revocation
-    let token_cache = Arc::new(TokenCache::new());
+    let token_cache = if deployment_mode == DeploymentMode::Horizontal {
+        tracing::info!("Token cache disabled (horizontal mode)");
+        Arc::new(TokenCache::new_disabled())
+    } else {
+        Arc::new(TokenCache::new())
+    };
 
     // Create ProxyServer with database and activity broadcast
     let mut proxy = ProxyServer::new(
