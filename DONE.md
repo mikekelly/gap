@@ -2,6 +2,22 @@
 
 Shipped work - archive periodically.
 
+## Auth Exclusivity, management-go Update, Docker E2E Tests (2026-02-26)
+
+Made signing and password auth mutually exclusive on the server. Updated management-go client for UUID-based IDs, namespace/scope support, and Ed25519 HTTP signing. Added Docker E2E tests for the signing auth path.
+
+**Changes:**
+- Server auth exclusivity: when `--signing-key` is set, password auth disabled, `POST /init` returns 400, status always returns `initialized: true`
+- management-go UUID migration: all structs/methods use `ID` instead of `Name`, URL paths use `:id` instead of `:name`
+- management-go namespace support: `WithNamespace()`/`WithScope()` options, `buildPath()` prefixing, namespace discovery methods
+- management-go HTTP signing: `WithSigningKey()` option, Ed25519 signing matching server canonical format exactly
+- Docker Compose signing profiles: `test-signing` and `go-test-signing` with Ed25519 test fixtures
+- Bash signing E2E tests: 6 test cases (positive flow + unsigned/wrong-key/expired/init-rejected negatives)
+- Go integration tests: 18 new subtests for signing auth and namespace mode
+- `bin/all-tests` script exercising all test suites, documented in README and AGENT_ORIENTATION.md
+
+**Test counts:** 118 Rust tests, 20+ Go unit tests, 6 bash signing E2E tests, 18 Go integration subtests
+
 ## Crypto Signing E2E & Docker Tests (2026-02-19)
 E2E tests and docker smoke tests for RFC 9421 HTTP Message Signatures (`GAP.crypto.httpSignature()`).
 

@@ -123,7 +123,11 @@ signed_curl() {
     # Sign the canonical string with Ed25519
     # -w 0 prevents base64 line wrapping (Ed25519 sigs are 64 bytes = 88 base64 chars)
     local signature
-    signature=$(printf '%s' "$canonical" | openssl pkeyutl -sign -inkey "$key_file" 2>/dev/null | base64 -w 0)
+    local canonical_file
+    canonical_file=$(mktemp)
+    printf '%s' "$canonical" > "$canonical_file"
+    signature=$(openssl pkeyutl -rawin -sign -inkey "$key_file" -in "$canonical_file" 2>/dev/null | base64 -w 0)
+    rm -f "$canonical_file"
 
     # Compute key-id for this specific key
     local kid
@@ -294,7 +298,10 @@ EXPIRED_HASH=$(printf '%s' "$EXPIRED_BODY" | openssl dgst -sha256 -binary | base
 EXPIRED_DIGEST="sha-256=:${EXPIRED_HASH}:"
 EXPIRED_CANONICAL=$(printf '@method: %s\n@path: %s\ncontent-digest: %s\nx-gap-timestamp: %s\nx-gap-nonce: %s' \
     "GET" "/tokens" "$EXPIRED_DIGEST" "$EXPIRED_TS" "$EXPIRED_NONCE")
-EXPIRED_SIG=$(printf '%s' "$EXPIRED_CANONICAL" | openssl pkeyutl -sign -inkey "$SIGNING_KEY" 2>/dev/null | base64 -w 0)
+EXPIRED_CANONICAL_FILE=$(mktemp)
+printf '%s' "$EXPIRED_CANONICAL" > "$EXPIRED_CANONICAL_FILE"
+EXPIRED_SIG=$(openssl pkeyutl -rawin -sign -inkey "$SIGNING_KEY" -in "$EXPIRED_CANONICAL_FILE" 2>/dev/null | base64 -w 0)
+rm -f "$EXPIRED_CANONICAL_FILE"
 
 EXPIRED_STATUS=$(curl -ks -o /dev/null -w "%{http_code}" -X GET "$GAP_SERVER_URL/tokens" \
     -H "X-Gap-Timestamp: $EXPIRED_TS" \

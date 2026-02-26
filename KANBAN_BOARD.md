@@ -2,6 +2,7 @@
 
 ## Doing
 <!-- Currently being worked on -->
+<!-- Auth exclusivity + management-go + signing E2E completed 2026-02-26 → DONE.md -->
 
 ## Ready
 <!-- Designed + planned, can be picked up -->
