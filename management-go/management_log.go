@@ -11,7 +11,7 @@ import (
 // GET /management-log?operation=...&resource_type=...&resource_id=...&success=...&since=...&limit=...
 // Pass nil for no filters.
 func (c *Client) QueryManagementLog(ctx context.Context, query *ManagementLogQuery) (*ManagementLogResponse, error) {
-	path := "/management-log"
+	path := c.buildPath("/management-log")
 	if query != nil {
 		params := url.Values{}
 		if query.Operation != nil {
@@ -55,7 +55,7 @@ func (c *Client) QueryManagementLog(ctx context.Context, query *ManagementLogQue
 // GET /management-log/stream
 // The returned EventStream must be closed by the caller.
 func (c *Client) StreamManagementLog(ctx context.Context) (*EventStream[ManagementLogEntry], error) {
-	resp, err := c.doSSE(ctx, "/management-log/stream")
+	resp, err := c.doSSE(ctx, c.buildPath("/management-log/stream"))
 	if err != nil {
 		return nil, err
 	}

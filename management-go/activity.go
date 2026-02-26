@@ -42,7 +42,7 @@ func (c *Client) QueryActivity(ctx context.Context, query *ActivityQuery) (*Acti
 			path += "?" + encoded
 		}
 	}
-	resp, err := c.doGet(ctx, path)
+	resp, err := c.doGet(ctx, c.buildPath(path))
 	if err != nil {
 		return nil, err
 	}
@@ -56,7 +56,7 @@ func (c *Client) QueryActivity(ctx context.Context, query *ActivityQuery) (*Acti
 // GetRequestDetails returns detailed request/response information for a specific request.
 // GET /activity/:request_id/details
 func (c *Client) GetRequestDetails(ctx context.Context, requestID string) (*RequestDetails, error) {
-	path := "/activity/" + url.PathEscape(requestID) + "/details"
+	path := c.buildPath("/activity/" + url.PathEscape(requestID) + "/details")
 	resp, err := c.doGet(ctx, path)
 	if err != nil {
 		return nil, err
@@ -72,7 +72,7 @@ func (c *Client) GetRequestDetails(ctx context.Context, requestID string) (*Requ
 // GET /activity/stream
 // The returned EventStream must be closed by the caller.
 func (c *Client) StreamActivity(ctx context.Context) (*EventStream[ActivityEntry], error) {
-	resp, err := c.doSSE(ctx, "/activity/stream")
+	resp, err := c.doSSE(ctx, c.buildPath("/activity/stream"))
 	if err != nil {
 		return nil, err
 	}

@@ -257,6 +257,22 @@ type RequestDetails struct {
 	BodyTruncated      bool    `json:"body_truncated"`
 }
 
+// ── Namespace Discovery ───────────────────────────────────────────────────────
+
+// ScopeResources holds the per-resource counts returned by GET /namespaces/{ns}/scopes/{scope}.
+type ScopeResources struct {
+	Plugins    int `json:"plugins"`
+	Tokens     int `json:"tokens"`
+	HeaderSets int `json:"header_sets"`
+}
+
+// ScopeInfoResponse is returned by GET /namespaces/{ns}/scopes/{scope}.
+type ScopeInfoResponse struct {
+	Namespace string         `json:"namespace"`
+	Scope     string         `json:"scope"`
+	Resources ScopeResources `json:"resources"`
+}
+
 // ── Management Log ───────────────────────────────────────────────────────────
 
 // ManagementLogEntry is one audit-log record.
