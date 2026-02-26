@@ -256,6 +256,82 @@ services:
   #     gap-server:
   #       condition: service_healthy
 
+  # PostgreSQL for horizontal deployment mode
+  postgres:
+    image: postgres:16-alpine
+    container_name: gap-postgres
+    environment:
+      POSTGRES_DB: gap
+      POSTGRES_USER: gap
+      POSTGRES_PASSWORD: gap-dev-password
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U gap -d gap"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+    networks:
+      - gap-network
+    profiles:
+      - horizontal
+      - test-horizontal
+
+  # GAP server in horizontal mode (Postgres backend)
+  gap-server-horizontal:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: gap-server-horizontal
+    ports:
+      - "9743:9443"
+      - "9380:9080"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      - RUST_LOG=gap_server=info,gap_lib=info
+      - GAP_DEPLOYMENT_MODE=horizontal
+      - GAP_STATE_STORE=postgres
+      - GAP_POSTGRES_URL=postgres://gap:gap-dev-password@postgres:5432/gap
+      - GAP_POSTGRES_SCHEMA=gap
+      - GAP_POSTGRES_POOL_MAX=10
+      - GAP_POSTGRES_POOL_MIN=2
+      - GAP_NO_BOOTSTRAP=false
+      - GAP_ALLOW_EPHEMERAL=I-understand-secrets-will-be-lost
+    healthcheck:
+      test: ["CMD", "curl", "-fk", "https://localhost:9080/status"]
+      interval: 5s
+      timeout: 3s
+      start_period: 10s
+      retries: 10
+    networks:
+      - gap-network
+    profiles:
+      - horizontal
+      - test-horizontal
+
+  # Smoke test runner for horizontal mode
+  test-runner-horizontal:
+    build:
+      context: .
+      dockerfile: Dockerfile.test-runner
+    container_name: gap-test-runner-horizontal
+    depends_on:
+      gap-server-horizontal:
+        condition: service_healthy
+      mock-api:
+        condition: service_started
+    volumes:
+      - ./smoke-tests/test-docker-horizontal.sh:/tests/test-docker-horizontal.sh:ro
+    environment:
+      - GAP_SERVER_URL=https://gap-server-horizontal:9080
+    networks:
+      - gap-network
+    profiles:
+      - test-horizontal
+    command: ["/bin/bash", "/tests/test-docker-horizontal.sh"]
+
 volumes:
   # Persistent storage for GAP data
   # Contains: secrets, plugins, tokens, CA key
