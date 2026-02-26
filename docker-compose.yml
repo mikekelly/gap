@@ -165,6 +165,78 @@ services:
     profiles:
       - test-nobootstrap-fail
 
+  # GAP server in signing mode (Ed25519 request verification)
+  # Accepts requests only when signed with the corresponding private key
+  gap-server-signing:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: gap-server-signing
+    ports:
+      - "9643:9443"
+      - "9280:9080"
+    volumes:
+      - gap-data-signing:/var/lib/gap
+      - ./smoke-tests/fixtures:/fixtures:ro
+    environment:
+      - RUST_LOG=gap_server=info,gap_lib=info
+      - GAP_NO_BOOTSTRAP=false
+      - GAP_ENCRYPTION_KEY=${GAP_ENCRYPTION_KEY}
+      - GAP_SIGNING_PUBLIC_KEY=/fixtures/signing-key-pub.pem
+    restart: unless-stopped
+    networks:
+      - gap-network
+    profiles:
+      - test-signing
+      - go-test-signing
+
+  # Bash integration test runner for signing mode
+  test-runner-signing:
+    build:
+      context: .
+      dockerfile: Dockerfile.test-runner
+    container_name: gap-test-runner-signing
+    depends_on:
+      gap-server-signing:
+        condition: service_healthy
+      mock-api:
+        condition: service_started
+    volumes:
+      - ./smoke-tests:/tests:ro
+      - ./smoke-tests/fixtures:/fixtures:ro
+      - gap-data-signing:/var/lib/gap:ro
+    environment:
+      - GAP_SERVER_URL=https://gap-server-signing:9080
+    networks:
+      - gap-network
+    profiles:
+      - test-signing
+    command: ["/bin/bash", "/tests/test-docker-signing.sh"]
+
+  # Go client integration test runner for signing mode
+  go-test-runner-signing:
+    build:
+      context: ./management-go
+      dockerfile: Dockerfile.test
+    depends_on:
+      gap-server-signing:
+        condition: service_healthy
+      mock-api:
+        condition: service_started
+    volumes:
+      - gap-data-signing:/var/lib/gap:ro
+      - ./smoke-tests/fixtures:/fixtures:ro
+    environment:
+      - GAP_SERVER_URL=https://gap-server-signing:9080
+      - GAP_CA_CERT_CHAIN=/var/lib/gap/ca.crt
+      - GAP_MOCK_API_URL=http://mock-api:8080
+      - GAP_PROXY_URL=https://gap-server-signing:9443
+      - GAP_SIGNING_KEY=/fixtures/signing-key.pem
+    networks:
+      - gap-network
+    profiles:
+      - go-test-signing
+
   # Example: Agent using HTTPS proxy
   # Uncomment and customize for your agent
   # example-agent:
@@ -192,6 +264,8 @@ volumes:
   gap-data-nobootstrap:
     driver: local
   gap-data-nobootstrap-fail:
+    driver: local
+  gap-data-signing:
     driver: local
 
 networks:
