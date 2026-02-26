@@ -4196,15 +4196,21 @@ mod tests {
     /// Helper: create a SigningConfig from raw public key bytes
     fn test_signing_config(public_key: &[u8]) -> crate::signing::SigningConfig {
         use ring::signature::{self, UnparsedPublicKey};
+        use sha2::{Digest, Sha256};
+        // Derive key_id from public key (same algorithm as load_public_key_pem)
+        let mut hasher = Sha256::new();
+        hasher.update(public_key);
+        let hash = hasher.finalize();
+        let key_id: String = hash[..8].iter().map(|b| format!("{:02x}", b)).collect();
         crate::signing::SigningConfig {
             public_keys: vec![(
-                "test-key".to_string(),
+                key_id,
                 UnparsedPublicKey::new(&signature::ED25519, public_key.to_vec()),
             )],
         }
     }
 
-    /// Helper: sign a request and return headers with signature
+    /// Helper: sign a request using RFC 9421 format and return headers
     fn sign_test_request(
         keypair: &ring::signature::Ed25519KeyPair,
         method: &str,
@@ -4212,21 +4218,29 @@ mod tests {
         body: &[u8],
         nonce: &str,
     ) -> Vec<(&'static str, String)> {
+        use ring::signature::KeyPair;
+        use sha2::{Digest, Sha256};
         use std::time::{SystemTime, UNIX_EPOCH};
         let timestamp = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_secs() as i64;
+
+        // Derive key_id from public key
+        let pub_key_bytes = keypair.public_key().as_ref();
+        let mut hasher = Sha256::new();
+        hasher.update(pub_key_bytes);
+        let key_hash = hasher.finalize();
+        let key_id: String = key_hash[..8].iter().map(|b| format!("{:02x}", b)).collect();
+
         let digest = crate::signing::compute_content_digest(body);
-        let canonical = crate::signing::build_canonical_string(
-            method, path, &digest, &timestamp.to_string(), nonce,
-        );
-        let sig = keypair.sign(canonical.as_bytes());
+        let sig_params = crate::signing::build_signature_params(timestamp, nonce, &key_id);
+        let sig_base = crate::signing::build_signature_base(method, path, &digest, &sig_params);
+        let sig = keypair.sign(sig_base.as_bytes());
         let sig_b64 = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, sig.as_ref());
         vec![
-            ("x-gap-timestamp", timestamp.to_string()),
-            ("x-gap-nonce", nonce.to_string()),
-            ("x-gap-signature", sig_b64),
+            ("signature-input", format!("sig1={}", sig_params)),
+            ("signature", format!("sig1=:{}:", sig_b64)),
         ]
     }
 

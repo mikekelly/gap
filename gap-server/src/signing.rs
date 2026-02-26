@@ -1,4 +1,4 @@
-//! HTTP message signing verification module.
+//! HTTP message signing verification module (RFC 9421).
 //!
 //! Provides Ed25519-based request signature verification with nonce-based
 //! replay protection and timestamp validation. Designed for verifying that
@@ -7,13 +7,13 @@
 //! # Protocol
 //!
 //! Requests must include the following headers:
-//! - `x-gap-timestamp`: Unix epoch seconds when the request was signed
-//! - `x-gap-nonce`: Unique value per request (replay protection)
-//! - `x-gap-signature`: Base64-encoded Ed25519 signature over the canonical string
-//! - `x-gap-key-id` (optional): Identifies which public key to verify against
+//! - `Signature-Input`: Structured field describing the signature parameters
+//!   e.g. `sig1=("@method" "@path" "content-digest");created=1709000000;nonce="abc123";keyid="6a3b42c10443f618";alg="ed25519"`
+//! - `Signature`: The base64-encoded Ed25519 signature
+//!   e.g. `sig1=:BASE64SIGNATURE:`
 //!
-//! The canonical string is built from the method, path, content digest, timestamp,
-//! and nonce — each on its own line. The signature covers this canonical string.
+//! The signature base is built from the covered components and signature params,
+//! per RFC 9421 format.
 
 use base64::engine::general_purpose::STANDARD as BASE64;
 use base64::Engine;
@@ -71,27 +71,120 @@ impl NonceCache {
     }
 }
 
-/// Builds the canonical string that is signed/verified.
+/// Builds the RFC 9421 signature params string.
 ///
-/// Format (each component on its own line, joined by `\n`):
+/// The covered components are always `("@method" "@path" "content-digest")`.
+///
+/// Returns a string like:
+/// `("@method" "@path" "content-digest");created=1709000000;nonce="abc123";keyid="6a3b42c10443f618";alg="ed25519"`
+pub fn build_signature_params(created: i64, nonce: &str, keyid: &str) -> String {
+    format!(
+        "(\"@method\" \"@path\" \"content-digest\");created={};nonce=\"{}\";keyid=\"{}\";alg=\"ed25519\"",
+        created, nonce, keyid
+    )
+}
+
+/// Builds the RFC 9421 signature base (the string that gets signed).
+///
+/// Format:
 /// ```text
-/// @method: POST
-/// @path: /plugins
-/// content-digest: sha-256=:BASE64_HASH:
-/// x-gap-timestamp: 1709000000
-/// x-gap-nonce: abc123
+/// "@method": POST
+/// "@path": /plugins
+/// "content-digest": sha-256=:BASE64:
+/// "@signature-params": ("@method" "@path" "content-digest");created=...;nonce="...";keyid="...";alg="ed25519"
 /// ```
-pub fn build_canonical_string(
+///
+/// Each line is `"component-name": value`, joined by `\n`.
+pub fn build_signature_base(
     method: &str,
     path: &str,
     content_digest: &str,
-    timestamp: &str,
-    nonce: &str,
+    signature_params: &str,
 ) -> String {
     format!(
-        "@method: {}\n@path: {}\ncontent-digest: {}\nx-gap-timestamp: {}\nx-gap-nonce: {}",
-        method, path, content_digest, timestamp, nonce
+        "\"@method\": {}\n\"@path\": {}\n\"content-digest\": {}\n\"@signature-params\": {}",
+        method, path, content_digest, signature_params
     )
+}
+
+/// Parses a `Signature-Input` header value.
+///
+/// Expects format: `sig1=("@method" "@path" "content-digest");created=N;nonce="...";keyid="...";alg="ed25519"`
+///
+/// Returns `(created_timestamp, nonce, keyid)`.
+pub fn parse_signature_input(header_value: &str) -> Result<(i64, String, String), SigningError> {
+    // Strip "sig1=" prefix
+    let rest = header_value
+        .strip_prefix("sig1=")
+        .ok_or(SigningError::InvalidSignatureInput)?;
+
+    // Verify covered components
+    let expected_components = "(\"@method\" \"@path\" \"content-digest\")";
+    let rest = rest
+        .strip_prefix(expected_components)
+        .ok_or(SigningError::InvalidSignatureInput)?;
+
+    // Parse ;key=value parameters
+    let mut created: Option<i64> = None;
+    let mut nonce: Option<String> = None;
+    let mut keyid: Option<String> = None;
+
+    // Split on ';' — the rest starts with ';'
+    for param in rest.split(';').skip(1) {
+        let param = param.trim();
+        if let Some(val) = param.strip_prefix("created=") {
+            created = Some(
+                val.parse::<i64>()
+                    .map_err(|_| SigningError::InvalidSignatureInput)?,
+            );
+        } else if let Some(val) = param.strip_prefix("nonce=") {
+            nonce = Some(parse_quoted_string(val)?);
+        } else if let Some(val) = param.strip_prefix("keyid=") {
+            keyid = Some(parse_quoted_string(val)?);
+        } else if let Some(val) = param.strip_prefix("alg=") {
+            // Validate but don't return — must be "ed25519"
+            let alg = parse_quoted_string(val)?;
+            if alg != "ed25519" {
+                return Err(SigningError::InvalidSignatureInput);
+            }
+        }
+    }
+
+    let created = created.ok_or(SigningError::InvalidSignatureInput)?;
+    let nonce = nonce.ok_or(SigningError::InvalidSignatureInput)?;
+    let keyid = keyid.ok_or(SigningError::InvalidSignatureInput)?;
+
+    Ok((created, nonce, keyid))
+}
+
+/// Parses a quoted string value like `"abc123"`, returning the inner content.
+fn parse_quoted_string(s: &str) -> Result<String, SigningError> {
+    let s = s.trim();
+    if s.len() < 2 || !s.starts_with('"') || !s.ends_with('"') {
+        return Err(SigningError::InvalidSignatureInput);
+    }
+    Ok(s[1..s.len() - 1].to_string())
+}
+
+/// Parses a `Signature` header value.
+///
+/// Expects format: `sig1=:BASE64SIGNATURE:`
+///
+/// Returns the raw decoded signature bytes.
+pub fn parse_signature(header_value: &str) -> Result<Vec<u8>, SigningError> {
+    // Strip "sig1=:" prefix
+    let rest = header_value
+        .strip_prefix("sig1=:")
+        .ok_or(SigningError::InvalidSignature)?;
+
+    // Strip trailing ":"
+    let b64 = rest
+        .strip_suffix(':')
+        .ok_or(SigningError::InvalidSignature)?;
+
+    BASE64
+        .decode(b64)
+        .map_err(|_| SigningError::InvalidSignature)
 }
 
 /// Computes the content digest of a request body.
@@ -115,7 +208,11 @@ pub enum SigningError {
     #[error("Missing required header: {0}")]
     MissingHeader(String),
 
-    /// The timestamp header could not be parsed as a Unix timestamp.
+    /// The Signature-Input header is malformed or has unexpected format.
+    #[error("Invalid Signature-Input header")]
+    InvalidSignatureInput,
+
+    /// The timestamp could not be parsed or is invalid.
     #[error("Invalid timestamp")]
     InvalidTimestamp,
 
@@ -136,16 +233,16 @@ pub enum SigningError {
     VerificationFailed,
 }
 
-/// Verifies the Ed25519 signature on an incoming HTTP request.
+/// Verifies the RFC 9421 Ed25519 signature on an incoming HTTP request.
 ///
 /// # Verification steps
 ///
-/// 1. Extract required headers (`x-gap-timestamp`, `x-gap-nonce`, `x-gap-signature`)
-/// 2. Optionally extract `x-gap-key-id` to narrow key selection
+/// 1. Extract `Signature-Input` header and parse to get created, nonce, keyid
+/// 2. Extract `Signature` header and decode the signature bytes
 /// 3. Validate timestamp is within the allowed skew window (5 minutes)
 /// 4. Check nonce has not been seen before (replay protection)
 /// 5. Compute content digest from the request body
-/// 6. Build canonical string and verify signature against trusted keys
+/// 6. Build signature base and verify signature against trusted keys
 ///
 /// # Errors
 ///
@@ -158,73 +255,64 @@ pub fn verify_request_signature(
     config: &SigningConfig,
     nonce_cache: &NonceCache,
 ) -> Result<(), SigningError> {
-    // 1. Extract required headers
-    let timestamp = headers
-        .get("x-gap-timestamp")
+    // 1. Extract and parse Signature-Input header
+    let sig_input_value = headers
+        .get("signature-input")
         .and_then(|v| v.to_str().ok())
-        .ok_or_else(|| SigningError::MissingHeader("x-gap-timestamp".to_string()))?;
+        .ok_or_else(|| SigningError::MissingHeader("signature-input".to_string()))?;
 
-    let nonce = headers
-        .get("x-gap-nonce")
+    let (created, nonce, keyid) = parse_signature_input(sig_input_value)?;
+
+    // 2. Extract and parse Signature header
+    let sig_value = headers
+        .get("signature")
         .and_then(|v| v.to_str().ok())
-        .ok_or_else(|| SigningError::MissingHeader("x-gap-nonce".to_string()))?;
+        .ok_or_else(|| SigningError::MissingHeader("signature".to_string()))?;
 
-    let signature_b64 = headers
-        .get("x-gap-signature")
-        .and_then(|v| v.to_str().ok())
-        .ok_or_else(|| SigningError::MissingHeader("x-gap-signature".to_string()))?;
+    let signature_bytes = parse_signature(sig_value)?;
 
-    // 4. Optional key ID to narrow key selection
-    let key_id = headers
-        .get("x-gap-key-id")
-        .and_then(|v| v.to_str().ok());
-
-    // 5. Validate timestamp within allowed skew
-    let ts: i64 = timestamp
-        .parse()
-        .map_err(|_| SigningError::InvalidTimestamp)?;
+    // 3. Validate timestamp within allowed skew
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_err(|_| SigningError::InvalidTimestamp)?
         .as_secs() as i64;
-    if (now - ts).abs() > MAX_TIMESTAMP_SKEW_SECS {
+    if (now - created).abs() > MAX_TIMESTAMP_SKEW_SECS {
         return Err(SigningError::TimestampExpired);
     }
 
-    // 6. Check nonce freshness
-    if !nonce_cache.check_and_insert(nonce) {
+    // 4. Check nonce freshness
+    if !nonce_cache.check_and_insert(&nonce) {
         return Err(SigningError::NonceReplay);
     }
 
-    // 7. Compute content digest
+    // 5. Compute content digest
     let content_digest = compute_content_digest(body);
 
-    // 8. Build canonical string
-    let canonical = build_canonical_string(method, path, &content_digest, timestamp, nonce);
+    // 6. Build signature base
+    let sig_params = build_signature_params(created, &nonce, &keyid);
+    let sig_base = build_signature_base(method, path, &content_digest, &sig_params);
 
-    // 9. Decode signature
-    let signature_bytes = BASE64
-        .decode(signature_b64)
-        .map_err(|_| SigningError::InvalidSignature)?;
+    // 7. Select keys to try (filter by keyid)
+    let keys_to_try: Vec<&(String, UnparsedPublicKey<Vec<u8>>)> = config
+        .public_keys
+        .iter()
+        .filter(|(id, _)| id == &keyid)
+        .collect();
 
-    // 10. Select keys to try
-    let keys_to_try: Vec<&(String, UnparsedPublicKey<Vec<u8>>)> = if let Some(kid) = key_id {
-        config
-            .public_keys
-            .iter()
-            .filter(|(id, _)| id == kid)
-            .collect()
-    } else {
+    // If no keys match the keyid, try all keys as fallback
+    let keys_to_try = if keys_to_try.is_empty() {
         config.public_keys.iter().collect()
+    } else {
+        keys_to_try
     };
 
     if keys_to_try.is_empty() {
         return Err(SigningError::VerificationFailed);
     }
 
-    // 11. Try each candidate key
+    // 8. Try each candidate key
     for (_, key) in &keys_to_try {
-        if key.verify(canonical.as_bytes(), &signature_bytes).is_ok() {
+        if key.verify(sig_base.as_bytes(), &signature_bytes).is_ok() {
             return Ok(());
         }
     }
@@ -313,7 +401,21 @@ mod tests {
         (keypair, public_key)
     }
 
-    /// Helper to produce a base64-encoded Ed25519 signature for test requests.
+    /// Derives the key_id from a keypair (truncated SHA-256 of public key bytes).
+    fn derive_key_id(keypair: &Ed25519KeyPair) -> String {
+        let pub_key_bytes = keypair.public_key().as_ref();
+        let mut hasher = Sha256::new();
+        hasher.update(pub_key_bytes);
+        let key_hash = hasher.finalize();
+        key_hash[..8]
+            .iter()
+            .map(|b| format!("{:02x}", b))
+            .collect::<String>()
+    }
+
+    /// Helper to produce RFC 9421 signature headers for test requests.
+    ///
+    /// Returns `(signature_input_value, signature_value)`.
     fn sign_request(
         keypair: &Ed25519KeyPair,
         method: &str,
@@ -321,12 +423,19 @@ mod tests {
         body: &[u8],
         timestamp: i64,
         nonce: &str,
-    ) -> String {
+    ) -> (String, String) {
         let digest = compute_content_digest(body);
-        let canonical =
-            build_canonical_string(method, path, &digest, &timestamp.to_string(), nonce);
-        let sig = keypair.sign(canonical.as_bytes());
-        BASE64.encode(sig.as_ref())
+        let key_id = derive_key_id(keypair);
+
+        let sig_params = build_signature_params(timestamp, nonce, &key_id);
+        let sig_base = build_signature_base(method, path, &digest, &sig_params);
+        let sig = keypair.sign(sig_base.as_bytes());
+        let sig_b64 = BASE64.encode(sig.as_ref());
+
+        let signature_input = format!("sig1={}", sig_params);
+        let signature = format!("sig1=:{}:", sig_b64);
+
+        (signature_input, signature)
     }
 
     /// Returns the current Unix timestamp as i64.
@@ -337,16 +446,26 @@ mod tests {
             .as_secs() as i64
     }
 
-    /// Builds an `http::HeaderMap` with the standard signing headers.
-    fn build_headers(timestamp: i64, nonce: &str, signature: &str) -> http::HeaderMap {
+    /// Builds an `http::HeaderMap` with RFC 9421 signing headers.
+    fn build_headers(signature_input: &str, signature: &str) -> http::HeaderMap {
         let mut headers = http::HeaderMap::new();
-        headers.insert("x-gap-timestamp", timestamp.to_string().parse().unwrap());
-        headers.insert("x-gap-nonce", nonce.parse().unwrap());
-        headers.insert("x-gap-signature", signature.parse().unwrap());
+        headers.insert("signature-input", signature_input.parse().unwrap());
+        headers.insert("signature", signature.parse().unwrap());
         headers
     }
 
-    /// Creates a `SigningConfig` from raw public key bytes.
+    /// Creates a `SigningConfig` from raw public key bytes with the proper derived key_id.
+    fn config_from_keypair(keypair: &Ed25519KeyPair, pub_key: &[u8]) -> SigningConfig {
+        let key_id = derive_key_id(keypair);
+        SigningConfig {
+            public_keys: vec![(
+                key_id,
+                UnparsedPublicKey::new(&signature::ED25519, pub_key.to_vec()),
+            )],
+        }
+    }
+
+    /// Creates a `SigningConfig` from raw public key bytes with an arbitrary key_id.
     fn config_from_raw(public_key: &[u8]) -> SigningConfig {
         SigningConfig {
             public_keys: vec![(
@@ -356,55 +475,172 @@ mod tests {
         }
     }
 
+    // --- Unit tests for new parsing/building functions ---
+
+    #[test]
+    fn test_build_signature_params() {
+        let params = build_signature_params(1709000000, "abc123", "6a3b42c10443f618");
+        assert_eq!(
+            params,
+            "(\"@method\" \"@path\" \"content-digest\");created=1709000000;nonce=\"abc123\";keyid=\"6a3b42c10443f618\";alg=\"ed25519\""
+        );
+    }
+
+    #[test]
+    fn test_build_signature_base() {
+        let params = build_signature_params(1709000000, "abc123", "6a3b42c10443f618");
+        let base = build_signature_base("POST", "/plugins", "sha-256=:dGVzdA==:", &params);
+        let expected = "\"@method\": POST\n\"@path\": /plugins\n\"content-digest\": sha-256=:dGVzdA==:\n\"@signature-params\": (\"@method\" \"@path\" \"content-digest\");created=1709000000;nonce=\"abc123\";keyid=\"6a3b42c10443f618\";alg=\"ed25519\"";
+        assert_eq!(base, expected);
+    }
+
+    #[test]
+    fn test_parse_signature_input_valid() {
+        let input = "sig1=(\"@method\" \"@path\" \"content-digest\");created=1709000000;nonce=\"abc123\";keyid=\"6a3b42c10443f618\";alg=\"ed25519\"";
+        let (created, nonce, keyid) = parse_signature_input(input).unwrap();
+        assert_eq!(created, 1709000000);
+        assert_eq!(nonce, "abc123");
+        assert_eq!(keyid, "6a3b42c10443f618");
+    }
+
+    #[test]
+    fn test_parse_signature_input_missing_sig1_prefix() {
+        let input = "(\"@method\" \"@path\" \"content-digest\");created=1709000000;nonce=\"abc123\";keyid=\"key1\";alg=\"ed25519\"";
+        assert!(matches!(
+            parse_signature_input(input),
+            Err(SigningError::InvalidSignatureInput)
+        ));
+    }
+
+    #[test]
+    fn test_parse_signature_input_wrong_components() {
+        let input = "sig1=(\"@method\" \"@path\");created=1709000000;nonce=\"abc123\";keyid=\"key1\";alg=\"ed25519\"";
+        assert!(matches!(
+            parse_signature_input(input),
+            Err(SigningError::InvalidSignatureInput)
+        ));
+    }
+
+    #[test]
+    fn test_parse_signature_input_missing_created() {
+        let input = "sig1=(\"@method\" \"@path\" \"content-digest\");nonce=\"abc123\";keyid=\"key1\";alg=\"ed25519\"";
+        assert!(matches!(
+            parse_signature_input(input),
+            Err(SigningError::InvalidSignatureInput)
+        ));
+    }
+
+    #[test]
+    fn test_parse_signature_input_wrong_alg() {
+        let input = "sig1=(\"@method\" \"@path\" \"content-digest\");created=1709000000;nonce=\"abc123\";keyid=\"key1\";alg=\"rsa\"";
+        assert!(matches!(
+            parse_signature_input(input),
+            Err(SigningError::InvalidSignatureInput)
+        ));
+    }
+
+    #[test]
+    fn test_parse_signature_valid() {
+        // Use a known base64 value
+        let sig_bytes = vec![1u8, 2, 3, 4, 5];
+        let b64 = BASE64.encode(&sig_bytes);
+        let header = format!("sig1=:{}:", b64);
+        let parsed = parse_signature(&header).unwrap();
+        assert_eq!(parsed, sig_bytes);
+    }
+
+    #[test]
+    fn test_parse_signature_missing_prefix() {
+        assert!(matches!(
+            parse_signature("bad=:AQID:"),
+            Err(SigningError::InvalidSignature)
+        ));
+    }
+
+    #[test]
+    fn test_parse_signature_missing_trailing_colon() {
+        assert!(matches!(
+            parse_signature("sig1=:AQID"),
+            Err(SigningError::InvalidSignature)
+        ));
+    }
+
+    // --- Integration tests for verify_request_signature ---
+
     #[test]
     fn test_valid_signature() {
         let (keypair, pub_key) = test_keypair();
-        let config = config_from_raw(&pub_key);
+        let config = config_from_keypair(&keypair, &pub_key);
         let nonce_cache = NonceCache::new();
 
         let ts = now_ts();
         let body = b"hello world";
-        let sig = sign_request(&keypair, "POST", "/plugins", body, ts, "nonce-1");
-        let headers = build_headers(ts, "nonce-1", &sig);
+        let (sig_input, sig) = sign_request(&keypair, "POST", "/plugins", body, ts, "nonce-1");
+        let headers = build_headers(&sig_input, &sig);
 
-        let result = verify_request_signature("POST", "/plugins", body, &headers, &config, &nonce_cache);
+        let result =
+            verify_request_signature("POST", "/plugins", body, &headers, &config, &nonce_cache);
         assert!(result.is_ok(), "Valid signature should verify: {:?}", result);
+    }
+
+    #[test]
+    fn test_valid_signature_keyid_fallback() {
+        // When keyid doesn't match any config key_id, falls back to trying all keys
+        let (keypair, pub_key) = test_keypair();
+        let config = config_from_raw(&pub_key); // Uses "test-key" as key_id, won't match derived keyid
+        let nonce_cache = NonceCache::new();
+
+        let ts = now_ts();
+        let body = b"hello world";
+        let (sig_input, sig) = sign_request(&keypair, "POST", "/plugins", body, ts, "nonce-fb");
+        let headers = build_headers(&sig_input, &sig);
+
+        let result =
+            verify_request_signature("POST", "/plugins", body, &headers, &config, &nonce_cache);
+        assert!(
+            result.is_ok(),
+            "Valid signature should verify with keyid fallback: {:?}",
+            result
+        );
     }
 
     #[test]
     fn test_expired_timestamp() {
         let (keypair, pub_key) = test_keypair();
-        let config = config_from_raw(&pub_key);
+        let config = config_from_keypair(&keypair, &pub_key);
         let nonce_cache = NonceCache::new();
 
         let ts = now_ts() - 600; // 10 minutes ago — well past the 5-minute window
         let body = b"payload";
-        let sig = sign_request(&keypair, "POST", "/api", body, ts, "nonce-expired");
-        let headers = build_headers(ts, "nonce-expired", &sig);
+        let (sig_input, sig) = sign_request(&keypair, "POST", "/api", body, ts, "nonce-expired");
+        let headers = build_headers(&sig_input, &sig);
 
-        let result = verify_request_signature("POST", "/api", body, &headers, &config, &nonce_cache);
+        let result =
+            verify_request_signature("POST", "/api", body, &headers, &config, &nonce_cache);
         assert!(matches!(result, Err(SigningError::TimestampExpired)));
     }
 
     #[test]
     fn test_replayed_nonce() {
         let (keypair, pub_key) = test_keypair();
-        let config = config_from_raw(&pub_key);
+        let config = config_from_keypair(&keypair, &pub_key);
         let nonce_cache = NonceCache::new();
 
         let ts = now_ts();
         let body = b"data";
-        let sig = sign_request(&keypair, "POST", "/test", body, ts, "same-nonce");
-        let headers = build_headers(ts, "same-nonce", &sig);
+        let (sig_input, sig) = sign_request(&keypair, "POST", "/test", body, ts, "same-nonce");
+        let headers = build_headers(&sig_input, &sig);
 
         // First call should succeed
-        let result = verify_request_signature("POST", "/test", body, &headers, &config, &nonce_cache);
+        let result =
+            verify_request_signature("POST", "/test", body, &headers, &config, &nonce_cache);
         assert!(result.is_ok(), "First use of nonce should succeed");
 
         // Second call with same nonce should fail
         let ts2 = now_ts();
-        let sig2 = sign_request(&keypair, "POST", "/test", body, ts2, "same-nonce");
-        let headers2 = build_headers(ts2, "same-nonce", &sig2);
+        let (sig_input2, sig2) =
+            sign_request(&keypair, "POST", "/test", body, ts2, "same-nonce");
+        let headers2 = build_headers(&sig_input2, &sig2);
         let result2 =
             verify_request_signature("POST", "/test", body, &headers2, &config, &nonce_cache);
         assert!(matches!(result2, Err(SigningError::NonceReplay)));
@@ -415,13 +651,14 @@ mod tests {
         let (keypair_a, _pub_key_a) = test_keypair();
         let (_keypair_b, pub_key_b) = test_keypair();
         // Sign with keypair A but verify with keypair B's public key
-        let config = config_from_raw(&pub_key_b);
+        let config = config_from_keypair(&_keypair_b, &pub_key_b);
         let nonce_cache = NonceCache::new();
 
         let ts = now_ts();
         let body = b"secret";
-        let sig = sign_request(&keypair_a, "POST", "/path", body, ts, "nonce-wrong");
-        let headers = build_headers(ts, "nonce-wrong", &sig);
+        let (sig_input, sig) =
+            sign_request(&keypair_a, "POST", "/path", body, ts, "nonce-wrong");
+        let headers = build_headers(&sig_input, &sig);
 
         let result =
             verify_request_signature("POST", "/path", body, &headers, &config, &nonce_cache);
@@ -433,47 +670,35 @@ mod tests {
         let (_keypair, pub_key) = test_keypair();
         let config = config_from_raw(&pub_key);
 
-        // Missing x-gap-timestamp
+        // Missing signature-input
         {
             let nonce_cache = NonceCache::new();
             let mut headers = http::HeaderMap::new();
-            headers.insert("x-gap-nonce", "n".parse().unwrap());
-            headers.insert("x-gap-signature", "sig".parse().unwrap());
+            headers.insert("signature", "sig1=:AQID:".parse().unwrap());
             let result =
                 verify_request_signature("GET", "/", b"", &headers, &config, &nonce_cache);
             assert!(
-                matches!(result, Err(SigningError::MissingHeader(ref h)) if h == "x-gap-timestamp"),
-                "Expected MissingHeader(x-gap-timestamp), got: {:?}",
+                matches!(result, Err(SigningError::MissingHeader(ref h)) if h == "signature-input"),
+                "Expected MissingHeader(signature-input), got: {:?}",
                 result
             );
         }
 
-        // Missing x-gap-nonce
+        // Missing signature
         {
             let nonce_cache = NonceCache::new();
             let mut headers = http::HeaderMap::new();
-            headers.insert("x-gap-timestamp", "12345".parse().unwrap());
-            headers.insert("x-gap-signature", "sig".parse().unwrap());
-            let result =
-                verify_request_signature("GET", "/", b"", &headers, &config, &nonce_cache);
-            assert!(
-                matches!(result, Err(SigningError::MissingHeader(ref h)) if h == "x-gap-nonce"),
-                "Expected MissingHeader(x-gap-nonce), got: {:?}",
-                result
+            headers.insert(
+                "signature-input",
+                "sig1=(\"@method\" \"@path\" \"content-digest\");created=12345;nonce=\"n\";keyid=\"k\";alg=\"ed25519\""
+                    .parse()
+                    .unwrap(),
             );
-        }
-
-        // Missing x-gap-signature
-        {
-            let nonce_cache = NonceCache::new();
-            let mut headers = http::HeaderMap::new();
-            headers.insert("x-gap-timestamp", now_ts().to_string().parse().unwrap());
-            headers.insert("x-gap-nonce", "n".parse().unwrap());
             let result =
                 verify_request_signature("GET", "/", b"", &headers, &config, &nonce_cache);
             assert!(
-                matches!(result, Err(SigningError::MissingHeader(ref h)) if h == "x-gap-signature"),
-                "Expected MissingHeader(x-gap-signature), got: {:?}",
+                matches!(result, Err(SigningError::MissingHeader(ref h)) if h == "signature"),
+                "Expected MissingHeader(signature), got: {:?}",
                 result
             );
         }
@@ -482,14 +707,15 @@ mod tests {
     #[test]
     fn test_tampered_body() {
         let (keypair, pub_key) = test_keypair();
-        let config = config_from_raw(&pub_key);
+        let config = config_from_keypair(&keypair, &pub_key);
         let nonce_cache = NonceCache::new();
 
         let ts = now_ts();
         let original_body = b"original content";
         let tampered_body = b"tampered content";
-        let sig = sign_request(&keypair, "PUT", "/resource", original_body, ts, "nonce-tamper");
-        let headers = build_headers(ts, "nonce-tamper", &sig);
+        let (sig_input, sig) =
+            sign_request(&keypair, "PUT", "/resource", original_body, ts, "nonce-tamper");
+        let headers = build_headers(&sig_input, &sig);
 
         // Verify with a different body than was signed
         let result = verify_request_signature(
@@ -529,14 +755,20 @@ mod tests {
         let d1 = compute_content_digest(body);
         let d2 = compute_content_digest(body);
         assert_eq!(d1, d2, "Same body must produce identical digests");
-        assert!(d1.starts_with("sha-256=:"), "Digest should have standard prefix");
+        assert!(
+            d1.starts_with("sha-256=:"),
+            "Digest should have standard prefix"
+        );
         assert!(d1.ends_with(':'), "Digest should end with colon");
     }
 
     #[test]
     fn test_content_digest_empty_body() {
         let digest = compute_content_digest(b"");
-        assert!(digest.starts_with("sha-256=:"), "Empty body digest should have standard prefix");
+        assert!(
+            digest.starts_with("sha-256=:"),
+            "Empty body digest should have standard prefix"
+        );
         assert!(digest.ends_with(':'), "Empty body digest should end with colon");
         // SHA-256 of empty input is well-known:
         // 47DEQpj8HBSa+/TImW+5JCeuQeRkm5NMpJWZG3hSuFU=
