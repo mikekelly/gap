@@ -51,7 +51,7 @@ func main() {
 	}
 	fmt.Printf("Installed plugins: %d\n", len(plugins.Plugins))
 	for _, p := range plugins.Plugins {
-		fmt.Printf("  - %s\n", p.Name)
+		fmt.Printf("  - %s\n", p.ID)
 	}
 
 	// List tokens

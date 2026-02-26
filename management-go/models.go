@@ -28,7 +28,7 @@ type InitResponse struct {
 
 // PluginInfo describes an installed plugin as returned by GET /plugins.
 type PluginInfo struct {
-	Name             string   `json:"name"`
+	ID               string   `json:"id"`
 	MatchPatterns    []string `json:"match_patterns"`
 	CredentialSchema []string `json:"credential_schema"`
 }
@@ -39,51 +39,52 @@ type PluginsResponse struct {
 }
 
 // InstallRequest is sent to POST /plugins/install to install a plugin from GitHub.
-// Name must be in "owner/repo" format.
+// Source must be in "owner/repo" format.
 type InstallRequest struct {
-	Name string `json:"name"`
+	Source string `json:"source"`
 }
 
 // InstallResponse is returned by POST /plugins/install.
 type InstallResponse struct {
-	Name      string  `json:"name"`
+	ID        string  `json:"id"`
+	Source    string  `json:"source"`
 	Installed bool    `json:"installed"`
 	CommitSHA *string `json:"commit_sha,omitempty"`
 }
 
 // RegisterPluginRequest is sent to POST /plugins/register to register a plugin with inline code.
+// The server generates the plugin ID.
 type RegisterPluginRequest struct {
-	Name string `json:"name"`
 	Code string `json:"code"`
 }
 
 // RegisterResponse is returned by POST /plugins/register.
 type RegisterResponse struct {
-	Name       string `json:"name"`
+	ID         string `json:"id"`
 	Registered bool   `json:"registered"`
 }
 
-// UninstallResponse is returned by DELETE /plugins/:name.
+// UninstallResponse is returned by DELETE /plugins/:id.
 type UninstallResponse struct {
-	Name        string `json:"name"`
+	ID          string `json:"id"`
 	Uninstalled bool   `json:"uninstalled"`
 }
 
-// UpdateResponse is returned by POST /plugins/:name/update (GitHub update).
+// UpdateResponse is returned by POST /plugins/:id/update (GitHub update).
 type UpdateResponse struct {
-	Name      string  `json:"name"`
+	ID        string  `json:"id"`
 	Updated   bool    `json:"updated"`
 	CommitSHA *string `json:"commit_sha,omitempty"`
 }
 
-// UpdatePluginRequest is sent to PATCH /plugins/:name to update the plugin weight.
+// UpdatePluginRequest is sent to PATCH /plugins/:id to update the plugin weight.
 type UpdatePluginRequest struct {
 	Weight int `json:"weight"`
 }
 
-// UpdatePluginResponse is returned by PATCH /plugins/:name.
+// UpdatePluginResponse is returned by PATCH /plugins/:id.
 type UpdatePluginResponse struct {
-	Name    string `json:"name"`
+	ID      string `json:"id"`
 	Updated bool   `json:"updated"`
 }
 
@@ -127,16 +128,16 @@ type RevokeTokenResponse struct {
 
 // ── Credentials ──────────────────────────────────────────────────────────────
 
-// SetCredentialRequest is sent to POST /credentials/:plugin/:key.
+// SetCredentialRequest is sent to POST /credentials/:plugin_id/:key.
 type SetCredentialRequest struct {
 	Value string `json:"value"`
 }
 
-// SetCredentialResponse is returned by POST /credentials/:plugin/:key.
+// SetCredentialResponse is returned by POST /credentials/:plugin_id/:key.
 type SetCredentialResponse struct {
-	Plugin string `json:"plugin"`
-	Key    string `json:"key"`
-	Set    bool   `json:"set"`
+	PluginID string `json:"plugin_id"`
+	Key      string `json:"key"`
+	Set      bool   `json:"set"`
 }
 
 // ── Header Sets ──────────────────────────────────────────────────────────────
@@ -144,7 +145,6 @@ type SetCredentialResponse struct {
 // CreateHeaderSetRequest is sent to POST /header-sets.
 // Headers is an optional map of header name -> value to set immediately.
 type CreateHeaderSetRequest struct {
-	Name          string            `json:"name"`
 	MatchPatterns []string          `json:"match_patterns"`
 	Weight        int               `json:"weight,omitempty"`
 	Headers       map[string]string `json:"headers,omitempty"`
@@ -152,11 +152,11 @@ type CreateHeaderSetRequest struct {
 
 // CreateHeaderSetResponse is returned by POST /header-sets.
 type CreateHeaderSetResponse struct {
-	Name    string `json:"name"`
+	ID      string `json:"id"`
 	Created bool   `json:"created"`
 }
 
-// UpdateHeaderSetRequest is sent to PATCH /header-sets/:name.
+// UpdateHeaderSetRequest is sent to PATCH /header-sets/:id.
 // At least one field must be set.
 type UpdateHeaderSetRequest struct {
 	MatchPatterns *[]string `json:"match_patterns,omitempty"`
@@ -166,7 +166,7 @@ type UpdateHeaderSetRequest struct {
 // HeaderSetListItem is one entry in the header-sets list. Headers contains
 // only the header names (no values are exposed).
 type HeaderSetListItem struct {
-	Name          string   `json:"name"`
+	ID            string   `json:"id"`
 	MatchPatterns []string `json:"match_patterns"`
 	Weight        int      `json:"weight"`
 	Headers       []string `json:"headers"`
@@ -177,33 +177,33 @@ type HeaderSetListResponse struct {
 	HeaderSets []HeaderSetListItem `json:"header_sets"`
 }
 
-// SetHeaderRequest is sent to POST /header-sets/:name/headers.
+// SetHeaderRequest is sent to POST /header-sets/:id/headers.
 type SetHeaderRequest struct {
 	Name  string `json:"name"`
 	Value string `json:"value"`
 }
 
-// SetHeaderResponse is returned by POST /header-sets/:name/headers.
+// SetHeaderResponse is returned by POST /header-sets/:id/headers.
 type SetHeaderResponse struct {
 	HeaderSet string `json:"header_set"`
 	Header    string `json:"header"`
 	Set       bool   `json:"set"`
 }
 
-// DeleteHeaderResponse is returned by DELETE /header-sets/:name/headers/:header_name.
+// DeleteHeaderResponse is returned by DELETE /header-sets/:id/headers/:header_name.
 type DeleteHeaderResponse struct {
 	HeaderSet string `json:"header_set"`
 	Header    string `json:"header"`
 	Deleted   bool   `json:"deleted"`
 }
 
-// UpdateHeaderSetResponse is returned by PATCH /header-sets/:name.
+// UpdateHeaderSetResponse is returned by PATCH /header-sets/:id.
 type UpdateHeaderSetResponse struct {
-	Name    string `json:"name"`
+	ID      string `json:"id"`
 	Updated bool   `json:"updated"`
 }
 
-// DeleteHeaderSetResponse is returned by DELETE /header-sets/:name.
+// DeleteHeaderSetResponse is returned by DELETE /header-sets/:id.
 type DeleteHeaderSetResponse struct {
 	Deleted bool `json:"deleted"`
 }
@@ -218,7 +218,7 @@ type ActivityEntry struct {
 	URL            string    `json:"url"`
 	AgentID        *string   `json:"agent_id,omitempty"`
 	Status         uint16    `json:"status"`
-	PluginName     *string   `json:"plugin_name,omitempty"`
+	PluginID       *string   `json:"plugin_id,omitempty"`
 	PluginSHA      *string   `json:"plugin_sha,omitempty"`
 	SourceHash     *string   `json:"source_hash,omitempty"`
 	RequestHeaders *string   `json:"request_headers,omitempty"`
@@ -235,7 +235,7 @@ type ActivityResponse struct {
 type ActivityQuery struct {
 	Domain    *string `json:"domain,omitempty"`
 	Path      *string `json:"path,omitempty"`
-	Plugin    *string `json:"plugin,omitempty"`
+	PluginID  *string `json:"plugin_id,omitempty"`
 	Agent     *string `json:"agent,omitempty"`
 	Method    *string `json:"method,omitempty"`
 	Since     *string `json:"since,omitempty"` // ISO 8601

@@ -20,8 +20,8 @@ func (c *Client) QueryActivity(ctx context.Context, query *ActivityQuery) (*Acti
 		if query.Path != nil {
 			params.Set("path", *query.Path)
 		}
-		if query.Plugin != nil {
-			params.Set("plugin", *query.Plugin)
+		if query.PluginID != nil {
+			params.Set("plugin", *query.PluginID)
 		}
 		if query.Agent != nil {
 			params.Set("agent", *query.Agent)
