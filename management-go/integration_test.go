@@ -4,6 +4,8 @@ package gap_test
 
 import (
 	"context"
+	"crypto/ed25519"
+	"crypto/rand"
 	"crypto/sha512"
 	"crypto/tls"
 	"crypto/x509"
@@ -873,5 +875,466 @@ func TestIntegrationSSEStreams(t *testing.T) {
 			return
 		}
 		t.Logf("SSE activity event received: method=%s url=%s", entry.Method, entry.URL)
+	})
+}
+
+// newSigningClient creates a gap.Client configured with an Ed25519 signing key.
+// It also applies the CA cert option if GAP_CA_CERT_CHAIN is set.
+func newSigningClient(t *testing.T, serverURL string, key ed25519.PrivateKey) *gap.Client {
+	t.Helper()
+	opts := []gap.Option{gap.WithSigningKey(key)}
+	if caCert := os.Getenv("GAP_CA_CERT_CHAIN"); caCert != "" {
+		opts = append(opts, gap.WithCACert(caCert))
+	}
+	return gap.NewClient(serverURL, opts...)
+}
+
+// TestSigningAuth exercises HTTP signing authentication end-to-end.
+// Requires GAP_SIGNING_KEY (path to Ed25519 PEM private key) and GAP_SERVER_URL.
+// The server must be started in signing mode for these tests to work.
+func TestSigningAuth(t *testing.T) {
+	keyPath := os.Getenv("GAP_SIGNING_KEY")
+	if keyPath == "" {
+		t.Skip("GAP_SIGNING_KEY not set, skipping signing auth tests")
+	}
+	serverURL := os.Getenv("GAP_SERVER_URL")
+	if serverURL == "" {
+		t.Fatal("GAP_SERVER_URL not set")
+	}
+
+	keyBytes, err := os.ReadFile(keyPath)
+	if err != nil {
+		t.Fatalf("reading signing key from %s: %v", keyPath, err)
+	}
+	key, err := gap.LoadSigningKey(keyBytes)
+	if err != nil {
+		t.Fatalf("loading signing key: %v", err)
+	}
+
+	signingClient := newSigningClient(t, serverURL, key)
+	ctx := context.Background()
+
+	// Track state across subtests.
+	var createdTokenPrefix string
+	var signingPluginID string
+
+	// ── Signing Test 1: Status returns initialized ────────────────────────────
+	t.Run("StatusInitialized", func(t *testing.T) {
+		status, err := signingClient.Status(ctx)
+		if err != nil {
+			t.Fatalf("Status failed: %v", err)
+		}
+		if !status.Initialized {
+			t.Fatal("expected server to be initialized when running with signing key")
+		}
+		t.Logf("Status: version=%s initialized=%v", status.Version, status.Initialized)
+	})
+
+	// ── Signing Test 2: Init returns 400 in signing mode ──────────────────────
+	// When signing auth is enabled, password-based init should be rejected.
+	t.Run("InitReturns400", func(t *testing.T) {
+		_, err := signingClient.Init(ctx, &gap.InitRequest{
+			PasswordHash: sha512Hex("some-password"),
+		})
+		if err == nil {
+			t.Fatal("expected Init to fail in signing mode, but it succeeded")
+		}
+		if !gap.IsBadRequest(err) {
+			t.Errorf("expected 400 Bad Request from Init in signing mode, got: %v", err)
+		}
+	})
+
+	// ── Signing Test 3: Create token ──────────────────────────────────────────
+	t.Run("CreateToken", func(t *testing.T) {
+		resp, err := signingClient.CreateToken(ctx, &gap.CreateTokenRequest{})
+		if err != nil {
+			t.Fatalf("CreateToken failed: %v", err)
+		}
+		if resp.Prefix == "" {
+			t.Fatal("expected prefix in creation response")
+		}
+		createdTokenPrefix = resp.Prefix
+		t.Logf("Token created: prefix=%s", resp.Prefix)
+	})
+
+	// ── Signing Test 4: Register plugin ───────────────────────────────────────
+	t.Run("RegisterPlugin", func(t *testing.T) {
+		code := `var plugin = {
+    name: "signing-auth-test-plugin",
+    matchPatterns: ["signing-test.example.com"],
+    credentialSchema: { fields: [
+        { name: "api_key", label: "API Key", type: "password", required: true }
+    ]},
+    transform: function(request, credentials) {
+        request.headers["Authorization"] = "Bearer " + credentials.api_key;
+        return request;
+    }
+};`
+		resp, err := signingClient.RegisterPlugin(ctx, &gap.RegisterPluginRequest{Code: code})
+		if err != nil {
+			t.Fatalf("RegisterPlugin failed: %v", err)
+		}
+		if !resp.Registered {
+			t.Fatal("expected Registered == true")
+		}
+		if resp.ID == "" {
+			t.Fatal("expected non-empty plugin ID")
+		}
+		signingPluginID = resp.ID
+		t.Logf("Plugin registered: id=%s", signingPluginID)
+	})
+
+	// ── Signing Test 5: Set credential ────────────────────────────────────────
+	t.Run("SetCredential", func(t *testing.T) {
+		if signingPluginID == "" {
+			t.Skip("no plugin ID available")
+		}
+		resp, err := signingClient.SetCredential(ctx, signingPluginID, "api_key", &gap.SetCredentialRequest{
+			Value: "signing-test-secret",
+		})
+		if err != nil {
+			t.Fatalf("SetCredential failed: %v", err)
+		}
+		if !resp.Set {
+			t.Fatal("expected Set == true")
+		}
+	})
+
+	// ── Signing Test 6: List plugins ──────────────────────────────────────────
+	t.Run("ListPlugins", func(t *testing.T) {
+		resp, err := signingClient.ListPlugins(ctx)
+		if err != nil {
+			t.Fatalf("ListPlugins failed: %v", err)
+		}
+		if len(resp.Plugins) == 0 {
+			t.Fatal("expected at least one plugin")
+		}
+
+		var found bool
+		for _, p := range resp.Plugins {
+			if p.ID == signingPluginID {
+				found = true
+				break
+			}
+		}
+		if signingPluginID != "" && !found {
+			t.Errorf("registered plugin %s not found in listing", signingPluginID)
+		}
+		t.Logf("Listed %d plugins", len(resp.Plugins))
+	})
+
+	// ── Signing Test 7: Uninstall plugin ──────────────────────────────────────
+	t.Run("UninstallPlugin", func(t *testing.T) {
+		if signingPluginID == "" {
+			t.Skip("no plugin ID available")
+		}
+		resp, err := signingClient.UninstallPlugin(ctx, signingPluginID)
+		if err != nil {
+			t.Fatalf("UninstallPlugin failed: %v", err)
+		}
+		if !resp.Uninstalled {
+			t.Fatal("expected Uninstalled == true")
+		}
+		t.Logf("Plugin %s uninstalled", signingPluginID)
+	})
+
+	// ── Signing Test 8: Revoke token ──────────────────────────────────────────
+	t.Run("RevokeToken", func(t *testing.T) {
+		if createdTokenPrefix == "" {
+			t.Skip("no token prefix available")
+		}
+		resp, err := signingClient.RevokeToken(ctx, createdTokenPrefix)
+		if err != nil {
+			t.Fatalf("RevokeToken failed: %v", err)
+		}
+		if !resp.Revoked {
+			t.Fatal("expected Revoked == true")
+		}
+	})
+
+	// ── Signing Test 9: Wrong key is rejected ─────────────────────────────────
+	t.Run("WrongKeyRejected", func(t *testing.T) {
+		// Generate a fresh random Ed25519 key — not the server's signing key.
+		_, wrongKey, err := ed25519.GenerateKey(rand.Reader)
+		if err != nil {
+			t.Fatalf("generating wrong key: %v", err)
+		}
+		wrongClient := newSigningClient(t, serverURL, wrongKey)
+
+		_, err = wrongClient.ListPlugins(ctx)
+		if err == nil {
+			t.Fatal("expected request with wrong signing key to fail, but it succeeded")
+		}
+		if !gap.IsUnauthorized(err) {
+			t.Errorf("expected 401 Unauthorized with wrong key, got: %v", err)
+		}
+		t.Log("Wrong signing key correctly rejected with 401")
+	})
+}
+
+// TestNamespaceMode exercises namespace/scope routing and discovery.
+// Requires GAP_NAMESPACE_MODE to be set (any non-empty value enables the tests).
+// Also requires GAP_SERVER_URL and an authentication mechanism (GAP_SIGNING_KEY or
+// the server must be initialized with a password).
+func TestNamespaceMode(t *testing.T) {
+	if os.Getenv("GAP_NAMESPACE_MODE") == "" {
+		t.Skip("GAP_NAMESPACE_MODE not set, skipping namespace tests")
+	}
+
+	serverURL := os.Getenv("GAP_SERVER_URL")
+	if serverURL == "" {
+		t.Fatal("GAP_SERVER_URL not set")
+	}
+
+	ctx := context.Background()
+
+	// Build an authenticated client. Prefer signing key if available, fall back to password.
+	var authOpts []gap.Option
+	keyPath := os.Getenv("GAP_SIGNING_KEY")
+	if keyPath != "" {
+		keyBytes, err := os.ReadFile(keyPath)
+		if err != nil {
+			t.Fatalf("reading signing key: %v", err)
+		}
+		key, err := gap.LoadSigningKey(keyBytes)
+		if err != nil {
+			t.Fatalf("loading signing key: %v", err)
+		}
+		authOpts = append(authOpts, gap.WithSigningKey(key))
+	} else {
+		password := os.Getenv("GAP_PASSWORD")
+		if password == "" {
+			t.Fatal("neither GAP_SIGNING_KEY nor GAP_PASSWORD set — cannot authenticate for namespace tests")
+		}
+		authOpts = append(authOpts, gap.WithPasscode(sha512Hex(password)))
+	}
+
+	if caCert := os.Getenv("GAP_CA_CERT_CHAIN"); caCert != "" {
+		authOpts = append(authOpts, gap.WithCACert(caCert))
+	}
+
+	// ── Namespace clients ─────────────────────────────────────────────────────
+	ns1Opts := append([]gap.Option{gap.WithNamespace("ns1"), gap.WithScope("scope1")}, authOpts...)
+	ns1Client := gap.NewClient(serverURL, ns1Opts...)
+
+	ns2Opts := append([]gap.Option{gap.WithNamespace("ns2"), gap.WithScope("scope2")}, authOpts...)
+	ns2Client := gap.NewClient(serverURL, ns2Opts...)
+
+	// Top-level client for namespace discovery (no namespace/scope set).
+	discoveryClient := gap.NewClient(serverURL, authOpts...)
+
+	// Track IDs for cleanup and assertions.
+	var ns1PluginID string
+	var ns2PluginID string
+	var ns1TokenPrefix string
+
+	// ── NS Test 1: Create resources in ns1/scope1 ─────────────────────────────
+	t.Run("NS1_CreateToken", func(t *testing.T) {
+		resp, err := ns1Client.CreateToken(ctx, &gap.CreateTokenRequest{})
+		if err != nil {
+			t.Fatalf("CreateToken in ns1/scope1 failed: %v", err)
+		}
+		if resp.Prefix == "" {
+			t.Fatal("expected token prefix")
+		}
+		ns1TokenPrefix = resp.Prefix
+		t.Logf("ns1/scope1 token created: prefix=%s", resp.Prefix)
+	})
+
+	t.Run("NS1_RegisterPlugin", func(t *testing.T) {
+		code := `var plugin = {
+    name: "ns1-test-plugin",
+    matchPatterns: ["ns1.example.com"],
+    credentialSchema: { fields: [
+        { name: "api_key", label: "API Key", type: "password", required: true }
+    ]},
+    transform: function(request, credentials) {
+        request.headers["Authorization"] = "Bearer " + credentials.api_key;
+        return request;
+    }
+};`
+		resp, err := ns1Client.RegisterPlugin(ctx, &gap.RegisterPluginRequest{Code: code})
+		if err != nil {
+			t.Fatalf("RegisterPlugin in ns1/scope1 failed: %v", err)
+		}
+		if !resp.Registered {
+			t.Fatal("expected Registered == true")
+		}
+		ns1PluginID = resp.ID
+		t.Logf("ns1/scope1 plugin registered: id=%s", ns1PluginID)
+	})
+
+	// ── NS Test 2: Create resources in ns2/scope2 ─────────────────────────────
+	t.Run("NS2_RegisterPlugin", func(t *testing.T) {
+		code := `var plugin = {
+    name: "ns2-test-plugin",
+    matchPatterns: ["ns2.example.com"],
+    credentialSchema: { fields: [
+        { name: "secret", label: "Secret", type: "password", required: true }
+    ]},
+    transform: function(request, credentials) {
+        request.headers["X-Secret"] = credentials.secret;
+        return request;
+    }
+};`
+		resp, err := ns2Client.RegisterPlugin(ctx, &gap.RegisterPluginRequest{Code: code})
+		if err != nil {
+			t.Fatalf("RegisterPlugin in ns2/scope2 failed: %v", err)
+		}
+		if !resp.Registered {
+			t.Fatal("expected Registered == true")
+		}
+		ns2PluginID = resp.ID
+		t.Logf("ns2/scope2 plugin registered: id=%s", ns2PluginID)
+	})
+
+	// ── NS Test 3: Namespace isolation — ns1 plugins not visible from ns2 ─────
+	t.Run("NS_Isolation", func(t *testing.T) {
+		ns1Plugins, err := ns1Client.ListPlugins(ctx)
+		if err != nil {
+			t.Fatalf("ListPlugins from ns1 failed: %v", err)
+		}
+		ns2Plugins, err := ns2Client.ListPlugins(ctx)
+		if err != nil {
+			t.Fatalf("ListPlugins from ns2 failed: %v", err)
+		}
+
+		// ns1 should contain ns1PluginID but not ns2PluginID
+		var ns1HasOwn, ns1HasOther bool
+		for _, p := range ns1Plugins.Plugins {
+			if p.ID == ns1PluginID {
+				ns1HasOwn = true
+			}
+			if p.ID == ns2PluginID {
+				ns1HasOther = true
+			}
+		}
+		if !ns1HasOwn {
+			t.Errorf("ns1 plugin listing should contain plugin %s", ns1PluginID)
+		}
+		if ns1HasOther {
+			t.Errorf("ns1 plugin listing should NOT contain ns2 plugin %s", ns2PluginID)
+		}
+
+		// ns2 should contain ns2PluginID but not ns1PluginID
+		var ns2HasOwn, ns2HasOther bool
+		for _, p := range ns2Plugins.Plugins {
+			if p.ID == ns2PluginID {
+				ns2HasOwn = true
+			}
+			if p.ID == ns1PluginID {
+				ns2HasOther = true
+			}
+		}
+		if !ns2HasOwn {
+			t.Errorf("ns2 plugin listing should contain plugin %s", ns2PluginID)
+		}
+		if ns2HasOther {
+			t.Errorf("ns2 plugin listing should NOT contain ns1 plugin %s", ns1PluginID)
+		}
+		t.Logf("Namespace isolation verified: ns1 has %d plugins, ns2 has %d plugins",
+			len(ns1Plugins.Plugins), len(ns2Plugins.Plugins))
+	})
+
+	// ── NS Test 4: ListNamespaces returns ns1 and ns2 ─────────────────────────
+	t.Run("ListNamespaces", func(t *testing.T) {
+		namespaces, err := discoveryClient.ListNamespaces(ctx)
+		if err != nil {
+			t.Fatalf("ListNamespaces failed: %v", err)
+		}
+		nsSet := make(map[string]bool)
+		for _, ns := range namespaces {
+			nsSet[ns] = true
+		}
+		if !nsSet["ns1"] {
+			t.Error("expected 'ns1' in namespace listing")
+		}
+		if !nsSet["ns2"] {
+			t.Error("expected 'ns2' in namespace listing")
+		}
+		t.Logf("Namespaces: %v", namespaces)
+	})
+
+	// ── NS Test 5: GetNamespaceScopes returns scope1 for ns1 ──────────────────
+	t.Run("GetNamespaceScopes_NS1", func(t *testing.T) {
+		scopes, err := discoveryClient.GetNamespaceScopes(ctx, "ns1")
+		if err != nil {
+			t.Fatalf("GetNamespaceScopes(ns1) failed: %v", err)
+		}
+		scopeSet := make(map[string]bool)
+		for _, s := range scopes {
+			scopeSet[s] = true
+		}
+		if !scopeSet["scope1"] {
+			t.Errorf("expected 'scope1' in ns1 scopes, got: %v", scopes)
+		}
+		t.Logf("ns1 scopes: %v", scopes)
+	})
+
+	// ── NS Test 6: GetScopeInfo returns resource counts ───────────────────────
+	t.Run("GetScopeInfo_NS1", func(t *testing.T) {
+		info, err := discoveryClient.GetScopeInfo(ctx, "ns1", "scope1")
+		if err != nil {
+			t.Fatalf("GetScopeInfo(ns1, scope1) failed: %v", err)
+		}
+		if info.Namespace != "ns1" {
+			t.Errorf("expected namespace 'ns1', got %q", info.Namespace)
+		}
+		if info.Scope != "scope1" {
+			t.Errorf("expected scope 'scope1', got %q", info.Scope)
+		}
+		// We created at least 1 plugin and 1 token in ns1/scope1.
+		if info.Resources.Plugins < 1 {
+			t.Errorf("expected at least 1 plugin in ns1/scope1, got %d", info.Resources.Plugins)
+		}
+		if info.Resources.Tokens < 1 {
+			t.Errorf("expected at least 1 token in ns1/scope1, got %d", info.Resources.Tokens)
+		}
+		t.Logf("ns1/scope1 resources: plugins=%d tokens=%d header_sets=%d",
+			info.Resources.Plugins, info.Resources.Tokens, info.Resources.HeaderSets)
+	})
+
+	// ── NS Test 7: GetScopeInfo for ns2/scope2 ───────────────────────────────
+	t.Run("GetScopeInfo_NS2", func(t *testing.T) {
+		info, err := discoveryClient.GetScopeInfo(ctx, "ns2", "scope2")
+		if err != nil {
+			t.Fatalf("GetScopeInfo(ns2, scope2) failed: %v", err)
+		}
+		if info.Namespace != "ns2" {
+			t.Errorf("expected namespace 'ns2', got %q", info.Namespace)
+		}
+		if info.Scope != "scope2" {
+			t.Errorf("expected scope 'scope2', got %q", info.Scope)
+		}
+		if info.Resources.Plugins < 1 {
+			t.Errorf("expected at least 1 plugin in ns2/scope2, got %d", info.Resources.Plugins)
+		}
+		t.Logf("ns2/scope2 resources: plugins=%d tokens=%d header_sets=%d",
+			info.Resources.Plugins, info.Resources.Tokens, info.Resources.HeaderSets)
+	})
+
+	// ── NS Test 8: Cleanup — remove test resources ────────────────────────────
+	t.Run("Cleanup_NS1", func(t *testing.T) {
+		if ns1PluginID != "" {
+			_, err := ns1Client.UninstallPlugin(ctx, ns1PluginID)
+			if err != nil {
+				t.Logf("cleanup: UninstallPlugin ns1 %s: %v", ns1PluginID, err)
+			}
+		}
+		if ns1TokenPrefix != "" {
+			_, err := ns1Client.RevokeToken(ctx, ns1TokenPrefix)
+			if err != nil {
+				t.Logf("cleanup: RevokeToken ns1 %s: %v", ns1TokenPrefix, err)
+			}
+		}
+	})
+
+	t.Run("Cleanup_NS2", func(t *testing.T) {
+		if ns2PluginID != "" {
+			_, err := ns2Client.UninstallPlugin(ctx, ns2PluginID)
+			if err != nil {
+				t.Logf("cleanup: UninstallPlugin ns2 %s: %v", ns2PluginID, err)
+			}
+		}
 	})
 }
