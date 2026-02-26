@@ -4,6 +4,7 @@ package gap
 import (
 	"bytes"
 	"context"
+	"crypto/ed25519"
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/json"
@@ -18,7 +19,10 @@ import (
 type Client struct {
 	baseURL    string
 	passcode   string
+	signingKey ed25519.PrivateKey
 	httpClient *http.Client
+	namespace  string
+	scope      string
 }
 
 // Option is a functional option for configuring a Client.
@@ -53,6 +57,18 @@ func WithHTTPClient(client *http.Client) Option {
 	}
 }
 
+// WithNamespace configures the client to route all resource API calls through the given namespace.
+// Both WithNamespace and WithScope must be set for namespaced routing to take effect.
+func WithNamespace(ns string) Option {
+	return func(c *Client) { c.namespace = ns }
+}
+
+// WithScope configures the client to route all resource API calls through the given scope.
+// Both WithNamespace and WithScope must be set for namespaced routing to take effect.
+func WithScope(scope string) Option {
+	return func(c *Client) { c.scope = scope }
+}
+
 // WithCACert configures the client to trust the PEM-encoded CA certificate at certPath.
 // This is useful when the GAP server uses a self-signed CA for its management API TLS.
 // On error (file not found, invalid PEM) the option silently no-ops; use WithHTTPClient
@@ -75,11 +91,34 @@ func WithCACert(certPath string) Option {
 	}
 }
 
+// ── Path building ─────────────────────────────────────────────────────────────
+
+// buildPath prepends the namespace/scope prefix when both are configured.
+// Example: buildPath("/plugins") → "/namespaces/myns/scopes/myscope/plugins"
+// When namespace or scope is empty, the path is returned unchanged.
+func (c *Client) buildPath(path string) string {
+	if c.namespace != "" && c.scope != "" {
+		return "/namespaces/" + c.namespace + "/scopes/" + c.scope + path
+	}
+	return path
+}
+
 // ── HTTP helpers ─────────────────────────────────────────────────────────────
 
 // doRequest builds and executes an HTTP request. body may be nil.
 func (c *Client) doRequest(ctx context.Context, method, path string, body io.Reader) (*http.Response, error) {
 	fullURL := strings.TrimRight(c.baseURL, "/") + path
+
+	// When signing is enabled, buffer the body so we can compute the digest.
+	var bodyBytes []byte
+	if c.signingKey != nil && body != nil {
+		var err error
+		bodyBytes, err = io.ReadAll(body)
+		if err != nil {
+			return nil, fmt.Errorf("reading body for signing: %w", err)
+		}
+		body = bytes.NewReader(bodyBytes)
+	}
 
 	req, err := http.NewRequestWithContext(ctx, method, fullURL, body)
 	if err != nil {
@@ -91,6 +130,15 @@ func (c *Client) doRequest(ctx context.Context, method, path string, body io.Rea
 	}
 	if body != nil {
 		req.Header.Set("Content-Type", "application/json")
+	}
+
+	if c.signingKey != nil {
+		if bodyBytes == nil {
+			bodyBytes = []byte{}
+		}
+		if err := c.signRequest(req, bodyBytes); err != nil {
+			return nil, fmt.Errorf("signing request: %w", err)
+		}
 	}
 
 	resp, err := c.httpClient.Do(req)
@@ -194,6 +242,12 @@ func (c *Client) doSSE(ctx context.Context, path string) (*http.Response, error)
 	req.Header.Set("Accept", "text/event-stream")
 	if c.passcode != "" {
 		req.Header.Set("Authorization", "Bearer "+c.passcode)
+	}
+
+	if c.signingKey != nil {
+		if err := c.signRequest(req, []byte{}); err != nil {
+			return nil, fmt.Errorf("signing request: %w", err)
+		}
 	}
 
 	resp, err := c.httpClient.Do(req)
