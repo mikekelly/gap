@@ -52,8 +52,8 @@ pub struct ApiState {
     pub token_cache: Arc<TokenCache>,
     /// Optional signing config for request signature verification
     pub signing_config: Option<Arc<crate::signing::SigningConfig>>,
-    /// Nonce cache for replay protection (shared with signing middleware)
-    pub nonce_cache: Arc<crate::signing::NonceCache>,
+    /// Nonce store for replay protection (shared with signing middleware)
+    pub nonce_store: Arc<crate::signing::NonceStore>,
     /// When true, legacy (un-namespaced) routes are rejected with 400
     pub namespace_mode: bool,
 }
@@ -71,7 +71,7 @@ impl ApiState {
             management_tx: None,
             token_cache,
             signing_config: None,
-            nonce_cache: Arc::new(crate::signing::NonceCache::new()),
+            nonce_store: Arc::new(crate::signing::NonceStore::new_in_memory()),
             namespace_mode: false,
         }
     }
@@ -95,7 +95,7 @@ impl ApiState {
             management_tx: Some(management_tx),
             token_cache,
             signing_config: None,
-            nonce_cache: Arc::new(crate::signing::NonceCache::new()),
+            nonce_store: Arc::new(crate::signing::NonceStore::new_in_memory()),
             namespace_mode: false,
         }
     }
@@ -476,8 +476,8 @@ async fn verify_signing(
     let original_path = parts.extensions.get::<OriginalPath>().map(|op| op.0.clone());
     let path = original_path.as_deref().unwrap_or(parts.uri.path());
     crate::signing::verify_request_signature(
-        method, path, &body_bytes, &parts.headers, signing_config, &state.nonce_cache,
-    ).map_err(|e| (StatusCode::UNAUTHORIZED, format!("Signature verification failed: {}", e)))?;
+        method, path, &body_bytes, &parts.headers, signing_config, &state.nonce_store,
+    ).await.map_err(|e| (StatusCode::UNAUTHORIZED, format!("Signature verification failed: {}", e)))?;
 
     // Reconstruct request with buffered body
     let request = axum::extract::Request::from_parts(parts, axum::body::Body::from(body_bytes));

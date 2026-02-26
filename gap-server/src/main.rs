@@ -426,15 +426,21 @@ async fn main() -> anyhow::Result<()> {
         None
     };
 
-    // Create nonce cache for replay protection and spawn cleanup task
-    let nonce_cache = Arc::new(crate::signing::NonceCache::new());
+    // Create nonce store for replay protection and spawn cleanup task
+    let nonce_store = Arc::new(match deployment_mode {
+        DeploymentMode::Horizontal => {
+            tracing::info!("Using Postgres-backed nonce store (horizontal mode)");
+            crate::signing::NonceStore::new_postgres(Arc::clone(&db))
+        }
+        DeploymentMode::Single => crate::signing::NonceStore::new_in_memory(),
+    });
     {
-        let nonce_cache = Arc::clone(&nonce_cache);
+        let nonce_store = Arc::clone(&nonce_store);
         tokio::spawn(async move {
             let mut interval = tokio::time::interval(std::time::Duration::from_secs(60));
             loop {
                 interval.tick().await;
-                nonce_cache.cleanup(std::time::Duration::from_secs(300));
+                nonce_store.cleanup(std::time::Duration::from_secs(300)).await;
             }
         });
     }
@@ -449,7 +455,7 @@ async fn main() -> anyhow::Result<()> {
     api_state.activity_tx = Some(activity_tx);
     api_state.management_tx = Some(management_tx);
     api_state.signing_config = signing_config;
-    api_state.nonce_cache = nonce_cache;
+    api_state.nonce_store = nonce_store;
     api_state.namespace_mode = args.namespace_mode;
 
     // Load persisted password hash from database (if server was previously initialized)

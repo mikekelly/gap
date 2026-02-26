@@ -1584,6 +1584,44 @@ pub(crate) async fn pg_get_scope_resource_counts(
     }))
 }
 
+// ── Nonce Store ─────────────────────────────────────────────────
+
+/// Insert a nonce into the used_nonces table. Returns true if inserted (fresh), false if duplicate (replay).
+pub(crate) async fn pg_check_and_insert_nonce(
+    pool: &PgPool,
+    namespace_id: &str,
+    scope_id: &str,
+    key_id: &str,
+    nonce_hash: &str,
+    expires_at: chrono::DateTime<chrono::Utc>,
+) -> Result<bool> {
+    let result = sqlx::query(
+        "INSERT INTO used_nonces (namespace_id, scope_id, key_id, nonce_hash, expires_at) \
+         VALUES ($1, $2, $3, $4, $5) \
+         ON CONFLICT (namespace_id, scope_id, key_id, nonce_hash) DO NOTHING",
+    )
+    .bind(namespace_id)
+    .bind(scope_id)
+    .bind(key_id)
+    .bind(nonce_hash)
+    .bind(expires_at)
+    .execute(pool)
+    .await
+    .map_err(|e| GapError::database(format!("Failed to check nonce: {}", e)))?;
+
+    Ok(result.rows_affected() == 1)
+}
+
+/// Delete expired nonces.
+pub(crate) async fn pg_cleanup_nonces(pool: &PgPool) -> Result<u64> {
+    let result = sqlx::query("DELETE FROM used_nonces WHERE expires_at < NOW()")
+        .execute(pool)
+        .await
+        .map_err(|e| GapError::database(format!("Failed to cleanup nonces: {}", e)))?;
+
+    Ok(result.rows_affected())
+}
+
 fn pg_row_to_header_set(
     row: &sqlx::postgres::PgRow,
     ns: &str,

@@ -1901,6 +1901,45 @@ impl GapDatabase {
         }
     }
 
+    // ── Nonce Store ───────────────────────────────────────────────────
+
+    /// Check and insert a nonce (for Postgres-backed nonce store).
+    /// Panics if called on LibSql backend.
+    pub async fn check_nonce(
+        &self,
+        namespace_id: &str,
+        scope_id: &str,
+        key_id: &str,
+        nonce_hash: &str,
+        expires_at: chrono::DateTime<chrono::Utc>,
+    ) -> Result<bool> {
+        match &self.inner {
+            DbBackend::Postgres { pool } => {
+                crate::database_postgres::pg_check_and_insert_nonce(
+                    pool,
+                    namespace_id,
+                    scope_id,
+                    key_id,
+                    nonce_hash,
+                    expires_at,
+                )
+                .await
+            }
+            DbBackend::LibSql { .. } => panic!("check_nonce called on LibSql backend"),
+        }
+    }
+
+    /// Cleanup expired nonces (for Postgres-backed nonce store).
+    /// Panics if called on LibSql backend.
+    pub async fn cleanup_nonces(&self) -> Result<u64> {
+        match &self.inner {
+            DbBackend::Postgres { pool } => {
+                crate::database_postgres::pg_cleanup_nonces(pool).await
+            }
+            DbBackend::LibSql { .. } => panic!("cleanup_nonces called on LibSql backend"),
+        }
+    }
+
     /// Parse a row from header_sets into a HeaderSet.
     /// Columns expected: id, match_patterns, weight, created_at.
     fn row_to_header_set(&self, row: &libsql::Row, ns: &str, scope: &str) -> Result<HeaderSet> {

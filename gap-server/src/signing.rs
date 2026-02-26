@@ -18,8 +18,10 @@
 use base64::engine::general_purpose::STANDARD as BASE64;
 use base64::Engine;
 use dashmap::DashMap;
+use gap_lib::database::GapDatabase;
 use ring::signature::{self, UnparsedPublicKey};
 use sha2::{Digest, Sha256};
+use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 /// Maximum allowed clock skew between request timestamp and server time (5 minutes).
@@ -68,6 +70,75 @@ impl NonceCache {
     pub fn cleanup(&self, max_age: Duration) {
         let cutoff = Instant::now() - max_age;
         self.inner.retain(|_, inserted| *inserted > cutoff);
+    }
+}
+
+/// Nonce storage for replay protection. In single mode, nonces are stored in memory.
+/// In horizontal mode, nonces are stored in Postgres for cross-instance deduplication.
+pub enum NonceStore {
+    /// In-memory nonce cache (single instance mode)
+    InMemory(NonceCache),
+    /// Postgres-backed nonce store (horizontal mode)
+    Postgres { db: Arc<GapDatabase> },
+}
+
+impl NonceStore {
+    /// Create an in-memory nonce store.
+    pub fn new_in_memory() -> Self {
+        Self::InMemory(NonceCache::new())
+    }
+
+    /// Create a Postgres-backed nonce store.
+    pub fn new_postgres(db: Arc<GapDatabase>) -> Self {
+        Self::Postgres { db }
+    }
+
+    /// Check if a nonce is fresh and record it. Returns true if fresh, false if replay.
+    ///
+    /// For the Postgres backend, namespace_id, scope_id, and key_id scope the nonce
+    /// to prevent cross-context collisions. For in-memory, the nonce alone is used
+    /// (matching existing behavior for single-instance mode).
+    pub async fn check_and_insert(
+        &self,
+        namespace_id: &str,
+        scope_id: &str,
+        key_id: &str,
+        nonce: &str,
+    ) -> bool {
+        match self {
+            Self::InMemory(cache) => cache.check_and_insert(nonce),
+            Self::Postgres { db } => {
+                let expires_at = chrono::Utc::now() + chrono::Duration::seconds(300);
+                match db
+                    .check_nonce(namespace_id, scope_id, key_id, nonce, expires_at)
+                    .await
+                {
+                    Ok(fresh) => fresh,
+                    Err(e) => {
+                        tracing::error!("Postgres nonce check failed: {}", e);
+                        // Fail closed — treat as replay if DB is unreachable
+                        false
+                    }
+                }
+            }
+        }
+    }
+
+    /// Cleanup expired nonces.
+    pub async fn cleanup(&self, max_age: Duration) {
+        match self {
+            Self::InMemory(cache) => cache.cleanup(max_age),
+            Self::Postgres { db } => match db.cleanup_nonces().await {
+                Ok(count) => {
+                    if count > 0 {
+                        tracing::debug!("Cleaned up {} expired nonces", count);
+                    }
+                }
+                Err(e) => {
+                    tracing::error!("Failed to cleanup nonces: {}", e);
+                }
+            },
+        }
     }
 }
 
@@ -247,13 +318,13 @@ pub enum SigningError {
 /// # Errors
 ///
 /// Returns `SigningError` describing the specific verification failure.
-pub fn verify_request_signature(
+pub async fn verify_request_signature(
     method: &str,
     path: &str,
     body: &[u8],
     headers: &http::HeaderMap,
     config: &SigningConfig,
-    nonce_cache: &NonceCache,
+    nonce_store: &NonceStore,
 ) -> Result<(), SigningError> {
     // 1. Extract and parse Signature-Input header
     let sig_input_value = headers
@@ -281,7 +352,10 @@ pub fn verify_request_signature(
     }
 
     // 4. Check nonce freshness
-    if !nonce_cache.check_and_insert(&nonce) {
+    if !nonce_store
+        .check_and_insert("default", "default", &keyid, &nonce)
+        .await
+    {
         return Err(SigningError::NonceReplay);
     }
 
@@ -567,11 +641,11 @@ mod tests {
 
     // --- Integration tests for verify_request_signature ---
 
-    #[test]
-    fn test_valid_signature() {
+    #[tokio::test]
+    async fn test_valid_signature() {
         let (keypair, pub_key) = test_keypair();
         let config = config_from_keypair(&keypair, &pub_key);
-        let nonce_cache = NonceCache::new();
+        let nonce_store = NonceStore::new_in_memory();
 
         let ts = now_ts();
         let body = b"hello world";
@@ -579,16 +653,17 @@ mod tests {
         let headers = build_headers(&sig_input, &sig);
 
         let result =
-            verify_request_signature("POST", "/plugins", body, &headers, &config, &nonce_cache);
+            verify_request_signature("POST", "/plugins", body, &headers, &config, &nonce_store)
+                .await;
         assert!(result.is_ok(), "Valid signature should verify: {:?}", result);
     }
 
-    #[test]
-    fn test_valid_signature_keyid_fallback() {
+    #[tokio::test]
+    async fn test_valid_signature_keyid_fallback() {
         // When keyid doesn't match any config key_id, falls back to trying all keys
         let (keypair, pub_key) = test_keypair();
         let config = config_from_raw(&pub_key); // Uses "test-key" as key_id, won't match derived keyid
-        let nonce_cache = NonceCache::new();
+        let nonce_store = NonceStore::new_in_memory();
 
         let ts = now_ts();
         let body = b"hello world";
@@ -596,7 +671,8 @@ mod tests {
         let headers = build_headers(&sig_input, &sig);
 
         let result =
-            verify_request_signature("POST", "/plugins", body, &headers, &config, &nonce_cache);
+            verify_request_signature("POST", "/plugins", body, &headers, &config, &nonce_store)
+                .await;
         assert!(
             result.is_ok(),
             "Valid signature should verify with keyid fallback: {:?}",
@@ -604,11 +680,11 @@ mod tests {
         );
     }
 
-    #[test]
-    fn test_expired_timestamp() {
+    #[tokio::test]
+    async fn test_expired_timestamp() {
         let (keypair, pub_key) = test_keypair();
         let config = config_from_keypair(&keypair, &pub_key);
-        let nonce_cache = NonceCache::new();
+        let nonce_store = NonceStore::new_in_memory();
 
         let ts = now_ts() - 600; // 10 minutes ago — well past the 5-minute window
         let body = b"payload";
@@ -616,15 +692,15 @@ mod tests {
         let headers = build_headers(&sig_input, &sig);
 
         let result =
-            verify_request_signature("POST", "/api", body, &headers, &config, &nonce_cache);
+            verify_request_signature("POST", "/api", body, &headers, &config, &nonce_store).await;
         assert!(matches!(result, Err(SigningError::TimestampExpired)));
     }
 
-    #[test]
-    fn test_replayed_nonce() {
+    #[tokio::test]
+    async fn test_replayed_nonce() {
         let (keypair, pub_key) = test_keypair();
         let config = config_from_keypair(&keypair, &pub_key);
-        let nonce_cache = NonceCache::new();
+        let nonce_store = NonceStore::new_in_memory();
 
         let ts = now_ts();
         let body = b"data";
@@ -633,7 +709,7 @@ mod tests {
 
         // First call should succeed
         let result =
-            verify_request_signature("POST", "/test", body, &headers, &config, &nonce_cache);
+            verify_request_signature("POST", "/test", body, &headers, &config, &nonce_store).await;
         assert!(result.is_ok(), "First use of nonce should succeed");
 
         // Second call with same nonce should fail
@@ -642,17 +718,18 @@ mod tests {
             sign_request(&keypair, "POST", "/test", body, ts2, "same-nonce");
         let headers2 = build_headers(&sig_input2, &sig2);
         let result2 =
-            verify_request_signature("POST", "/test", body, &headers2, &config, &nonce_cache);
+            verify_request_signature("POST", "/test", body, &headers2, &config, &nonce_store)
+                .await;
         assert!(matches!(result2, Err(SigningError::NonceReplay)));
     }
 
-    #[test]
-    fn test_wrong_key() {
+    #[tokio::test]
+    async fn test_wrong_key() {
         let (keypair_a, _pub_key_a) = test_keypair();
         let (_keypair_b, pub_key_b) = test_keypair();
         // Sign with keypair A but verify with keypair B's public key
         let config = config_from_keypair(&_keypair_b, &pub_key_b);
-        let nonce_cache = NonceCache::new();
+        let nonce_store = NonceStore::new_in_memory();
 
         let ts = now_ts();
         let body = b"secret";
@@ -661,22 +738,22 @@ mod tests {
         let headers = build_headers(&sig_input, &sig);
 
         let result =
-            verify_request_signature("POST", "/path", body, &headers, &config, &nonce_cache);
+            verify_request_signature("POST", "/path", body, &headers, &config, &nonce_store).await;
         assert!(matches!(result, Err(SigningError::VerificationFailed)));
     }
 
-    #[test]
-    fn test_missing_headers() {
+    #[tokio::test]
+    async fn test_missing_headers() {
         let (_keypair, pub_key) = test_keypair();
         let config = config_from_raw(&pub_key);
 
         // Missing signature-input
         {
-            let nonce_cache = NonceCache::new();
+            let nonce_store = NonceStore::new_in_memory();
             let mut headers = http::HeaderMap::new();
             headers.insert("signature", "sig1=:AQID:".parse().unwrap());
             let result =
-                verify_request_signature("GET", "/", b"", &headers, &config, &nonce_cache);
+                verify_request_signature("GET", "/", b"", &headers, &config, &nonce_store).await;
             assert!(
                 matches!(result, Err(SigningError::MissingHeader(ref h)) if h == "signature-input"),
                 "Expected MissingHeader(signature-input), got: {:?}",
@@ -686,7 +763,7 @@ mod tests {
 
         // Missing signature
         {
-            let nonce_cache = NonceCache::new();
+            let nonce_store = NonceStore::new_in_memory();
             let mut headers = http::HeaderMap::new();
             headers.insert(
                 "signature-input",
@@ -695,7 +772,7 @@ mod tests {
                     .unwrap(),
             );
             let result =
-                verify_request_signature("GET", "/", b"", &headers, &config, &nonce_cache);
+                verify_request_signature("GET", "/", b"", &headers, &config, &nonce_store).await;
             assert!(
                 matches!(result, Err(SigningError::MissingHeader(ref h)) if h == "signature"),
                 "Expected MissingHeader(signature), got: {:?}",
@@ -704,11 +781,11 @@ mod tests {
         }
     }
 
-    #[test]
-    fn test_tampered_body() {
+    #[tokio::test]
+    async fn test_tampered_body() {
         let (keypair, pub_key) = test_keypair();
         let config = config_from_keypair(&keypair, &pub_key);
-        let nonce_cache = NonceCache::new();
+        let nonce_store = NonceStore::new_in_memory();
 
         let ts = now_ts();
         let original_body = b"original content";
@@ -724,8 +801,9 @@ mod tests {
             tampered_body,
             &headers,
             &config,
-            &nonce_cache,
-        );
+            &nonce_store,
+        )
+        .await;
         assert!(matches!(result, Err(SigningError::VerificationFailed)));
     }
 
@@ -745,6 +823,63 @@ mod tests {
         // After cleanup, the nonce should be accepted again
         assert!(
             cache.check_and_insert("old-nonce"),
+            "Nonce should be accepted after cleanup"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_nonce_store_in_memory_check_and_insert() {
+        let store = NonceStore::new_in_memory();
+
+        // First insert should succeed (fresh)
+        assert!(
+            store
+                .check_and_insert("default", "default", "key1", "nonce-1")
+                .await,
+            "First use of nonce should be fresh"
+        );
+
+        // Second insert of same nonce should fail (replay)
+        assert!(
+            !store
+                .check_and_insert("default", "default", "key1", "nonce-1")
+                .await,
+            "Replay of nonce should be rejected"
+        );
+
+        // Different nonce should succeed
+        assert!(
+            store
+                .check_and_insert("default", "default", "key1", "nonce-2")
+                .await,
+            "Different nonce should be fresh"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_nonce_store_in_memory_cleanup() {
+        let store = NonceStore::new_in_memory();
+
+        // Insert and verify replay detection
+        assert!(
+            store
+                .check_and_insert("default", "default", "key1", "old-nonce")
+                .await
+        );
+        assert!(
+            !store
+                .check_and_insert("default", "default", "key1", "old-nonce")
+                .await
+        );
+
+        // Cleanup with zero max_age should evict everything
+        store.cleanup(Duration::from_secs(0)).await;
+
+        // After cleanup, the nonce should be accepted again
+        assert!(
+            store
+                .check_and_insert("default", "default", "key1", "old-nonce")
+                .await,
             "Nonce should be accepted after cleanup"
         );
     }
