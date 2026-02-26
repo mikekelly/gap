@@ -60,16 +60,15 @@ fi
 
 # ── Signing helper ────────────────────────────────────────────────────
 #
-# Computes the Ed25519 signature over a canonical string that matches
-# the server's format in gap-server/src/signing.rs:
+# Computes the Ed25519 signature using RFC 9421 HTTP Message Signatures format.
+# The signature base matches the server's verification in gap-server/src/signing.rs:
 #
-#   @method: {METHOD}
-#   @path: {PATH}
-#   content-digest: sha-256=:{BASE64_SHA256}:
-#   x-gap-timestamp: {TIMESTAMP}
-#   x-gap-nonce: {NONCE}
+#   "@method": {METHOD}
+#   "@path": {PATH}
+#   "content-digest": sha-256=:{BASE64_SHA256}:
+#   "@signature-params": ("@method" "@path" "content-digest");created=...;nonce="...";keyid="...";alg="ed25519"
 #
-# Outputs curl-compatible -H flags for all signing headers.
+# Outputs curl-compatible -H flags for: Content-Digest, Signature-Input, Signature
 
 # Compute the key-id from the public key file.
 # Key-ID = first 8 bytes of SHA-256(raw_32_byte_public_key), hex-encoded.
@@ -104,8 +103,8 @@ signed_curl() {
     local key_file="$4"
     shift 4
 
-    local timestamp
-    timestamp=$(date +%s)
+    local created
+    created=$(date +%s)
 
     local nonce
     nonce=$(openssl rand -hex 16)
@@ -115,21 +114,7 @@ signed_curl() {
     body_hash=$(printf '%s' "$body" | openssl dgst -sha256 -binary | base64 -w 0)
     local content_digest="sha-256=:${body_hash}:"
 
-    # Build canonical string (must match gap-server/src/signing.rs exactly)
-    local canonical
-    canonical=$(printf '@method: %s\n@path: %s\ncontent-digest: %s\nx-gap-timestamp: %s\nx-gap-nonce: %s' \
-        "$method" "$path" "$content_digest" "$timestamp" "$nonce")
-
-    # Sign the canonical string with Ed25519
-    # -w 0 prevents base64 line wrapping (Ed25519 sigs are 64 bytes = 88 base64 chars)
-    local signature
-    local canonical_file
-    canonical_file=$(mktemp)
-    printf '%s' "$canonical" > "$canonical_file"
-    signature=$(openssl pkeyutl -rawin -sign -inkey "$key_file" -in "$canonical_file" 2>/dev/null | base64 -w 0)
-    rm -f "$canonical_file"
-
-    # Compute key-id for this specific key
+    # Compute key-id from the private key
     local kid
     kid=$(openssl pkey -in "$key_file" -pubout -outform DER 2>/dev/null \
         | tail -c 32 \
@@ -138,22 +123,36 @@ signed_curl() {
         | od -An -tx1 \
         | tr -d ' \n')
 
-    # Make the request with signing headers
+    # Build signature params (RFC 9421)
+    local sig_params="(\"@method\" \"@path\" \"content-digest\");created=${created};nonce=\"${nonce}\";keyid=\"${kid}\";alg=\"ed25519\""
+
+    # Build signature base (RFC 9421)
+    local sig_base
+    sig_base=$(printf '"@method": %s\n"@path": %s\n"content-digest": %s\n"@signature-params": %s' \
+        "$method" "$path" "$content_digest" "$sig_params")
+
+    # Sign the signature base with Ed25519
+    local signature
+    local sig_base_file
+    sig_base_file=$(mktemp)
+    printf '%s' "$sig_base" > "$sig_base_file"
+    signature=$(openssl pkeyutl -rawin -sign -inkey "$key_file" -in "$sig_base_file" 2>/dev/null | base64 -w 0)
+    rm -f "$sig_base_file"
+
+    # Make the request with RFC 9421 headers
     if [ -n "$body" ]; then
         curl -ks -X "$method" "${GAP_SERVER_URL}${path}" \
             -H "Content-Type: application/json" \
-            -H "X-Gap-Timestamp: $timestamp" \
-            -H "X-Gap-Nonce: $nonce" \
-            -H "X-Gap-Signature: $signature" \
-            -H "X-Gap-Key-Id: $kid" \
+            -H "Content-Digest: $content_digest" \
+            -H "Signature-Input: sig1=$sig_params" \
+            -H "Signature: sig1=:${signature}:" \
             -d "$body" \
             "$@"
     else
         curl -ks -X "$method" "${GAP_SERVER_URL}${path}" \
-            -H "X-Gap-Timestamp: $timestamp" \
-            -H "X-Gap-Nonce: $nonce" \
-            -H "X-Gap-Signature: $signature" \
-            -H "X-Gap-Key-Id: $kid" \
+            -H "Content-Digest: $content_digest" \
+            -H "Signature-Input: sig1=$sig_params" \
+            -H "Signature: sig1=:${signature}:" \
             "$@"
     fi
 }
@@ -291,23 +290,36 @@ echo "Test 5: Expired timestamp rejected"
 echo "==================================="
 
 # Sign with a timestamp 10 minutes in the past (server allows 5 min skew).
-EXPIRED_TS=$(($(date +%s) - 600))
+EXPIRED_CREATED=$(($(date +%s) - 600))
 EXPIRED_NONCE=$(openssl rand -hex 16)
 EXPIRED_BODY=""
 EXPIRED_HASH=$(printf '%s' "$EXPIRED_BODY" | openssl dgst -sha256 -binary | base64 -w 0)
 EXPIRED_DIGEST="sha-256=:${EXPIRED_HASH}:"
-EXPIRED_CANONICAL=$(printf '@method: %s\n@path: %s\ncontent-digest: %s\nx-gap-timestamp: %s\nx-gap-nonce: %s' \
-    "GET" "/tokens" "$EXPIRED_DIGEST" "$EXPIRED_TS" "$EXPIRED_NONCE")
-EXPIRED_CANONICAL_FILE=$(mktemp)
-printf '%s' "$EXPIRED_CANONICAL" > "$EXPIRED_CANONICAL_FILE"
-EXPIRED_SIG=$(openssl pkeyutl -rawin -sign -inkey "$SIGNING_KEY" -in "$EXPIRED_CANONICAL_FILE" 2>/dev/null | base64 -w 0)
-rm -f "$EXPIRED_CANONICAL_FILE"
+
+# Compute key-id
+EXPIRED_KID=$(openssl pkey -in "$SIGNING_KEY" -pubout -outform DER 2>/dev/null \
+    | tail -c 32 \
+    | openssl dgst -sha256 -binary \
+    | head -c 8 \
+    | od -An -tx1 \
+    | tr -d ' \n')
+
+# Build signature params with expired timestamp
+EXPIRED_SIG_PARAMS="(\"@method\" \"@path\" \"content-digest\");created=${EXPIRED_CREATED};nonce=\"${EXPIRED_NONCE}\";keyid=\"${EXPIRED_KID}\";alg=\"ed25519\""
+
+# Build signature base
+EXPIRED_SIG_BASE=$(printf '"@method": %s\n"@path": %s\n"content-digest": %s\n"@signature-params": %s' \
+    "GET" "/tokens" "$EXPIRED_DIGEST" "$EXPIRED_SIG_PARAMS")
+
+EXPIRED_SIG_FILE=$(mktemp)
+printf '%s' "$EXPIRED_SIG_BASE" > "$EXPIRED_SIG_FILE"
+EXPIRED_SIG=$(openssl pkeyutl -rawin -sign -inkey "$SIGNING_KEY" -in "$EXPIRED_SIG_FILE" 2>/dev/null | base64 -w 0)
+rm -f "$EXPIRED_SIG_FILE"
 
 EXPIRED_STATUS=$(curl -ks -o /dev/null -w "%{http_code}" -X GET "$GAP_SERVER_URL/tokens" \
-    -H "X-Gap-Timestamp: $EXPIRED_TS" \
-    -H "X-Gap-Nonce: $EXPIRED_NONCE" \
-    -H "X-Gap-Signature: $EXPIRED_SIG" \
-    -H "X-Gap-Key-Id: $KEY_ID")
+    -H "Content-Digest: $EXPIRED_DIGEST" \
+    -H "Signature-Input: sig1=$EXPIRED_SIG_PARAMS" \
+    -H "Signature: sig1=:${EXPIRED_SIG}:")
 
 if [ "$EXPIRED_STATUS" = "401" ]; then
     log_pass "Expired timestamp correctly rejected (HTTP $EXPIRED_STATUS)"
