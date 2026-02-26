@@ -242,6 +242,12 @@ async fn verify_auth(
     state: &ApiState,
     headers: &axum::http::HeaderMap,
 ) -> Result<(), (StatusCode, String)> {
+    // When signing is enabled, the signing middleware already verified the request.
+    // Password auth is not used — skip entirely.
+    if state.signing_config.is_some() {
+        return Ok(());
+    }
+
     let auth_header = headers
         .get(axum::http::header::AUTHORIZATION)
         .ok_or_else(|| (StatusCode::UNAUTHORIZED, "Missing Authorization header".to_string()))?
@@ -527,7 +533,12 @@ pub fn create_router(state: ApiState) -> Router {
 /// GET /status - Server status (no auth required)
 async fn get_status(State(state): State<ApiState>) -> Json<StatusResponse> {
     let uptime = state.start_time.elapsed().as_secs();
-    let initialized = state.password_hash.read().await.is_some();
+    // When signing is enabled there is no init step — the server is ready immediately.
+    let initialized = if state.signing_config.is_some() {
+        true
+    } else {
+        state.password_hash.read().await.is_some()
+    };
 
     Json(StatusResponse {
         version: env!("CARGO_PKG_VERSION").to_string(),
@@ -545,6 +556,14 @@ async fn init(
 ) -> Result<Json<InitResponse>, (StatusCode, String)> {
     use argon2::password_hash::{rand_core::OsRng, SaltString};
     use argon2::{Argon2, PasswordHasher};
+
+    // Password-based init is not available when signing auth is enabled
+    if state.signing_config.is_some() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "Init not available when signing is enabled".to_string(),
+        ));
+    }
 
     // Check if already initialized (check both memory and registry)
     {
@@ -4256,32 +4275,31 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_signing_enabled_init_exempt() {
-        // /init should be exempt from signing even when signing is enabled
+    async fn test_signing_enabled_init_exempt_from_signing_middleware() {
+        // /init is exempt from the signing middleware (no signature required to reach it),
+        // but the init handler itself rejects with 400 when signing is enabled because
+        // password-based init is mutually exclusive with signing auth.
         let db = create_test_db().await;
         let (_, pub_key) = test_signing_keypair();
         let mut state = ApiState::new(9443, 9080, db, Arc::new(TokenCache::new()));
         state.signing_config = Some(Arc::new(test_signing_config(&pub_key)));
         let app = create_router(state);
 
-        // /init requires a POST with password; it won't succeed but it should
-        // NOT be rejected with 401 Unauthorized (signing). It should get past
-        // the signing middleware and fail with a different status (400 bad request
-        // for missing body, etc.)
         let response = app
             .oneshot(
                 Request::builder()
                     .method("POST")
                     .uri("/init")
                     .header("content-type", "application/json")
-                    .body(Body::from(r#"{"password":"test"}"#))
+                    .body(Body::from(r#"{"password_hash":"test"}"#))
                     .unwrap(),
             )
             .await
             .unwrap();
 
-        // Should NOT be 401 — the signing middleware should let it through
+        // Should NOT be 401 (signing middleware lets it through), but 400 from handler
         assert_ne!(response.status(), StatusCode::UNAUTHORIZED);
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
     }
 
     #[tokio::test]
@@ -4348,6 +4366,102 @@ mod tests {
                 "Signing middleware rejected a valid signature: {}", body_str);
         }
         assert_eq!(status, StatusCode::OK, "Expected OK, got {}: {}", status, body_str);
+    }
+
+    // ── Signing/password auth mutual exclusivity tests ─────────────────
+
+    #[tokio::test]
+    async fn test_init_returns_400_when_signing_enabled() {
+        // POST /init should return 400 when signing is configured because
+        // password-based init makes no sense with signature-based auth
+        let db = create_test_db().await;
+        let (_, pub_key) = test_signing_keypair();
+        let mut state = ApiState::new(9443, 9080, db, Arc::new(TokenCache::new()));
+        state.signing_config = Some(Arc::new(test_signing_config(&pub_key)));
+        let app = create_router(state);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/init")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"password_hash":"abc123"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body_bytes = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let body_str = String::from_utf8_lossy(&body_bytes);
+        assert!(body_str.contains("Init not available when signing is enabled"),
+            "Expected init rejection message, got: {}", body_str);
+    }
+
+    #[tokio::test]
+    async fn test_get_status_returns_initialized_when_signing_enabled() {
+        // GET /status should always return initialized: true when signing is configured
+        // because there's no init step with signature-based auth
+        let db = create_test_db().await;
+        let (_, pub_key) = test_signing_keypair();
+        let mut state = ApiState::new(9443, 9080, db, Arc::new(TokenCache::new()));
+        state.signing_config = Some(Arc::new(test_signing_config(&pub_key)));
+        // Note: password_hash is NOT set — but initialized should still be true
+        let app = create_router(state);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/status")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body_bytes = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&body_bytes).unwrap();
+        assert_eq!(body["initialized"], true,
+            "Expected initialized: true when signing is enabled, got: {}", body);
+    }
+
+    #[tokio::test]
+    async fn test_verify_auth_skipped_when_signing_enabled() {
+        // When signing is enabled, password auth should be skipped entirely.
+        // A signed request to a protected endpoint should succeed without any
+        // password being set.
+        let db = create_test_db().await;
+        let (keypair, pub_key) = test_signing_keypair();
+        let mut state = ApiState::new(9443, 9080, db, Arc::new(TokenCache::new()));
+        state.signing_config = Some(Arc::new(test_signing_config(&pub_key)));
+        // Note: NO password set — verify_auth would fail if it checked password
+        let app = create_router(state);
+
+        let body = b"";
+        let headers = sign_test_request(&keypair, "GET", "/tokens", body, "nonce-auth-skip-1");
+
+        let mut req = Request::builder()
+            .uri("/tokens");
+        // No Authorization header — password auth should be skipped entirely
+
+        for (name, value) in &headers {
+            req = req.header(*name, value.as_str());
+        }
+
+        let response = app
+            .oneshot(req.body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+
+        let status = response.status();
+        let body_bytes = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let body_str = String::from_utf8_lossy(&body_bytes);
+        // Should succeed (200) — signing middleware verified the request,
+        // and verify_auth should skip password check when signing is enabled
+        assert_eq!(status, StatusCode::OK,
+            "Expected OK when signed request + signing enabled (no password), got {}: {}", status, body_str);
     }
 
     // ── Namespace mode tests ────────────────────────────────────────────
