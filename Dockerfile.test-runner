@@ -1,14 +1,16 @@
 # Test runner image for GAP integration tests
-# Based on Debian slim with curl, jq, and sha512sum
+# Based on Debian slim with curl, jq, sha512sum, and openssl (for Ed25519 signing tests)
 
 FROM debian:bookworm-slim
 
 # Install test dependencies
+# openssl is needed for Ed25519 signing in test-docker-signing.sh
 RUN apt-get update && \
     apt-get install -y \
     curl \
     jq \
     coreutils \
+    openssl \
     && rm -rf /var/lib/apt/lists/*
 
 # Create test user
