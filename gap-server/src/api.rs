@@ -447,7 +447,7 @@ impl IntoResponse for ApiError {
 ///
 /// When `signing_config` is `None` in the API state, all requests pass through
 /// unchanged. When enabled, requests to all endpoints except `/status` and `/init`
-/// must include valid `x-gap-timestamp`, `x-gap-nonce`, and `x-gap-signature` headers.
+/// must include valid `Signature-Input` and `Signature` headers per RFC 9421.
 async fn verify_signing(
     State(state): State<ApiState>,
     request: axum::extract::Request,
