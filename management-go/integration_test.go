@@ -47,6 +47,10 @@ func sha512Hex(s string) string {
 func strPtr(s string) *string { return &s }
 
 func TestIntegration(t *testing.T) {
+	if os.Getenv("GAP_PASSWORD") == "" {
+		t.Skip("GAP_PASSWORD not set, skipping password-auth integration tests")
+	}
+
 	ctx := context.Background()
 	password := "test-integration-password"
 	passcodeHash := sha512Hex(password)
@@ -812,6 +816,10 @@ func TestIntegration(t *testing.T) {
 // These are separate from the main sequential flow since they require
 // a context with timeout to avoid hanging.
 func TestIntegrationSSEStreams(t *testing.T) {
+	if os.Getenv("GAP_PASSWORD") == "" {
+		t.Skip("GAP_PASSWORD not set, skipping password-auth SSE stream tests")
+	}
+
 	ctx := context.Background()
 	password := "test-integration-password"
 	passcodeHash := sha512Hex(password)
