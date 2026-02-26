@@ -143,6 +143,10 @@ enum DbBackend {
         db: libsql::Database,
         conn: libsql::Connection,
     },
+    #[allow(dead_code)]
+    Postgres {
+        pool: sqlx::PgPool,
+    },
 }
 
 /// Embedded database for GAP persistent storage.
@@ -154,6 +158,15 @@ impl GapDatabase {
     fn conn(&self) -> &libsql::Connection {
         match &self.inner {
             DbBackend::LibSql { conn, .. } => conn,
+            DbBackend::Postgres { .. } => panic!("conn() called on Postgres backend"),
+        }
+    }
+
+    #[allow(dead_code)]
+    fn pool(&self) -> &sqlx::PgPool {
+        match &self.inner {
+            DbBackend::Postgres { pool } => pool,
+            DbBackend::LibSql { .. } => panic!("pool() called on LibSql backend"),
         }
     }
 
@@ -270,6 +283,27 @@ impl GapDatabase {
         Ok(instance)
     }
 
+    /// Open a Postgres-backed database.
+    pub async fn open_postgres(
+        url: &str,
+        schema: &str,
+        max_connections: u32,
+        min_connections: u32,
+    ) -> Result<Self> {
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(max_connections)
+            .min_connections(min_connections)
+            .connect(url)
+            .await
+            .map_err(|e| GapError::database(format!("Failed to connect to Postgres: {}", e)))?;
+
+        crate::database_postgres::run_postgres_migrations(&pool, schema).await?;
+
+        Ok(Self {
+            inner: DbBackend::Postgres { pool },
+        })
+    }
+
     async fn run_migrations(&self) -> Result<()> {
         tracing::debug!("Applying database schema");
         self.conn()
@@ -335,77 +369,91 @@ impl GapDatabase {
         ns: &str,
         scope: &str,
     ) -> Result<()> {
-        let has_scopes: i64 = if scopes.is_some() { 1 } else { 0 };
-        self.conn()
-            .execute(
-                "INSERT OR REPLACE INTO tokens (token_value, name, created_at, has_scopes, namespace_id, scope_id) VALUES (?1, '', ?2, ?3, ?4, ?5)",
-                libsql::params![token_value, created_at.to_rfc3339(), has_scopes, ns, scope],
-            )
-            .await
-            .map_err(|e| GapError::database(e.to_string()))?;
-
-        if let Some(scope_list) = scopes {
-            for scope in scope_list {
-                let methods_json = scope
-                    .methods
-                    .as_ref()
-                    .map(|m| serde_json::to_string(m).unwrap_or_default());
-                let port = scope.port.map(|p| p as i64);
+        match &self.inner {
+            DbBackend::LibSql { .. } => {
+                let has_scopes: i64 = if scopes.is_some() { 1 } else { 0 };
                 self.conn()
                     .execute(
-                        "INSERT INTO token_scopes (token_value, host_pattern, port, path_pattern, methods) VALUES (?1, ?2, ?3, ?4, ?5)",
-                        libsql::params![
-                            token_value,
-                            scope.host_pattern.as_str(),
-                            port,
-                            scope.path_pattern.as_str(),
-                            methods_json
-                        ],
+                        "INSERT OR REPLACE INTO tokens (token_value, name, created_at, has_scopes, namespace_id, scope_id) VALUES (?1, '', ?2, ?3, ?4, ?5)",
+                        libsql::params![token_value, created_at.to_rfc3339(), has_scopes, ns, scope],
                     )
                     .await
                     .map_err(|e| GapError::database(e.to_string()))?;
+
+                if let Some(scope_list) = scopes {
+                    for scope in scope_list {
+                        let methods_json = scope
+                            .methods
+                            .as_ref()
+                            .map(|m| serde_json::to_string(m).unwrap_or_default());
+                        let port = scope.port.map(|p| p as i64);
+                        self.conn()
+                            .execute(
+                                "INSERT INTO token_scopes (token_value, host_pattern, port, path_pattern, methods) VALUES (?1, ?2, ?3, ?4, ?5)",
+                                libsql::params![
+                                    token_value,
+                                    scope.host_pattern.as_str(),
+                                    port,
+                                    scope.path_pattern.as_str(),
+                                    methods_json
+                                ],
+                            )
+                            .await
+                            .map_err(|e| GapError::database(e.to_string()))?;
+                    }
+                }
+
+                Ok(())
+            }
+            DbBackend::Postgres { pool } => {
+                crate::database_postgres::pg_add_token(pool, token_value, created_at, scopes, ns, scope).await
             }
         }
-
-        Ok(())
     }
 
     /// Get token metadata by token value.
     ///
     /// Returns `None` for revoked tokens or tokens that don't exist.
     pub async fn get_token(&self, token_value: &str, ns: &str, scope: &str) -> Result<Option<TokenMetadata>> {
-        let mut rows = self
-            .conn()
-            .query(
-                "SELECT created_at, has_scopes FROM tokens WHERE token_value = ?1 AND revoked_at IS NULL AND namespace_id = ?2 AND scope_id = ?3",
-                libsql::params![token_value, ns, scope],
-            )
-            .await
-            .map_err(|e| GapError::database(e.to_string()))?;
+        match &self.inner {
+            DbBackend::LibSql { .. } => {
+                let mut rows = self
+                    .conn()
+                    .query(
+                        "SELECT created_at, has_scopes FROM tokens WHERE token_value = ?1 AND revoked_at IS NULL AND namespace_id = ?2 AND scope_id = ?3",
+                        libsql::params![token_value, ns, scope],
+                    )
+                    .await
+                    .map_err(|e| GapError::database(e.to_string()))?;
 
-        if let Some(row) = rows.next().await.map_err(|e| GapError::database(e.to_string()))? {
-            let created_at_str: String =
-                row.get(0).map_err(|e| GapError::database(e.to_string()))?;
-            let created_at = DateTime::parse_from_rfc3339(&created_at_str)
-                .map_err(|e| GapError::database(format!("Invalid timestamp: {}", e)))?
-                .with_timezone(&Utc);
-            let has_scopes: i64 = row.get(1).map_err(|e| GapError::database(e.to_string()))?;
+                if let Some(row) = rows.next().await.map_err(|e| GapError::database(e.to_string()))? {
+                    let created_at_str: String =
+                        row.get(0).map_err(|e| GapError::database(e.to_string()))?;
+                    let created_at = DateTime::parse_from_rfc3339(&created_at_str)
+                        .map_err(|e| GapError::database(format!("Invalid timestamp: {}", e)))?
+                        .with_timezone(&Utc);
+                    let has_scopes: i64 = row.get(1).map_err(|e| GapError::database(e.to_string()))?;
 
-            let scopes = if has_scopes == 1 {
-                Some(self.get_token_scopes(token_value).await?)
-            } else {
-                None
-            };
+                    let scopes = if has_scopes == 1 {
+                        Some(self.get_token_scopes(token_value).await?)
+                    } else {
+                        None
+                    };
 
-            Ok(Some(TokenMetadata {
-                created_at,
-                scopes,
-                revoked_at: None,
-                namespace_id: ns.to_string(),
-                scope_id: scope.to_string(),
-            }))
-        } else {
-            Ok(None)
+                    Ok(Some(TokenMetadata {
+                        created_at,
+                        scopes,
+                        revoked_at: None,
+                        namespace_id: ns.to_string(),
+                        scope_id: scope.to_string(),
+                    }))
+                } else {
+                    Ok(None)
+                }
+            }
+            DbBackend::Postgres { pool } => {
+                crate::database_postgres::pg_get_token(pool, token_value, ns, scope).await
+            }
         }
     }
 
@@ -445,64 +493,78 @@ impl GapDatabase {
     /// When `include_revoked` is `false`, only active (non-revoked) tokens are returned.
     /// When `true`, all tokens are returned including revoked ones.
     pub async fn list_tokens(&self, include_revoked: bool, ns: &str, scope: &str) -> Result<Vec<TokenEntry>> {
-        let query = if include_revoked {
-            "SELECT token_value, created_at, revoked_at, has_scopes FROM tokens WHERE namespace_id = ?1 AND scope_id = ?2"
-        } else {
-            "SELECT token_value, created_at, revoked_at, has_scopes FROM tokens WHERE revoked_at IS NULL AND namespace_id = ?1 AND scope_id = ?2"
-        };
-        let mut rows = self
-            .conn()
-            .query(query, libsql::params![ns, scope])
-            .await
-            .map_err(|e| GapError::database(e.to_string()))?;
-        let mut result = Vec::new();
-        while let Some(row) = rows.next().await.map_err(|e| GapError::database(e.to_string()))? {
-            let token_value: String =
-                row.get(0).map_err(|e| GapError::database(e.to_string()))?;
-            let created_at_str: String =
-                row.get(1).map_err(|e| GapError::database(e.to_string()))?;
-            let created_at = DateTime::parse_from_rfc3339(&created_at_str)
-                .map_err(|e| GapError::database(format!("Invalid timestamp: {}", e)))?
-                .with_timezone(&Utc);
-            let revoked_at_str: Option<String> =
-                row.get(2).map_err(|e| GapError::database(e.to_string()))?;
-            let revoked_at = revoked_at_str
-                .map(|s| DateTime::parse_from_rfc3339(&s))
-                .transpose()
-                .map_err(|e| GapError::database(format!("Invalid revoked_at timestamp: {}", e)))?
-                .map(|dt| dt.with_timezone(&Utc));
-            let has_scopes: i64 = row.get(3).map_err(|e| GapError::database(e.to_string()))?;
+        match &self.inner {
+            DbBackend::LibSql { .. } => {
+                let query = if include_revoked {
+                    "SELECT token_value, created_at, revoked_at, has_scopes FROM tokens WHERE namespace_id = ?1 AND scope_id = ?2"
+                } else {
+                    "SELECT token_value, created_at, revoked_at, has_scopes FROM tokens WHERE revoked_at IS NULL AND namespace_id = ?1 AND scope_id = ?2"
+                };
+                let mut rows = self
+                    .conn()
+                    .query(query, libsql::params![ns, scope])
+                    .await
+                    .map_err(|e| GapError::database(e.to_string()))?;
+                let mut result = Vec::new();
+                while let Some(row) = rows.next().await.map_err(|e| GapError::database(e.to_string()))? {
+                    let token_value: String =
+                        row.get(0).map_err(|e| GapError::database(e.to_string()))?;
+                    let created_at_str: String =
+                        row.get(1).map_err(|e| GapError::database(e.to_string()))?;
+                    let created_at = DateTime::parse_from_rfc3339(&created_at_str)
+                        .map_err(|e| GapError::database(format!("Invalid timestamp: {}", e)))?
+                        .with_timezone(&Utc);
+                    let revoked_at_str: Option<String> =
+                        row.get(2).map_err(|e| GapError::database(e.to_string()))?;
+                    let revoked_at = revoked_at_str
+                        .map(|s| DateTime::parse_from_rfc3339(&s))
+                        .transpose()
+                        .map_err(|e| GapError::database(format!("Invalid revoked_at timestamp: {}", e)))?
+                        .map(|dt| dt.with_timezone(&Utc));
+                    let has_scopes: i64 = row.get(3).map_err(|e| GapError::database(e.to_string()))?;
 
-            let scopes = if has_scopes == 1 {
-                Some(self.get_token_scopes(&token_value).await?)
-            } else {
-                None
-            };
+                    let scopes = if has_scopes == 1 {
+                        Some(self.get_token_scopes(&token_value).await?)
+                    } else {
+                        None
+                    };
 
-            result.push(TokenEntry {
-                token_value,
-                created_at,
-                scopes,
-                revoked_at,
-                namespace_id: ns.to_string(),
-                scope_id: scope.to_string(),
-            });
+                    result.push(TokenEntry {
+                        token_value,
+                        created_at,
+                        scopes,
+                        revoked_at,
+                        namespace_id: ns.to_string(),
+                        scope_id: scope.to_string(),
+                    });
+                }
+                Ok(result)
+            }
+            DbBackend::Postgres { pool } => {
+                crate::database_postgres::pg_list_tokens(pool, include_revoked, ns, scope).await
+            }
         }
-        Ok(result)
     }
 
     /// Soft-delete a token by setting its revoked_at timestamp.
     ///
     /// Revoked tokens are excluded from `get_token` and `list_tokens(false)`.
     pub async fn revoke_token(&self, token_value: &str, ns: &str, scope: &str) -> Result<()> {
-        self.conn()
-            .execute(
-                "UPDATE tokens SET revoked_at = ?2 WHERE token_value = ?1 AND revoked_at IS NULL AND namespace_id = ?3 AND scope_id = ?4",
-                libsql::params![token_value, Utc::now().to_rfc3339(), ns, scope],
-            )
-            .await
-            .map_err(|e| GapError::database(e.to_string()))?;
-        Ok(())
+        match &self.inner {
+            DbBackend::LibSql { .. } => {
+                self.conn()
+                    .execute(
+                        "UPDATE tokens SET revoked_at = ?2 WHERE token_value = ?1 AND revoked_at IS NULL AND namespace_id = ?3 AND scope_id = ?4",
+                        libsql::params![token_value, Utc::now().to_rfc3339(), ns, scope],
+                    )
+                    .await
+                    .map_err(|e| GapError::database(e.to_string()))?;
+                Ok(())
+            }
+            DbBackend::Postgres { pool } => {
+                crate::database_postgres::pg_revoke_token(pool, token_value, ns, scope).await
+            }
+        }
     }
 
     /// Find an active token by prefix match.
@@ -510,21 +572,28 @@ impl GapDatabase {
     /// Returns the full token value if exactly one active token matches.
     /// Returns `None` if no tokens match.
     pub async fn get_token_by_prefix(&self, prefix: &str, ns: &str, scope: &str) -> Result<Option<String>> {
-        let pattern = format!("{}%", prefix);
-        let mut rows = self
-            .conn()
-            .query(
-                "SELECT token_value FROM tokens WHERE token_value LIKE ?1 AND revoked_at IS NULL AND namespace_id = ?2 AND scope_id = ?3",
-                libsql::params![pattern, ns, scope],
-            )
-            .await
-            .map_err(|e| GapError::database(e.to_string()))?;
+        match &self.inner {
+            DbBackend::LibSql { .. } => {
+                let pattern = format!("{}%", prefix);
+                let mut rows = self
+                    .conn()
+                    .query(
+                        "SELECT token_value FROM tokens WHERE token_value LIKE ?1 AND revoked_at IS NULL AND namespace_id = ?2 AND scope_id = ?3",
+                        libsql::params![pattern, ns, scope],
+                    )
+                    .await
+                    .map_err(|e| GapError::database(e.to_string()))?;
 
-        if let Some(row) = rows.next().await.map_err(|e| GapError::database(e.to_string()))? {
-            let token_value: String = row.get(0).map_err(|e| GapError::database(e.to_string()))?;
-            Ok(Some(token_value))
-        } else {
-            Ok(None)
+                if let Some(row) = rows.next().await.map_err(|e| GapError::database(e.to_string()))? {
+                    let token_value: String = row.get(0).map_err(|e| GapError::database(e.to_string()))?;
+                    Ok(Some(token_value))
+                } else {
+                    Ok(None)
+                }
+            }
+            DbBackend::Postgres { pool } => {
+                crate::database_postgres::pg_get_token_by_prefix(pool, prefix, ns, scope).await
+            }
         }
     }
 
@@ -537,124 +606,159 @@ impl GapDatabase {
     /// Add a plugin by appending a new entry to plugin_versions.
     /// Returns the generated UUID for the new plugin.
     pub async fn add_plugin(&self, plugin: &PluginEntry, source_code: &str, ns: &str, scope: &str) -> Result<String> {
-        let id = Uuid::new_v4().to_string();
-        let hosts_json =
-            serde_json::to_string(&plugin.hosts).map_err(|e| GapError::database(e.to_string()))?;
-        let schema_json = serde_json::to_string(&plugin.credential_schema)
-            .map_err(|e| GapError::database(e.to_string()))?;
+        match &self.inner {
+            DbBackend::LibSql { .. } => {
+                let id = Uuid::new_v4().to_string();
+                let hosts_json =
+                    serde_json::to_string(&plugin.hosts).map_err(|e| GapError::database(e.to_string()))?;
+                let schema_json = serde_json::to_string(&plugin.credential_schema)
+                    .map_err(|e| GapError::database(e.to_string()))?;
 
-        // Compute source hash
-        let source_hash = format!("{:x}", Sha256::digest(source_code.as_bytes()));
-        let now = Utc::now().to_rfc3339();
+                // Compute source hash
+                let source_hash = format!("{:x}", Sha256::digest(source_code.as_bytes()));
+                let now = Utc::now().to_rfc3339();
 
-        let permit_http: i64 = if plugin.dangerously_permit_http { 1 } else { 0 };
+                let permit_http: i64 = if plugin.dangerously_permit_http { 1 } else { 0 };
 
-        self.conn()
-            .execute(
-                "INSERT INTO plugin_versions (plugin_id, hosts, credential_schema, commit_sha, source_hash, source_code, installed_at, deleted, dangerously_permit_http, weight, namespace_id, scope_id) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 0, ?8, ?9, ?10, ?11)",
-                libsql::params![
-                    id.as_str(),
-                    hosts_json,
-                    schema_json,
-                    plugin.commit_sha.as_deref().unwrap_or(""),
-                    source_hash,
-                    source_code,
-                    now,
-                    permit_http,
-                    plugin.weight,
-                    ns,
-                    scope
-                ],
-            )
-            .await
-            .map_err(|e| GapError::database(e.to_string()))?;
+                self.conn()
+                    .execute(
+                        "INSERT INTO plugin_versions (plugin_id, hosts, credential_schema, commit_sha, source_hash, source_code, installed_at, deleted, dangerously_permit_http, weight, namespace_id, scope_id) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 0, ?8, ?9, ?10, ?11)",
+                        libsql::params![
+                            id.as_str(),
+                            hosts_json,
+                            schema_json,
+                            plugin.commit_sha.as_deref().unwrap_or(""),
+                            source_hash,
+                            source_code,
+                            now,
+                            permit_http,
+                            plugin.weight,
+                            ns,
+                            scope
+                        ],
+                    )
+                    .await
+                    .map_err(|e| GapError::database(e.to_string()))?;
 
-        Ok(id)
+                Ok(id)
+            }
+            DbBackend::Postgres { pool } => {
+                crate::database_postgres::pg_add_plugin(pool, plugin, source_code, ns, scope).await
+            }
+        }
     }
 
     /// Get a plugin entry by ID (latest version, None if deleted or absent).
     pub async fn get_plugin(&self, id: &str, ns: &str, scope: &str) -> Result<Option<PluginEntry>> {
-        // Get the absolute latest entry; if it's a tombstone, the plugin is "deleted".
-        let mut rows = self
-            .conn()
-            .query(
-                "SELECT plugin_id, hosts, credential_schema, commit_sha, deleted, dangerously_permit_http, weight, installed_at FROM plugin_versions WHERE plugin_id = ?1 AND namespace_id = ?2 AND scope_id = ?3 ORDER BY id DESC LIMIT 1",
-                libsql::params![id, ns, scope],
-            )
-            .await
-            .map_err(|e| GapError::database(e.to_string()))?;
+        match &self.inner {
+            DbBackend::LibSql { .. } => {
+                // Get the absolute latest entry; if it's a tombstone, the plugin is "deleted".
+                let mut rows = self
+                    .conn()
+                    .query(
+                        "SELECT plugin_id, hosts, credential_schema, commit_sha, deleted, dangerously_permit_http, weight, installed_at FROM plugin_versions WHERE plugin_id = ?1 AND namespace_id = ?2 AND scope_id = ?3 ORDER BY id DESC LIMIT 1",
+                        libsql::params![id, ns, scope],
+                    )
+                    .await
+                    .map_err(|e| GapError::database(e.to_string()))?;
 
-        if let Some(row) = rows.next().await.map_err(|e| GapError::database(e.to_string()))? {
-            let deleted: i64 = row.get(4).map_err(|e| GapError::database(e.to_string()))?;
-            if deleted != 0 {
-                return Ok(None);
+                if let Some(row) = rows.next().await.map_err(|e| GapError::database(e.to_string()))? {
+                    let deleted: i64 = row.get(4).map_err(|e| GapError::database(e.to_string()))?;
+                    if deleted != 0 {
+                        return Ok(None);
+                    }
+                    Ok(Some(self.row_to_plugin_entry(&row, 5, ns, scope)?))
+                } else {
+                    Ok(None)
+                }
             }
-            Ok(Some(self.row_to_plugin_entry(&row, 5, ns, scope)?))
-        } else {
-            Ok(None)
+            DbBackend::Postgres { pool } => {
+                crate::database_postgres::pg_get_plugin(pool, id, ns, scope).await
+            }
         }
     }
 
     /// Get only the source code for a plugin (latest version, None if deleted or absent).
     pub async fn get_plugin_source(&self, id: &str, ns: &str, scope: &str) -> Result<Option<String>> {
-        // Get the absolute latest entry; if it's a tombstone, the plugin is "deleted".
-        let mut rows = self
-            .conn()
-            .query(
-                "SELECT source_code, deleted FROM plugin_versions WHERE plugin_id = ?1 AND namespace_id = ?2 AND scope_id = ?3 ORDER BY id DESC LIMIT 1",
-                libsql::params![id, ns, scope],
-            )
-            .await
-            .map_err(|e| GapError::database(e.to_string()))?;
+        match &self.inner {
+            DbBackend::LibSql { .. } => {
+                // Get the absolute latest entry; if it's a tombstone, the plugin is "deleted".
+                let mut rows = self
+                    .conn()
+                    .query(
+                        "SELECT source_code, deleted FROM plugin_versions WHERE plugin_id = ?1 AND namespace_id = ?2 AND scope_id = ?3 ORDER BY id DESC LIMIT 1",
+                        libsql::params![id, ns, scope],
+                    )
+                    .await
+                    .map_err(|e| GapError::database(e.to_string()))?;
 
-        if let Some(row) = rows.next().await.map_err(|e| GapError::database(e.to_string()))? {
-            let deleted: i64 = row.get(1).map_err(|e| GapError::database(e.to_string()))?;
-            if deleted != 0 {
-                return Ok(None);
+                if let Some(row) = rows.next().await.map_err(|e| GapError::database(e.to_string()))? {
+                    let deleted: i64 = row.get(1).map_err(|e| GapError::database(e.to_string()))?;
+                    if deleted != 0 {
+                        return Ok(None);
+                    }
+                    let source: String = row.get(0).map_err(|e| GapError::database(e.to_string()))?;
+                    Ok(Some(source))
+                } else {
+                    Ok(None)
+                }
             }
-            let source: String = row.get(0).map_err(|e| GapError::database(e.to_string()))?;
-            Ok(Some(source))
-        } else {
-            Ok(None)
+            DbBackend::Postgres { pool } => {
+                crate::database_postgres::pg_get_plugin_source(pool, id, ns, scope).await
+            }
         }
     }
 
     /// List all plugins (latest non-deleted version of each) within a namespace/scope.
     pub async fn list_plugins(&self, ns: &str, scope: &str) -> Result<Vec<PluginEntry>> {
-        let mut rows = self
-            .conn()
-            .query(
-                "SELECT pv.plugin_id, pv.hosts, pv.credential_schema, pv.commit_sha, pv.dangerously_permit_http, pv.weight, pv.installed_at \
-                 FROM plugin_versions pv \
-                 INNER JOIN ( \
-                     SELECT plugin_id, MAX(id) as max_id \
-                     FROM plugin_versions \
-                     WHERE namespace_id = ?1 AND scope_id = ?2 \
-                     GROUP BY plugin_id \
-                 ) latest ON pv.id = latest.max_id \
-                 WHERE pv.deleted = 0 AND pv.namespace_id = ?1 AND pv.scope_id = ?2",
-                libsql::params![ns, scope],
-            )
-            .await
-            .map_err(|e| GapError::database(e.to_string()))?;
-        let mut result = Vec::new();
-        while let Some(row) = rows.next().await.map_err(|e| GapError::database(e.to_string()))? {
-            result.push(self.row_to_plugin_entry(&row, 4, ns, scope)?);
+        match &self.inner {
+            DbBackend::LibSql { .. } => {
+                let mut rows = self
+                    .conn()
+                    .query(
+                        "SELECT pv.plugin_id, pv.hosts, pv.credential_schema, pv.commit_sha, pv.dangerously_permit_http, pv.weight, pv.installed_at \
+                         FROM plugin_versions pv \
+                         INNER JOIN ( \
+                             SELECT plugin_id, MAX(id) as max_id \
+                             FROM plugin_versions \
+                             WHERE namespace_id = ?1 AND scope_id = ?2 \
+                             GROUP BY plugin_id \
+                         ) latest ON pv.id = latest.max_id \
+                         WHERE pv.deleted = 0 AND pv.namespace_id = ?1 AND pv.scope_id = ?2",
+                        libsql::params![ns, scope],
+                    )
+                    .await
+                    .map_err(|e| GapError::database(e.to_string()))?;
+                let mut result = Vec::new();
+                while let Some(row) = rows.next().await.map_err(|e| GapError::database(e.to_string()))? {
+                    result.push(self.row_to_plugin_entry(&row, 4, ns, scope)?);
+                }
+                Ok(result)
+            }
+            DbBackend::Postgres { pool } => {
+                crate::database_postgres::pg_list_plugins(pool, ns, scope).await
+            }
         }
-        Ok(result)
     }
 
     /// Remove a plugin by appending a tombstone. Does NOT delete credentials (preserves across reinstalls).
     pub async fn remove_plugin(&self, id: &str, ns: &str, scope: &str) -> Result<()> {
-        let now = Utc::now().to_rfc3339();
-        self.conn()
-            .execute(
-                "INSERT INTO plugin_versions (plugin_id, hosts, credential_schema, commit_sha, source_hash, source_code, installed_at, deleted, namespace_id, scope_id) VALUES (?1, '[]', '[]', '', '', '', ?2, 1, ?3, ?4)",
-                libsql::params![id, now, ns, scope],
-            )
-            .await
-            .map_err(|e| GapError::database(e.to_string()))?;
-        Ok(())
+        match &self.inner {
+            DbBackend::LibSql { .. } => {
+                let now = Utc::now().to_rfc3339();
+                self.conn()
+                    .execute(
+                        "INSERT INTO plugin_versions (plugin_id, hosts, credential_schema, commit_sha, source_hash, source_code, installed_at, deleted, namespace_id, scope_id) VALUES (?1, '[]', '[]', '', '', '', ?2, 1, ?3, ?4)",
+                        libsql::params![id, now, ns, scope],
+                    )
+                    .await
+                    .map_err(|e| GapError::database(e.to_string()))?;
+                Ok(())
+            }
+            DbBackend::Postgres { pool } => {
+                crate::database_postgres::pg_remove_plugin(pool, id, ns, scope).await
+            }
+        }
     }
 
     /// Check whether a plugin exists (latest entry is non-deleted).
@@ -712,36 +816,43 @@ impl GapDatabase {
 
     /// Look up a plugin version by its source hash within a namespace/scope.
     pub async fn get_plugin_version_by_hash(&self, source_hash: &str, ns: &str, scope: &str) -> Result<Option<PluginVersion>> {
-        let mut rows = self
-            .conn()
-            .query(
-                "SELECT plugin_id, commit_sha, source_hash, source_code, installed_at FROM plugin_versions WHERE source_hash = ?1 AND namespace_id = ?2 AND scope_id = ?3 LIMIT 1",
-                libsql::params![source_hash, ns, scope],
-            )
-            .await
-            .map_err(|e| GapError::database(e.to_string()))?;
+        match &self.inner {
+            DbBackend::LibSql { .. } => {
+                let mut rows = self
+                    .conn()
+                    .query(
+                        "SELECT plugin_id, commit_sha, source_hash, source_code, installed_at FROM plugin_versions WHERE source_hash = ?1 AND namespace_id = ?2 AND scope_id = ?3 LIMIT 1",
+                        libsql::params![source_hash, ns, scope],
+                    )
+                    .await
+                    .map_err(|e| GapError::database(e.to_string()))?;
 
-        if let Some(row) = rows.next().await.map_err(|e| GapError::database(e.to_string()))? {
-            let plugin_id: String = row.get(0).map_err(|e| GapError::database(e.to_string()))?;
-            let commit_sha_raw: String = row.get(1).map_err(|e| GapError::database(e.to_string()))?;
-            let source_hash: String = row.get(2).map_err(|e| GapError::database(e.to_string()))?;
-            let source_code: String = row.get(3).map_err(|e| GapError::database(e.to_string()))?;
-            let installed_at_str: String = row.get(4).map_err(|e| GapError::database(e.to_string()))?;
+                if let Some(row) = rows.next().await.map_err(|e| GapError::database(e.to_string()))? {
+                    let plugin_id: String = row.get(0).map_err(|e| GapError::database(e.to_string()))?;
+                    let commit_sha_raw: String = row.get(1).map_err(|e| GapError::database(e.to_string()))?;
+                    let source_hash: String = row.get(2).map_err(|e| GapError::database(e.to_string()))?;
+                    let source_code: String = row.get(3).map_err(|e| GapError::database(e.to_string()))?;
+                    let installed_at_str: String = row.get(4).map_err(|e| GapError::database(e.to_string()))?;
 
-            let commit_sha = if commit_sha_raw.is_empty() { None } else { Some(commit_sha_raw) };
-            let installed_at = DateTime::parse_from_rfc3339(&installed_at_str)
-                .map_err(|e| GapError::database(format!("Invalid timestamp: {}", e)))?
-                .with_timezone(&Utc);
+                    let commit_sha = if commit_sha_raw.is_empty() { None } else { Some(commit_sha_raw) };
+                    let installed_at = DateTime::parse_from_rfc3339(&installed_at_str)
+                        .map_err(|e| GapError::database(format!("Invalid timestamp: {}", e)))?
+                        .with_timezone(&Utc);
 
-            Ok(Some(PluginVersion {
-                plugin_id,
-                commit_sha,
-                source_hash,
-                source_code,
-                installed_at,
-            }))
-        } else {
-            Ok(None)
+                    Ok(Some(PluginVersion {
+                        plugin_id,
+                        commit_sha,
+                        source_hash,
+                        source_code,
+                        installed_at,
+                    }))
+                } else {
+                    Ok(None)
+                }
+            }
+            DbBackend::Postgres { pool } => {
+                crate::database_postgres::pg_get_plugin_version_by_hash(pool, source_hash, ns, scope).await
+            }
         }
     }
 
@@ -749,32 +860,46 @@ impl GapDatabase {
 
     /// Set (upsert) a credential value.
     pub async fn set_credential(&self, plugin_id: &str, field: &str, value: &str, ns: &str, scope: &str) -> Result<()> {
-        self.conn()
-            .execute(
-                "INSERT OR REPLACE INTO credentials (namespace_id, scope_id, plugin_id, field, value) VALUES (?1, ?2, ?3, ?4, ?5)",
-                libsql::params![ns, scope, plugin_id, field, value],
-            )
-            .await
-            .map_err(|e| GapError::database(e.to_string()))?;
-        Ok(())
+        match &self.inner {
+            DbBackend::LibSql { .. } => {
+                self.conn()
+                    .execute(
+                        "INSERT OR REPLACE INTO credentials (namespace_id, scope_id, plugin_id, field, value) VALUES (?1, ?2, ?3, ?4, ?5)",
+                        libsql::params![ns, scope, plugin_id, field, value],
+                    )
+                    .await
+                    .map_err(|e| GapError::database(e.to_string()))?;
+                Ok(())
+            }
+            DbBackend::Postgres { pool } => {
+                crate::database_postgres::pg_set_credential(pool, plugin_id, field, value, ns, scope).await
+            }
+        }
     }
 
     /// Get a single credential value.
     pub async fn get_credential(&self, plugin_id: &str, field: &str, ns: &str, scope: &str) -> Result<Option<String>> {
-        let mut rows = self
-            .conn()
-            .query(
-                "SELECT value FROM credentials WHERE plugin_id = ?1 AND field = ?2 AND namespace_id = ?3 AND scope_id = ?4",
-                libsql::params![plugin_id, field, ns, scope],
-            )
-            .await
-            .map_err(|e| GapError::database(e.to_string()))?;
+        match &self.inner {
+            DbBackend::LibSql { .. } => {
+                let mut rows = self
+                    .conn()
+                    .query(
+                        "SELECT value FROM credentials WHERE plugin_id = ?1 AND field = ?2 AND namespace_id = ?3 AND scope_id = ?4",
+                        libsql::params![plugin_id, field, ns, scope],
+                    )
+                    .await
+                    .map_err(|e| GapError::database(e.to_string()))?;
 
-        if let Some(row) = rows.next().await.map_err(|e| GapError::database(e.to_string()))? {
-            let value: String = row.get(0).map_err(|e| GapError::database(e.to_string()))?;
-            Ok(Some(value))
-        } else {
-            Ok(None)
+                if let Some(row) = rows.next().await.map_err(|e| GapError::database(e.to_string()))? {
+                    let value: String = row.get(0).map_err(|e| GapError::database(e.to_string()))?;
+                    Ok(Some(value))
+                } else {
+                    Ok(None)
+                }
+            }
+            DbBackend::Postgres { pool } => {
+                crate::database_postgres::pg_get_credential(pool, plugin_id, field, ns, scope).await
+            }
         }
     }
 
@@ -785,113 +910,155 @@ impl GapDatabase {
         ns: &str,
         scope: &str,
     ) -> Result<Option<HashMap<String, String>>> {
-        let mut rows = self
-            .conn()
-            .query(
-                "SELECT field, value FROM credentials WHERE plugin_id = ?1 AND namespace_id = ?2 AND scope_id = ?3",
-                libsql::params![plugin_id, ns, scope],
-            )
-            .await
-            .map_err(|e| GapError::database(e.to_string()))?;
+        match &self.inner {
+            DbBackend::LibSql { .. } => {
+                let mut rows = self
+                    .conn()
+                    .query(
+                        "SELECT field, value FROM credentials WHERE plugin_id = ?1 AND namespace_id = ?2 AND scope_id = ?3",
+                        libsql::params![plugin_id, ns, scope],
+                    )
+                    .await
+                    .map_err(|e| GapError::database(e.to_string()))?;
 
-        let mut map = HashMap::new();
-        while let Some(row) = rows.next().await.map_err(|e| GapError::database(e.to_string()))? {
-            let field: String = row.get(0).map_err(|e| GapError::database(e.to_string()))?;
-            let value: String = row.get(1).map_err(|e| GapError::database(e.to_string()))?;
-            map.insert(field, value);
-        }
+                let mut map = HashMap::new();
+                while let Some(row) = rows.next().await.map_err(|e| GapError::database(e.to_string()))? {
+                    let field: String = row.get(0).map_err(|e| GapError::database(e.to_string()))?;
+                    let value: String = row.get(1).map_err(|e| GapError::database(e.to_string()))?;
+                    map.insert(field, value);
+                }
 
-        if map.is_empty() {
-            Ok(None)
-        } else {
-            Ok(Some(map))
+                if map.is_empty() {
+                    Ok(None)
+                } else {
+                    Ok(Some(map))
+                }
+            }
+            DbBackend::Postgres { pool } => {
+                crate::database_postgres::pg_get_plugin_credentials(pool, plugin_id, ns, scope).await
+            }
         }
     }
 
     /// List all credentials as `CredentialEntry` (plugin_id + field, no value).
     pub async fn list_credentials(&self, ns: &str, scope: &str) -> Result<Vec<CredentialEntry>> {
-        let mut rows = self
-            .conn()
-            .query(
-                "SELECT plugin_id, field FROM credentials WHERE namespace_id = ?1 AND scope_id = ?2",
-                libsql::params![ns, scope],
-            )
-            .await
-            .map_err(|e| GapError::database(e.to_string()))?;
-        let mut result = Vec::new();
-        while let Some(row) = rows.next().await.map_err(|e| GapError::database(e.to_string()))? {
-            let plugin_id: String = row.get(0).map_err(|e| GapError::database(e.to_string()))?;
-            let field: String = row.get(1).map_err(|e| GapError::database(e.to_string()))?;
-            result.push(CredentialEntry {
-                plugin_id,
-                field,
-                namespace_id: ns.to_string(),
-                scope_id: scope.to_string(),
-            });
+        match &self.inner {
+            DbBackend::LibSql { .. } => {
+                let mut rows = self
+                    .conn()
+                    .query(
+                        "SELECT plugin_id, field FROM credentials WHERE namespace_id = ?1 AND scope_id = ?2",
+                        libsql::params![ns, scope],
+                    )
+                    .await
+                    .map_err(|e| GapError::database(e.to_string()))?;
+                let mut result = Vec::new();
+                while let Some(row) = rows.next().await.map_err(|e| GapError::database(e.to_string()))? {
+                    let plugin_id: String = row.get(0).map_err(|e| GapError::database(e.to_string()))?;
+                    let field: String = row.get(1).map_err(|e| GapError::database(e.to_string()))?;
+                    result.push(CredentialEntry {
+                        plugin_id,
+                        field,
+                        namespace_id: ns.to_string(),
+                        scope_id: scope.to_string(),
+                    });
+                }
+                Ok(result)
+            }
+            DbBackend::Postgres { pool } => {
+                crate::database_postgres::pg_list_credentials(pool, ns, scope).await
+            }
         }
-        Ok(result)
     }
 
     /// Remove a single credential.
     pub async fn remove_credential(&self, plugin_id: &str, field: &str, ns: &str, scope: &str) -> Result<()> {
-        self.conn()
-            .execute(
-                "DELETE FROM credentials WHERE plugin_id = ?1 AND field = ?2 AND namespace_id = ?3 AND scope_id = ?4",
-                libsql::params![plugin_id, field, ns, scope],
-            )
-            .await
-            .map_err(|e| GapError::database(e.to_string()))?;
-        Ok(())
+        match &self.inner {
+            DbBackend::LibSql { .. } => {
+                self.conn()
+                    .execute(
+                        "DELETE FROM credentials WHERE plugin_id = ?1 AND field = ?2 AND namespace_id = ?3 AND scope_id = ?4",
+                        libsql::params![plugin_id, field, ns, scope],
+                    )
+                    .await
+                    .map_err(|e| GapError::database(e.to_string()))?;
+                Ok(())
+            }
+            DbBackend::Postgres { pool } => {
+                crate::database_postgres::pg_remove_credential(pool, plugin_id, field, ns, scope).await
+            }
+        }
     }
 
     // ── Config KV ───────────────────────────────────────────────────
 
     /// Set a config value (blob).
     pub async fn set_config(&self, key: &str, value: &[u8]) -> Result<()> {
-        self.conn()
-            .execute(
-                "INSERT OR REPLACE INTO config (key, value) VALUES (?1, ?2)",
-                libsql::params![key, libsql::Value::Blob(value.to_vec())],
-            )
-            .await
-            .map_err(|e| GapError::database(e.to_string()))?;
-        Ok(())
+        match &self.inner {
+            DbBackend::LibSql { .. } => {
+                self.conn()
+                    .execute(
+                        "INSERT OR REPLACE INTO config (key, value) VALUES (?1, ?2)",
+                        libsql::params![key, libsql::Value::Blob(value.to_vec())],
+                    )
+                    .await
+                    .map_err(|e| GapError::database(e.to_string()))?;
+                Ok(())
+            }
+            DbBackend::Postgres { pool } => {
+                crate::database_postgres::pg_set_config(pool, key, value).await
+            }
+        }
     }
 
     /// Get a config value (blob).
     pub async fn get_config(&self, key: &str) -> Result<Option<Vec<u8>>> {
-        let mut rows = self
-            .conn()
-            .query(
-                "SELECT value FROM config WHERE key = ?1",
-                libsql::params![key],
-            )
-            .await
-            .map_err(|e| GapError::database(e.to_string()))?;
+        match &self.inner {
+            DbBackend::LibSql { .. } => {
+                let mut rows = self
+                    .conn()
+                    .query(
+                        "SELECT value FROM config WHERE key = ?1",
+                        libsql::params![key],
+                    )
+                    .await
+                    .map_err(|e| GapError::database(e.to_string()))?;
 
-        if let Some(row) = rows.next().await.map_err(|e| GapError::database(e.to_string()))? {
-            let val = row
-                .get_value(0)
-                .map_err(|e| GapError::database(e.to_string()))?;
-            match val {
-                libsql::Value::Blob(b) => Ok(Some(b)),
-                _ => Err(GapError::database("Expected blob value for config")),
+                if let Some(row) = rows.next().await.map_err(|e| GapError::database(e.to_string()))? {
+                    let val = row
+                        .get_value(0)
+                        .map_err(|e| GapError::database(e.to_string()))?;
+                    match val {
+                        libsql::Value::Blob(b) => Ok(Some(b)),
+                        _ => Err(GapError::database("Expected blob value for config")),
+                    }
+                } else {
+                    Ok(None)
+                }
             }
-        } else {
-            Ok(None)
+            DbBackend::Postgres { pool } => {
+                crate::database_postgres::pg_get_config(pool, key).await
+            }
         }
     }
 
     /// Delete a config key.
     pub async fn delete_config(&self, key: &str) -> Result<()> {
-        self.conn()
-            .execute(
-                "DELETE FROM config WHERE key = ?1",
-                libsql::params![key],
-            )
-            .await
-            .map_err(|e| GapError::database(e.to_string()))?;
-        Ok(())
+        match &self.inner {
+            DbBackend::LibSql { .. } => {
+                self.conn()
+                    .execute(
+                        "DELETE FROM config WHERE key = ?1",
+                        libsql::params![key],
+                    )
+                    .await
+                    .map_err(|e| GapError::database(e.to_string()))?;
+                Ok(())
+            }
+            DbBackend::Postgres { pool } => {
+                crate::database_postgres::pg_delete_config(pool, key).await
+            }
+        }
     }
 
     // ── Password Hash (convenience over config) ─────────────────────
@@ -922,29 +1089,36 @@ impl GapDatabase {
 
     /// Log an activity entry.
     pub async fn log_activity(&self, entry: &ActivityEntry) -> Result<()> {
-        self.conn()
-            .execute(
-                "INSERT INTO access_logs (timestamp, request_id, method, url, agent_id, status, plugin_id, plugin_sha, source_hash, request_headers, rejection_stage, rejection_reason, namespace_id, scope_id) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
-                libsql::params![
-                    entry.timestamp.to_rfc3339(),
-                    entry.request_id.as_deref().unwrap_or(""),
-                    entry.method.as_str(),
-                    entry.url.as_str(),
-                    entry.agent_id.as_deref().unwrap_or(""),
-                    entry.status as i64,
-                    entry.plugin_id.as_deref().unwrap_or(""),
-                    entry.plugin_sha.as_deref().unwrap_or(""),
-                    entry.source_hash.as_deref().unwrap_or(""),
-                    entry.request_headers.as_deref().unwrap_or(""),
-                    entry.rejection_stage.as_deref().unwrap_or(""),
-                    entry.rejection_reason.as_deref().unwrap_or(""),
-                    entry.namespace_id.as_str(),
-                    entry.scope_id.as_str()
-                ],
-            )
-            .await
-            .map_err(|e| GapError::database(format!("Failed to log activity: {}", e)))?;
-        Ok(())
+        match &self.inner {
+            DbBackend::LibSql { .. } => {
+                self.conn()
+                    .execute(
+                        "INSERT INTO access_logs (timestamp, request_id, method, url, agent_id, status, plugin_id, plugin_sha, source_hash, request_headers, rejection_stage, rejection_reason, namespace_id, scope_id) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
+                        libsql::params![
+                            entry.timestamp.to_rfc3339(),
+                            entry.request_id.as_deref().unwrap_or(""),
+                            entry.method.as_str(),
+                            entry.url.as_str(),
+                            entry.agent_id.as_deref().unwrap_or(""),
+                            entry.status as i64,
+                            entry.plugin_id.as_deref().unwrap_or(""),
+                            entry.plugin_sha.as_deref().unwrap_or(""),
+                            entry.source_hash.as_deref().unwrap_or(""),
+                            entry.request_headers.as_deref().unwrap_or(""),
+                            entry.rejection_stage.as_deref().unwrap_or(""),
+                            entry.rejection_reason.as_deref().unwrap_or(""),
+                            entry.namespace_id.as_str(),
+                            entry.scope_id.as_str()
+                        ],
+                    )
+                    .await
+                    .map_err(|e| GapError::database(format!("Failed to log activity: {}", e)))?;
+                Ok(())
+            }
+            DbBackend::Postgres { pool } => {
+                crate::database_postgres::pg_log_activity(pool, entry).await
+            }
+        }
     }
 
     /// Get recent activity, ordered newest-first.
@@ -970,72 +1144,79 @@ impl GapDatabase {
     /// All filter fields are optional. When not set, that filter is skipped.
     /// Results are ordered by id DESC (newest first). Default limit is 100.
     pub async fn query_activity(&self, filter: &crate::types::ActivityFilter) -> Result<Vec<ActivityEntry>> {
-        let select = "SELECT timestamp, request_id, method, url, agent_id, status, plugin_id, plugin_sha, source_hash, request_headers, rejection_stage, rejection_reason, namespace_id, scope_id FROM access_logs";
+        match &self.inner {
+            DbBackend::LibSql { .. } => {
+                let select = "SELECT timestamp, request_id, method, url, agent_id, status, plugin_id, plugin_sha, source_hash, request_headers, rejection_stage, rejection_reason, namespace_id, scope_id FROM access_logs";
 
-        let mut conditions: Vec<String> = Vec::new();
-        let mut params: Vec<libsql::Value> = Vec::new();
-        let mut idx = 1u32;
+                let mut conditions: Vec<String> = Vec::new();
+                let mut params: Vec<libsql::Value> = Vec::new();
+                let mut idx = 1u32;
 
-        if let Some(ref domain) = filter.domain {
-            conditions.push(format!("url LIKE ?{}", idx));
-            params.push(libsql::Value::Text(format!("%://{}%", domain)));
-            idx += 1;
-        }
-        if let Some(ref path) = filter.path {
-            conditions.push(format!("url LIKE ?{}", idx));
-            params.push(libsql::Value::Text(format!("%{}%", path)));
-            idx += 1;
-        }
-        if let Some(ref plugin_id) = filter.plugin_id {
-            conditions.push(format!("plugin_id = ?{}", idx));
-            params.push(libsql::Value::Text(plugin_id.clone()));
-            idx += 1;
-        }
-        if let Some(ref agent) = filter.agent {
-            conditions.push(format!("agent_id = ?{}", idx));
-            params.push(libsql::Value::Text(agent.clone()));
-            idx += 1;
-        }
-        if let Some(ref method) = filter.method {
-            conditions.push(format!("method = ?{}", idx));
-            params.push(libsql::Value::Text(method.clone()));
-            idx += 1;
-        }
-        if let Some(ref since) = filter.since {
-            conditions.push(format!("timestamp >= ?{}", idx));
-            params.push(libsql::Value::Text(since.to_rfc3339()));
-            idx += 1;
-        }
-        if let Some(ref request_id) = filter.request_id {
-            conditions.push(format!("request_id = ?{}", idx));
-            params.push(libsql::Value::Text(request_id.clone()));
-            idx += 1;
-        }
-        if let Some(ref namespace_id) = filter.namespace_id {
-            conditions.push(format!("namespace_id = ?{}", idx));
-            params.push(libsql::Value::Text(namespace_id.clone()));
-            idx += 1;
-        }
-        if let Some(ref scope_id) = filter.scope_id {
-            conditions.push(format!("scope_id = ?{}", idx));
-            params.push(libsql::Value::Text(scope_id.clone()));
-        }
+                if let Some(ref domain) = filter.domain {
+                    conditions.push(format!("url LIKE ?{}", idx));
+                    params.push(libsql::Value::Text(format!("%://{}%", domain)));
+                    idx += 1;
+                }
+                if let Some(ref path) = filter.path {
+                    conditions.push(format!("url LIKE ?{}", idx));
+                    params.push(libsql::Value::Text(format!("%{}%", path)));
+                    idx += 1;
+                }
+                if let Some(ref plugin_id) = filter.plugin_id {
+                    conditions.push(format!("plugin_id = ?{}", idx));
+                    params.push(libsql::Value::Text(plugin_id.clone()));
+                    idx += 1;
+                }
+                if let Some(ref agent) = filter.agent {
+                    conditions.push(format!("agent_id = ?{}", idx));
+                    params.push(libsql::Value::Text(agent.clone()));
+                    idx += 1;
+                }
+                if let Some(ref method) = filter.method {
+                    conditions.push(format!("method = ?{}", idx));
+                    params.push(libsql::Value::Text(method.clone()));
+                    idx += 1;
+                }
+                if let Some(ref since) = filter.since {
+                    conditions.push(format!("timestamp >= ?{}", idx));
+                    params.push(libsql::Value::Text(since.to_rfc3339()));
+                    idx += 1;
+                }
+                if let Some(ref request_id) = filter.request_id {
+                    conditions.push(format!("request_id = ?{}", idx));
+                    params.push(libsql::Value::Text(request_id.clone()));
+                    idx += 1;
+                }
+                if let Some(ref namespace_id) = filter.namespace_id {
+                    conditions.push(format!("namespace_id = ?{}", idx));
+                    params.push(libsql::Value::Text(namespace_id.clone()));
+                    idx += 1;
+                }
+                if let Some(ref scope_id) = filter.scope_id {
+                    conditions.push(format!("scope_id = ?{}", idx));
+                    params.push(libsql::Value::Text(scope_id.clone()));
+                }
 
-        let where_clause = if conditions.is_empty() {
-            String::new()
-        } else {
-            format!(" WHERE {}", conditions.join(" AND "))
-        };
+                let where_clause = if conditions.is_empty() {
+                    String::new()
+                } else {
+                    format!(" WHERE {}", conditions.join(" AND "))
+                };
 
-        let limit = filter.limit.unwrap_or(100);
-        let query = format!("{}{} ORDER BY id DESC LIMIT {}", select, where_clause, limit);
+                let limit = filter.limit.unwrap_or(100);
+                let query = format!("{}{} ORDER BY id DESC LIMIT {}", select, where_clause, limit);
 
-        let mut rows = self
-            .conn()
-            .query(&query, params)
-            .await
-            .map_err(|e| GapError::database(e.to_string()))?;
-        self.rows_to_activity(&mut rows).await
+                let mut rows = self
+                    .conn()
+                    .query(&query, params)
+                    .await
+                    .map_err(|e| GapError::database(e.to_string()))?;
+                self.rows_to_activity(&mut rows).await
+            }
+            DbBackend::Postgres { pool } => {
+                crate::database_postgres::pg_query_activity(pool, filter).await
+            }
+        }
     }
 
     /// Helper: convert activity rows into `Vec<ActivityEntry>`.
@@ -1101,24 +1282,31 @@ impl GapDatabase {
 
     /// Log a management audit event.
     pub async fn log_management_event(&self, entry: &ManagementLogEntry) -> Result<()> {
-        self.conn()
-            .execute(
-                "INSERT INTO management_logs (timestamp, operation, resource_type, resource_id, detail, success, error_message, namespace_id, scope_id) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
-                libsql::params![
-                    entry.timestamp.to_rfc3339(),
-                    entry.operation.as_str(),
-                    entry.resource_type.as_str(),
-                    entry.resource_id.as_deref().unwrap_or(""),
-                    entry.detail.as_deref().unwrap_or(""),
-                    entry.success as i64,
-                    entry.error_message.as_deref().unwrap_or(""),
-                    entry.namespace_id.as_str(),
-                    entry.scope_id.as_str()
-                ],
-            )
-            .await
-            .map_err(|e| GapError::database(format!("Failed to log management event: {}", e)))?;
-        Ok(())
+        match &self.inner {
+            DbBackend::LibSql { .. } => {
+                self.conn()
+                    .execute(
+                        "INSERT INTO management_logs (timestamp, operation, resource_type, resource_id, detail, success, error_message, namespace_id, scope_id) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                        libsql::params![
+                            entry.timestamp.to_rfc3339(),
+                            entry.operation.as_str(),
+                            entry.resource_type.as_str(),
+                            entry.resource_id.as_deref().unwrap_or(""),
+                            entry.detail.as_deref().unwrap_or(""),
+                            entry.success as i64,
+                            entry.error_message.as_deref().unwrap_or(""),
+                            entry.namespace_id.as_str(),
+                            entry.scope_id.as_str()
+                        ],
+                    )
+                    .await
+                    .map_err(|e| GapError::database(format!("Failed to log management event: {}", e)))?;
+                Ok(())
+            }
+            DbBackend::Postgres { pool } => {
+                crate::database_postgres::pg_log_management_event(pool, entry).await
+            }
+        }
     }
 
     /// Query management audit logs with flexible filtering.
@@ -1126,65 +1314,72 @@ impl GapDatabase {
     /// All filter fields are optional. When not set, that filter is skipped.
     /// Results are ordered by id DESC (newest first). Default limit is 100.
     pub async fn query_management_log(&self, filter: &crate::types::ManagementLogFilter) -> Result<Vec<ManagementLogEntry>> {
-        let select = "SELECT timestamp, operation, resource_type, resource_id, detail, success, error_message, namespace_id, scope_id FROM management_logs";
+        match &self.inner {
+            DbBackend::LibSql { .. } => {
+                let select = "SELECT timestamp, operation, resource_type, resource_id, detail, success, error_message, namespace_id, scope_id FROM management_logs";
 
-        let mut conditions: Vec<String> = Vec::new();
-        let mut params: Vec<libsql::Value> = Vec::new();
-        let mut idx = 1u32;
+                let mut conditions: Vec<String> = Vec::new();
+                let mut params: Vec<libsql::Value> = Vec::new();
+                let mut idx = 1u32;
 
-        if let Some(ref operation) = filter.operation {
-            conditions.push(format!("operation = ?{}", idx));
-            params.push(libsql::Value::Text(operation.clone()));
-            idx += 1;
-        }
-        if let Some(ref resource_type) = filter.resource_type {
-            conditions.push(format!("resource_type = ?{}", idx));
-            params.push(libsql::Value::Text(resource_type.clone()));
-            idx += 1;
-        }
-        if let Some(ref resource_id) = filter.resource_id {
-            conditions.push(format!("resource_id = ?{}", idx));
-            params.push(libsql::Value::Text(resource_id.clone()));
-            idx += 1;
-        }
-        if let Some(success) = filter.success {
-            conditions.push(format!("success = ?{}", idx));
-            params.push(libsql::Value::Integer(success as i64));
-            idx += 1;
-        }
-        if let Some(ref since) = filter.since {
-            conditions.push(format!("timestamp >= ?{}", idx));
-            params.push(libsql::Value::Text(since.to_rfc3339()));
-            idx += 1;
-        }
-        if let Some(ref namespace_id) = filter.namespace_id {
-            conditions.push(format!("namespace_id = ?{}", idx));
-            params.push(libsql::Value::Text(namespace_id.clone()));
-            idx += 1;
-        }
-        if let Some(ref scope_id) = filter.scope_id {
-            conditions.push(format!("scope_id = ?{}", idx));
-            params.push(libsql::Value::Text(scope_id.clone()));
-            idx += 1;
-        }
+                if let Some(ref operation) = filter.operation {
+                    conditions.push(format!("operation = ?{}", idx));
+                    params.push(libsql::Value::Text(operation.clone()));
+                    idx += 1;
+                }
+                if let Some(ref resource_type) = filter.resource_type {
+                    conditions.push(format!("resource_type = ?{}", idx));
+                    params.push(libsql::Value::Text(resource_type.clone()));
+                    idx += 1;
+                }
+                if let Some(ref resource_id) = filter.resource_id {
+                    conditions.push(format!("resource_id = ?{}", idx));
+                    params.push(libsql::Value::Text(resource_id.clone()));
+                    idx += 1;
+                }
+                if let Some(success) = filter.success {
+                    conditions.push(format!("success = ?{}", idx));
+                    params.push(libsql::Value::Integer(success as i64));
+                    idx += 1;
+                }
+                if let Some(ref since) = filter.since {
+                    conditions.push(format!("timestamp >= ?{}", idx));
+                    params.push(libsql::Value::Text(since.to_rfc3339()));
+                    idx += 1;
+                }
+                if let Some(ref namespace_id) = filter.namespace_id {
+                    conditions.push(format!("namespace_id = ?{}", idx));
+                    params.push(libsql::Value::Text(namespace_id.clone()));
+                    idx += 1;
+                }
+                if let Some(ref scope_id) = filter.scope_id {
+                    conditions.push(format!("scope_id = ?{}", idx));
+                    params.push(libsql::Value::Text(scope_id.clone()));
+                    idx += 1;
+                }
 
-        let _ = idx; // suppress unused warning
+                let _ = idx; // suppress unused warning
 
-        let where_clause = if conditions.is_empty() {
-            String::new()
-        } else {
-            format!(" WHERE {}", conditions.join(" AND "))
-        };
+                let where_clause = if conditions.is_empty() {
+                    String::new()
+                } else {
+                    format!(" WHERE {}", conditions.join(" AND "))
+                };
 
-        let limit = filter.limit.unwrap_or(100);
-        let query = format!("{}{} ORDER BY id DESC LIMIT {}", select, where_clause, limit);
+                let limit = filter.limit.unwrap_or(100);
+                let query = format!("{}{} ORDER BY id DESC LIMIT {}", select, where_clause, limit);
 
-        let mut rows = self
-            .conn()
-            .query(&query, params)
-            .await
-            .map_err(|e| GapError::database(e.to_string()))?;
-        self.rows_to_management_log(&mut rows).await
+                let mut rows = self
+                    .conn()
+                    .query(&query, params)
+                    .await
+                    .map_err(|e| GapError::database(e.to_string()))?;
+                self.rows_to_management_log(&mut rows).await
+            }
+            DbBackend::Postgres { pool } => {
+                crate::database_postgres::pg_query_management_log(pool, filter).await
+            }
+        }
     }
 
     /// Helper: convert management_logs rows into `Vec<ManagementLogEntry>`.
@@ -1229,77 +1424,91 @@ impl GapDatabase {
 
     /// Save detailed request/response data for a proxied request.
     pub async fn save_request_details(&self, details: &crate::types::RequestDetails) -> Result<()> {
-        self.conn()
-            .execute(
-                "INSERT OR REPLACE INTO request_details (request_id, req_headers, req_body, transformed_url, transformed_headers, transformed_body, response_status, response_headers, response_body, body_truncated) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
-                libsql::params![
-                    details.request_id.as_str(),
-                    details.req_headers.as_deref().unwrap_or(""),
-                    libsql::Value::Blob(details.req_body.clone().unwrap_or_default()),
-                    details.transformed_url.as_deref().unwrap_or(""),
-                    details.transformed_headers.as_deref().unwrap_or(""),
-                    libsql::Value::Blob(details.transformed_body.clone().unwrap_or_default()),
-                    details.response_status.map(|s| s as i64).unwrap_or(0),
-                    details.response_headers.as_deref().unwrap_or(""),
-                    libsql::Value::Blob(details.response_body.clone().unwrap_or_default()),
-                    if details.body_truncated { 1i64 } else { 0i64 }
-                ],
-            )
-            .await
-            .map_err(|e| GapError::database(format!("Failed to save request details: {}", e)))?;
-        Ok(())
+        match &self.inner {
+            DbBackend::LibSql { .. } => {
+                self.conn()
+                    .execute(
+                        "INSERT OR REPLACE INTO request_details (request_id, req_headers, req_body, transformed_url, transformed_headers, transformed_body, response_status, response_headers, response_body, body_truncated) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+                        libsql::params![
+                            details.request_id.as_str(),
+                            details.req_headers.as_deref().unwrap_or(""),
+                            libsql::Value::Blob(details.req_body.clone().unwrap_or_default()),
+                            details.transformed_url.as_deref().unwrap_or(""),
+                            details.transformed_headers.as_deref().unwrap_or(""),
+                            libsql::Value::Blob(details.transformed_body.clone().unwrap_or_default()),
+                            details.response_status.map(|s| s as i64).unwrap_or(0),
+                            details.response_headers.as_deref().unwrap_or(""),
+                            libsql::Value::Blob(details.response_body.clone().unwrap_or_default()),
+                            if details.body_truncated { 1i64 } else { 0i64 }
+                        ],
+                    )
+                    .await
+                    .map_err(|e| GapError::database(format!("Failed to save request details: {}", e)))?;
+                Ok(())
+            }
+            DbBackend::Postgres { pool } => {
+                crate::database_postgres::pg_save_request_details(pool, details).await
+            }
+        }
     }
 
     /// Get detailed request/response data for a specific request.
     pub async fn get_request_details(&self, request_id: &str) -> Result<Option<crate::types::RequestDetails>> {
-        let mut rows = self
-            .conn()
-            .query(
-                "SELECT request_id, req_headers, req_body, transformed_url, transformed_headers, transformed_body, response_status, response_headers, response_body, body_truncated FROM request_details WHERE request_id = ?1",
-                libsql::params![request_id],
-            )
-            .await
-            .map_err(|e| GapError::database(e.to_string()))?;
+        match &self.inner {
+            DbBackend::LibSql { .. } => {
+                let mut rows = self
+                    .conn()
+                    .query(
+                        "SELECT request_id, req_headers, req_body, transformed_url, transformed_headers, transformed_body, response_status, response_headers, response_body, body_truncated FROM request_details WHERE request_id = ?1",
+                        libsql::params![request_id],
+                    )
+                    .await
+                    .map_err(|e| GapError::database(e.to_string()))?;
 
-        if let Some(row) = rows.next().await.map_err(|e| GapError::database(e.to_string()))? {
-            fn empty_to_none(s: String) -> Option<String> {
-                if s.is_empty() { None } else { Some(s) }
-            }
-            fn empty_blob_to_none(b: Vec<u8>) -> Option<Vec<u8>> {
-                if b.is_empty() { None } else { Some(b) }
-            }
-            fn blob_from_value(val: libsql::Value) -> Vec<u8> {
-                match val {
-                    libsql::Value::Blob(b) => b,
-                    _ => Vec::new(),
+                if let Some(row) = rows.next().await.map_err(|e| GapError::database(e.to_string()))? {
+                    fn empty_to_none(s: String) -> Option<String> {
+                        if s.is_empty() { None } else { Some(s) }
+                    }
+                    fn empty_blob_to_none(b: Vec<u8>) -> Option<Vec<u8>> {
+                        if b.is_empty() { None } else { Some(b) }
+                    }
+                    fn blob_from_value(val: libsql::Value) -> Vec<u8> {
+                        match val {
+                            libsql::Value::Blob(b) => b,
+                            _ => Vec::new(),
+                        }
+                    }
+
+                    let request_id: String = row.get(0).map_err(|e| GapError::database(e.to_string()))?;
+                    let req_headers_raw: String = row.get(1).map_err(|e| GapError::database(e.to_string()))?;
+                    let req_body_val = row.get_value(2).map_err(|e| GapError::database(e.to_string()))?;
+                    let transformed_url_raw: String = row.get(3).map_err(|e| GapError::database(e.to_string()))?;
+                    let transformed_headers_raw: String = row.get(4).map_err(|e| GapError::database(e.to_string()))?;
+                    let transformed_body_val = row.get_value(5).map_err(|e| GapError::database(e.to_string()))?;
+                    let response_status_raw: i64 = row.get(6).map_err(|e| GapError::database(e.to_string()))?;
+                    let response_headers_raw: String = row.get(7).map_err(|e| GapError::database(e.to_string()))?;
+                    let response_body_val = row.get_value(8).map_err(|e| GapError::database(e.to_string()))?;
+                    let body_truncated_raw: i64 = row.get(9).map_err(|e| GapError::database(e.to_string()))?;
+
+                    Ok(Some(crate::types::RequestDetails {
+                        request_id,
+                        req_headers: empty_to_none(req_headers_raw),
+                        req_body: empty_blob_to_none(blob_from_value(req_body_val)),
+                        transformed_url: empty_to_none(transformed_url_raw),
+                        transformed_headers: empty_to_none(transformed_headers_raw),
+                        transformed_body: empty_blob_to_none(blob_from_value(transformed_body_val)),
+                        response_status: if response_status_raw == 0 { None } else { Some(response_status_raw as u16) },
+                        response_headers: empty_to_none(response_headers_raw),
+                        response_body: empty_blob_to_none(blob_from_value(response_body_val)),
+                        body_truncated: body_truncated_raw != 0,
+                    }))
+                } else {
+                    Ok(None)
                 }
             }
-
-            let request_id: String = row.get(0).map_err(|e| GapError::database(e.to_string()))?;
-            let req_headers_raw: String = row.get(1).map_err(|e| GapError::database(e.to_string()))?;
-            let req_body_val = row.get_value(2).map_err(|e| GapError::database(e.to_string()))?;
-            let transformed_url_raw: String = row.get(3).map_err(|e| GapError::database(e.to_string()))?;
-            let transformed_headers_raw: String = row.get(4).map_err(|e| GapError::database(e.to_string()))?;
-            let transformed_body_val = row.get_value(5).map_err(|e| GapError::database(e.to_string()))?;
-            let response_status_raw: i64 = row.get(6).map_err(|e| GapError::database(e.to_string()))?;
-            let response_headers_raw: String = row.get(7).map_err(|e| GapError::database(e.to_string()))?;
-            let response_body_val = row.get_value(8).map_err(|e| GapError::database(e.to_string()))?;
-            let body_truncated_raw: i64 = row.get(9).map_err(|e| GapError::database(e.to_string()))?;
-
-            Ok(Some(crate::types::RequestDetails {
-                request_id,
-                req_headers: empty_to_none(req_headers_raw),
-                req_body: empty_blob_to_none(blob_from_value(req_body_val)),
-                transformed_url: empty_to_none(transformed_url_raw),
-                transformed_headers: empty_to_none(transformed_headers_raw),
-                transformed_body: empty_blob_to_none(blob_from_value(transformed_body_val)),
-                response_status: if response_status_raw == 0 { None } else { Some(response_status_raw as u16) },
-                response_headers: empty_to_none(response_headers_raw),
-                response_body: empty_blob_to_none(blob_from_value(response_body_val)),
-                body_truncated: body_truncated_raw != 0,
-            }))
-        } else {
-            Ok(None)
+            DbBackend::Postgres { pool } => {
+                crate::database_postgres::pg_get_request_details(pool, request_id).await
+            }
         }
     }
 
@@ -1307,74 +1516,102 @@ impl GapDatabase {
 
     /// Update the weight of the latest version of a plugin.
     pub async fn update_plugin_weight(&self, id: &str, weight: i32, ns: &str, scope: &str) -> Result<()> {
-        let rows_affected = self
-            .conn()
-            .execute(
-                "UPDATE plugin_versions SET weight = ?1 WHERE id = (SELECT MAX(id) FROM plugin_versions WHERE plugin_id = ?2 AND deleted = 0 AND namespace_id = ?3 AND scope_id = ?4)",
-                libsql::params![weight, id, ns, scope],
-            )
-            .await
-            .map_err(|e| GapError::database(e.to_string()))?;
+        match &self.inner {
+            DbBackend::LibSql { .. } => {
+                let rows_affected = self
+                    .conn()
+                    .execute(
+                        "UPDATE plugin_versions SET weight = ?1 WHERE id = (SELECT MAX(id) FROM plugin_versions WHERE plugin_id = ?2 AND deleted = 0 AND namespace_id = ?3 AND scope_id = ?4)",
+                        libsql::params![weight, id, ns, scope],
+                    )
+                    .await
+                    .map_err(|e| GapError::database(e.to_string()))?;
 
-        if rows_affected == 0 {
-            return Err(GapError::database(format!("Plugin '{}' not found", id)));
+                if rows_affected == 0 {
+                    return Err(GapError::database(format!("Plugin '{}' not found", id)));
+                }
+                Ok(())
+            }
+            DbBackend::Postgres { pool } => {
+                crate::database_postgres::pg_update_plugin_weight(pool, id, weight, ns, scope).await
+            }
         }
-        Ok(())
     }
 
     // ── Header Set CRUD ────────────────────────────────────────────
 
     /// Add a header set with a generated UUID. Returns the new ID.
     pub async fn add_header_set(&self, match_patterns: &[String], weight: i32, ns: &str, scope: &str) -> Result<String> {
-        let id = Uuid::new_v4().to_string();
-        let patterns_json = serde_json::to_string(match_patterns)
-            .map_err(|e| GapError::database(e.to_string()))?;
-        let now = Utc::now().to_rfc3339();
+        match &self.inner {
+            DbBackend::LibSql { .. } => {
+                let id = Uuid::new_v4().to_string();
+                let patterns_json = serde_json::to_string(match_patterns)
+                    .map_err(|e| GapError::database(e.to_string()))?;
+                let now = Utc::now().to_rfc3339();
 
-        self.conn()
-            .execute(
-                "INSERT INTO header_sets (id, match_patterns, weight, created_at, deleted, namespace_id, scope_id) VALUES (?1, ?2, ?3, ?4, 0, ?5, ?6)",
-                libsql::params![id.as_str(), patterns_json, weight, now, ns, scope],
-            )
-            .await
-            .map_err(|e| GapError::database(e.to_string()))?;
-        Ok(id)
+                self.conn()
+                    .execute(
+                        "INSERT INTO header_sets (id, match_patterns, weight, created_at, deleted, namespace_id, scope_id) VALUES (?1, ?2, ?3, ?4, 0, ?5, ?6)",
+                        libsql::params![id.as_str(), patterns_json, weight, now, ns, scope],
+                    )
+                    .await
+                    .map_err(|e| GapError::database(e.to_string()))?;
+                Ok(id)
+            }
+            DbBackend::Postgres { pool } => {
+                crate::database_postgres::pg_add_header_set(pool, match_patterns, weight, ns, scope).await
+            }
+        }
     }
 
     /// Get a header set by ID (None if deleted or absent).
     pub async fn get_header_set(&self, id: &str, ns: &str, scope: &str) -> Result<Option<HeaderSet>> {
-        let mut rows = self
-            .conn()
-            .query(
-                "SELECT id, match_patterns, weight, created_at FROM header_sets WHERE id = ?1 AND deleted = 0 AND namespace_id = ?2 AND scope_id = ?3",
-                libsql::params![id, ns, scope],
-            )
-            .await
-            .map_err(|e| GapError::database(e.to_string()))?;
+        match &self.inner {
+            DbBackend::LibSql { .. } => {
+                let mut rows = self
+                    .conn()
+                    .query(
+                        "SELECT id, match_patterns, weight, created_at FROM header_sets WHERE id = ?1 AND deleted = 0 AND namespace_id = ?2 AND scope_id = ?3",
+                        libsql::params![id, ns, scope],
+                    )
+                    .await
+                    .map_err(|e| GapError::database(e.to_string()))?;
 
-        if let Some(row) = rows.next().await.map_err(|e| GapError::database(e.to_string()))? {
-            Ok(Some(self.row_to_header_set(&row, ns, scope)?))
-        } else {
-            Ok(None)
+                if let Some(row) = rows.next().await.map_err(|e| GapError::database(e.to_string()))? {
+                    Ok(Some(self.row_to_header_set(&row, ns, scope)?))
+                } else {
+                    Ok(None)
+                }
+            }
+            DbBackend::Postgres { pool } => {
+                crate::database_postgres::pg_get_header_set(pool, id, ns, scope).await
+            }
         }
     }
 
     /// List all non-deleted header sets, ordered by id.
     pub async fn list_header_sets(&self, ns: &str, scope: &str) -> Result<Vec<HeaderSet>> {
-        let mut rows = self
-            .conn()
-            .query(
-                "SELECT id, match_patterns, weight, created_at FROM header_sets WHERE deleted = 0 AND namespace_id = ?1 AND scope_id = ?2 ORDER BY id",
-                libsql::params![ns, scope],
-            )
-            .await
-            .map_err(|e| GapError::database(e.to_string()))?;
+        match &self.inner {
+            DbBackend::LibSql { .. } => {
+                let mut rows = self
+                    .conn()
+                    .query(
+                        "SELECT id, match_patterns, weight, created_at FROM header_sets WHERE deleted = 0 AND namespace_id = ?1 AND scope_id = ?2 ORDER BY id",
+                        libsql::params![ns, scope],
+                    )
+                    .await
+                    .map_err(|e| GapError::database(e.to_string()))?;
 
-        let mut result = Vec::new();
-        while let Some(row) = rows.next().await.map_err(|e| GapError::database(e.to_string()))? {
-            result.push(self.row_to_header_set(&row, ns, scope)?);
+                let mut result = Vec::new();
+                while let Some(row) = rows.next().await.map_err(|e| GapError::database(e.to_string()))? {
+                    result.push(self.row_to_header_set(&row, ns, scope)?);
+                }
+                Ok(result)
+            }
+            DbBackend::Postgres { pool } => {
+                crate::database_postgres::pg_list_header_sets(pool, ns, scope).await
+            }
         }
-        Ok(result)
     }
 
     /// Update a header set (partial update). Error if not found.
@@ -1386,69 +1623,83 @@ impl GapDatabase {
         ns: &str,
         scope: &str,
     ) -> Result<()> {
-        let mut sets: Vec<String> = Vec::new();
-        let mut params: Vec<libsql::Value> = Vec::new();
-        let mut idx = 1u32;
+        match &self.inner {
+            DbBackend::LibSql { .. } => {
+                let mut sets: Vec<String> = Vec::new();
+                let mut params: Vec<libsql::Value> = Vec::new();
+                let mut idx = 1u32;
 
-        if let Some(patterns) = match_patterns {
-            let json = serde_json::to_string(patterns)
-                .map_err(|e| GapError::database(e.to_string()))?;
-            sets.push(format!("match_patterns = ?{}", idx));
-            params.push(libsql::Value::Text(json));
-            idx += 1;
+                if let Some(patterns) = match_patterns {
+                    let json = serde_json::to_string(patterns)
+                        .map_err(|e| GapError::database(e.to_string()))?;
+                    sets.push(format!("match_patterns = ?{}", idx));
+                    params.push(libsql::Value::Text(json));
+                    idx += 1;
+                }
+                if let Some(w) = weight {
+                    sets.push(format!("weight = ?{}", idx));
+                    params.push(libsql::Value::Integer(w as i64));
+                    idx += 1;
+                }
+
+                if sets.is_empty() {
+                    return Ok(()); // nothing to update
+                }
+
+                let sql = format!(
+                    "UPDATE header_sets SET {} WHERE id = ?{} AND deleted = 0 AND namespace_id = ?{} AND scope_id = ?{}",
+                    sets.join(", "),
+                    idx,
+                    idx + 1,
+                    idx + 2
+                );
+                params.push(libsql::Value::Text(id.to_string()));
+                params.push(libsql::Value::Text(ns.to_string()));
+                params.push(libsql::Value::Text(scope.to_string()));
+
+                let rows_affected = self
+                    .conn()
+                    .execute(&sql, params)
+                    .await
+                    .map_err(|e| GapError::database(e.to_string()))?;
+
+                if rows_affected == 0 {
+                    return Err(GapError::database(format!("Header set '{}' not found", id)));
+                }
+                Ok(())
+            }
+            DbBackend::Postgres { pool } => {
+                crate::database_postgres::pg_update_header_set(pool, id, match_patterns, weight, ns, scope).await
+            }
         }
-        if let Some(w) = weight {
-            sets.push(format!("weight = ?{}", idx));
-            params.push(libsql::Value::Integer(w as i64));
-            idx += 1;
-        }
-
-        if sets.is_empty() {
-            return Ok(()); // nothing to update
-        }
-
-        let sql = format!(
-            "UPDATE header_sets SET {} WHERE id = ?{} AND deleted = 0 AND namespace_id = ?{} AND scope_id = ?{}",
-            sets.join(", "),
-            idx,
-            idx + 1,
-            idx + 2
-        );
-        params.push(libsql::Value::Text(id.to_string()));
-        params.push(libsql::Value::Text(ns.to_string()));
-        params.push(libsql::Value::Text(scope.to_string()));
-
-        let rows_affected = self
-            .conn()
-            .execute(&sql, params)
-            .await
-            .map_err(|e| GapError::database(e.to_string()))?;
-
-        if rows_affected == 0 {
-            return Err(GapError::database(format!("Header set '{}' not found", id)));
-        }
-        Ok(())
     }
 
     /// Soft-delete a header set and remove its headers.
     pub async fn remove_header_set(&self, id: &str, ns: &str, scope: &str) -> Result<()> {
-        self.conn()
-            .execute(
-                "UPDATE header_sets SET deleted = 1 WHERE id = ?1 AND deleted = 0 AND namespace_id = ?2 AND scope_id = ?3",
-                libsql::params![id, ns, scope],
-            )
-            .await
-            .map_err(|e| GapError::database(e.to_string()))?;
+        match &self.inner {
+            DbBackend::LibSql { .. } => {
+                self.conn()
+                    .execute(
+                        "UPDATE header_sets SET deleted = 1 WHERE id = ?1 AND deleted = 0 AND namespace_id = ?2 AND scope_id = ?3",
+                        libsql::params![id, ns, scope],
+                    )
+                    .await
+                    .map_err(|e| GapError::database(e.to_string()))?;
 
-        self.conn()
-            .execute(
-                "DELETE FROM header_set_headers WHERE header_set_id = ?1",
-                libsql::params![id],
-            )
-            .await
-            .map_err(|e| GapError::database(e.to_string()))?;
+                self.conn()
+                    .execute(
+                        "DELETE FROM header_set_headers WHERE header_set_id = ?1",
+                        libsql::params![id],
+                    )
+                    .await
+                    .map_err(|e| GapError::database(e.to_string()))?;
 
-        Ok(())
+                Ok(())
+            }
+            DbBackend::Postgres { pool } => {
+                crate::database_postgres::pg_remove_header_set(pool, id, ns, scope).await
+            }
+        }
     }
 
     /// Set (upsert) a header in a header set.
@@ -1460,145 +1711,194 @@ impl GapDatabase {
         _ns: &str,
         _scope: &str,
     ) -> Result<()> {
-        self.conn()
-            .execute(
-                "INSERT OR REPLACE INTO header_set_headers (header_set_id, header_name, header_value) VALUES (?1, ?2, ?3)",
-                libsql::params![header_set_id, header_name, header_value],
-            )
-            .await
-            .map_err(|e| GapError::database(e.to_string()))?;
-        Ok(())
+        match &self.inner {
+            DbBackend::LibSql { .. } => {
+                self.conn()
+                    .execute(
+                        "INSERT OR REPLACE INTO header_set_headers (header_set_id, header_name, header_value) VALUES (?1, ?2, ?3)",
+                        libsql::params![header_set_id, header_name, header_value],
+                    )
+                    .await
+                    .map_err(|e| GapError::database(e.to_string()))?;
+                Ok(())
+            }
+            DbBackend::Postgres { pool } => {
+                crate::database_postgres::pg_set_header_set_header(pool, header_set_id, header_name, header_value).await
+            }
+        }
     }
 
     /// Get all headers for a header set as a name->value map.
     pub async fn get_header_set_headers(&self, header_set_id: &str, _ns: &str, _scope: &str) -> Result<HashMap<String, String>> {
-        let mut rows = self
-            .conn()
-            .query(
-                "SELECT header_name, header_value FROM header_set_headers WHERE header_set_id = ?1",
-                libsql::params![header_set_id],
-            )
-            .await
-            .map_err(|e| GapError::database(e.to_string()))?;
+        match &self.inner {
+            DbBackend::LibSql { .. } => {
+                let mut rows = self
+                    .conn()
+                    .query(
+                        "SELECT header_name, header_value FROM header_set_headers WHERE header_set_id = ?1",
+                        libsql::params![header_set_id],
+                    )
+                    .await
+                    .map_err(|e| GapError::database(e.to_string()))?;
 
-        let mut map = HashMap::new();
-        while let Some(row) = rows.next().await.map_err(|e| GapError::database(e.to_string()))? {
-            let name: String = row.get(0).map_err(|e| GapError::database(e.to_string()))?;
-            let value: String = row.get(1).map_err(|e| GapError::database(e.to_string()))?;
-            map.insert(name, value);
+                let mut map = HashMap::new();
+                while let Some(row) = rows.next().await.map_err(|e| GapError::database(e.to_string()))? {
+                    let name: String = row.get(0).map_err(|e| GapError::database(e.to_string()))?;
+                    let value: String = row.get(1).map_err(|e| GapError::database(e.to_string()))?;
+                    map.insert(name, value);
+                }
+                Ok(map)
+            }
+            DbBackend::Postgres { pool } => {
+                crate::database_postgres::pg_get_header_set_headers(pool, header_set_id).await
+            }
         }
-        Ok(map)
     }
 
     /// List header names for a header set (names only, no values).
     pub async fn list_header_set_header_names(&self, header_set_id: &str, _ns: &str, _scope: &str) -> Result<Vec<String>> {
-        let mut rows = self
-            .conn()
-            .query(
-                "SELECT header_name FROM header_set_headers WHERE header_set_id = ?1",
-                libsql::params![header_set_id],
-            )
-            .await
-            .map_err(|e| GapError::database(e.to_string()))?;
+        match &self.inner {
+            DbBackend::LibSql { .. } => {
+                let mut rows = self
+                    .conn()
+                    .query(
+                        "SELECT header_name FROM header_set_headers WHERE header_set_id = ?1",
+                        libsql::params![header_set_id],
+                    )
+                    .await
+                    .map_err(|e| GapError::database(e.to_string()))?;
 
-        let mut result = Vec::new();
-        while let Some(row) = rows.next().await.map_err(|e| GapError::database(e.to_string()))? {
-            let name: String = row.get(0).map_err(|e| GapError::database(e.to_string()))?;
-            result.push(name);
+                let mut result = Vec::new();
+                while let Some(row) = rows.next().await.map_err(|e| GapError::database(e.to_string()))? {
+                    let name: String = row.get(0).map_err(|e| GapError::database(e.to_string()))?;
+                    result.push(name);
+                }
+                Ok(result)
+            }
+            DbBackend::Postgres { pool } => {
+                crate::database_postgres::pg_list_header_set_header_names(pool, header_set_id).await
+            }
         }
-        Ok(result)
     }
 
     /// Remove a single header from a header set.
     pub async fn remove_header_set_header(&self, header_set_id: &str, header_name: &str, _ns: &str, _scope: &str) -> Result<()> {
-        self.conn()
-            .execute(
-                "DELETE FROM header_set_headers WHERE header_set_id = ?1 AND header_name = ?2",
-                libsql::params![header_set_id, header_name],
-            )
-            .await
-            .map_err(|e| GapError::database(e.to_string()))?;
-        Ok(())
+        match &self.inner {
+            DbBackend::LibSql { .. } => {
+                self.conn()
+                    .execute(
+                        "DELETE FROM header_set_headers WHERE header_set_id = ?1 AND header_name = ?2",
+                        libsql::params![header_set_id, header_name],
+                    )
+                    .await
+                    .map_err(|e| GapError::database(e.to_string()))?;
+                Ok(())
+            }
+            DbBackend::Postgres { pool } => {
+                crate::database_postgres::pg_remove_header_set_header(pool, header_set_id, header_name).await
+            }
+        }
     }
 
     // ── Namespace discovery ─────────────────────────────────────────
 
     /// Return distinct namespace_ids that have tokens or active plugins.
     pub async fn list_distinct_namespaces(&self) -> Result<Vec<String>> {
-        let sql = "SELECT DISTINCT namespace_id FROM tokens \
-                   UNION \
-                   SELECT DISTINCT namespace_id FROM plugin_versions WHERE deleted = 0";
-        let mut rows = self.conn().query(sql, ())
-            .await
-            .map_err(|e| GapError::database(e.to_string()))?;
-        let mut result = Vec::new();
-        while let Some(row) = rows.next().await.map_err(|e| GapError::database(e.to_string()))? {
-            let ns: String = row.get(0).map_err(|e| GapError::database(e.to_string()))?;
-            result.push(ns);
+        match &self.inner {
+            DbBackend::LibSql { .. } => {
+                let sql = "SELECT DISTINCT namespace_id FROM tokens \
+                           UNION \
+                           SELECT DISTINCT namespace_id FROM plugin_versions WHERE deleted = 0";
+                let mut rows = self.conn().query(sql, ())
+                    .await
+                    .map_err(|e| GapError::database(e.to_string()))?;
+                let mut result = Vec::new();
+                while let Some(row) = rows.next().await.map_err(|e| GapError::database(e.to_string()))? {
+                    let ns: String = row.get(0).map_err(|e| GapError::database(e.to_string()))?;
+                    result.push(ns);
+                }
+                result.sort();
+                result.dedup();
+                Ok(result)
+            }
+            DbBackend::Postgres { pool } => {
+                crate::database_postgres::pg_list_distinct_namespaces(pool).await
+            }
         }
-        result.sort();
-        result.dedup();
-        Ok(result)
     }
 
     /// Return distinct scope_ids within a given namespace.
     pub async fn list_namespace_scopes(&self, namespace_id: &str) -> Result<Vec<String>> {
-        let sql = "SELECT DISTINCT scope_id FROM tokens WHERE namespace_id = ?1 \
-                   UNION \
-                   SELECT DISTINCT scope_id FROM plugin_versions WHERE namespace_id = ?1 AND deleted = 0";
-        let mut rows = self.conn().query(sql, libsql::params![namespace_id])
-            .await
-            .map_err(|e| GapError::database(e.to_string()))?;
-        let mut result = Vec::new();
-        while let Some(row) = rows.next().await.map_err(|e| GapError::database(e.to_string()))? {
-            let scope: String = row.get(0).map_err(|e| GapError::database(e.to_string()))?;
-            result.push(scope);
+        match &self.inner {
+            DbBackend::LibSql { .. } => {
+                let sql = "SELECT DISTINCT scope_id FROM tokens WHERE namespace_id = ?1 \
+                           UNION \
+                           SELECT DISTINCT scope_id FROM plugin_versions WHERE namespace_id = ?1 AND deleted = 0";
+                let mut rows = self.conn().query(sql, libsql::params![namespace_id])
+                    .await
+                    .map_err(|e| GapError::database(e.to_string()))?;
+                let mut result = Vec::new();
+                while let Some(row) = rows.next().await.map_err(|e| GapError::database(e.to_string()))? {
+                    let scope: String = row.get(0).map_err(|e| GapError::database(e.to_string()))?;
+                    result.push(scope);
+                }
+                result.sort();
+                result.dedup();
+                Ok(result)
+            }
+            DbBackend::Postgres { pool } => {
+                crate::database_postgres::pg_list_namespace_scopes(pool, namespace_id).await
+            }
         }
-        result.sort();
-        result.dedup();
-        Ok(result)
     }
 
     /// Return resource counts for a given namespace and scope.
     pub async fn get_scope_resource_counts(&self, ns: &str, scope: &str) -> Result<serde_json::Value> {
-        let plugin_count: i64 = {
-            let mut rows = self.conn().query(
-                "SELECT COUNT(*) FROM plugin_versions WHERE namespace_id = ?1 AND scope_id = ?2 AND deleted = 0",
-                libsql::params![ns, scope],
-            ).await.map_err(|e| GapError::database(e.to_string()))?;
-            if let Some(row) = rows.next().await.map_err(|e| GapError::database(e.to_string()))? {
-                row.get(0).map_err(|e| GapError::database(e.to_string()))?
-            } else {
-                0
+        match &self.inner {
+            DbBackend::LibSql { .. } => {
+                let plugin_count: i64 = {
+                    let mut rows = self.conn().query(
+                        "SELECT COUNT(*) FROM plugin_versions WHERE namespace_id = ?1 AND scope_id = ?2 AND deleted = 0",
+                        libsql::params![ns, scope],
+                    ).await.map_err(|e| GapError::database(e.to_string()))?;
+                    if let Some(row) = rows.next().await.map_err(|e| GapError::database(e.to_string()))? {
+                        row.get(0).map_err(|e| GapError::database(e.to_string()))?
+                    } else {
+                        0
+                    }
+                };
+                let token_count: i64 = {
+                    let mut rows = self.conn().query(
+                        "SELECT COUNT(*) FROM tokens WHERE namespace_id = ?1 AND scope_id = ?2 AND revoked_at IS NULL",
+                        libsql::params![ns, scope],
+                    ).await.map_err(|e| GapError::database(e.to_string()))?;
+                    if let Some(row) = rows.next().await.map_err(|e| GapError::database(e.to_string()))? {
+                        row.get(0).map_err(|e| GapError::database(e.to_string()))?
+                    } else {
+                        0
+                    }
+                };
+                let header_set_count: i64 = {
+                    let mut rows = self.conn().query(
+                        "SELECT COUNT(*) FROM header_sets WHERE namespace_id = ?1 AND scope_id = ?2",
+                        libsql::params![ns, scope],
+                    ).await.map_err(|e| GapError::database(e.to_string()))?;
+                    if let Some(row) = rows.next().await.map_err(|e| GapError::database(e.to_string()))? {
+                        row.get(0).map_err(|e| GapError::database(e.to_string()))?
+                    } else {
+                        0
+                    }
+                };
+                Ok(serde_json::json!({
+                    "plugins": plugin_count,
+                    "tokens": token_count,
+                    "header_sets": header_set_count,
+                }))
             }
-        };
-        let token_count: i64 = {
-            let mut rows = self.conn().query(
-                "SELECT COUNT(*) FROM tokens WHERE namespace_id = ?1 AND scope_id = ?2 AND revoked_at IS NULL",
-                libsql::params![ns, scope],
-            ).await.map_err(|e| GapError::database(e.to_string()))?;
-            if let Some(row) = rows.next().await.map_err(|e| GapError::database(e.to_string()))? {
-                row.get(0).map_err(|e| GapError::database(e.to_string()))?
-            } else {
-                0
+            DbBackend::Postgres { pool } => {
+                crate::database_postgres::pg_get_scope_resource_counts(pool, ns, scope).await
             }
-        };
-        let header_set_count: i64 = {
-            let mut rows = self.conn().query(
-                "SELECT COUNT(*) FROM header_sets WHERE namespace_id = ?1 AND scope_id = ?2",
-                libsql::params![ns, scope],
-            ).await.map_err(|e| GapError::database(e.to_string()))?;
-            if let Some(row) = rows.next().await.map_err(|e| GapError::database(e.to_string()))? {
-                row.get(0).map_err(|e| GapError::database(e.to_string()))?
-            } else {
-                0
-            }
-        };
-        Ok(serde_json::json!({
-            "plugins": plugin_count,
-            "tokens": token_count,
-            "header_sets": header_set_count,
-        }))
+        }
     }
 
     /// Parse a row from header_sets into a HeaderSet.

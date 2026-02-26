@@ -37,6 +37,7 @@ http-body-util = "0.1"
 http = "1"
 bytes = "1"
 libsql = { version = "0.9", features = ["core", "encryption"] }
+sqlx = { version = "0.8", features = ["runtime-tokio", "postgres", "chrono"] }
 tracing.workspace = true
 uuid = { version = "1", features = ["v4"] }
 x509-parser = "0.16"
@@ -53,3 +54,5 @@ tempfile = "3.13"
 reqwest = { version = "0.12", features = ["json"] }
 portpicker = "0.1"
 httpsig-hyper = "0.0.24"
+testcontainers = "0.23"
+testcontainers-modules = { version = "0.11", features = ["postgres"] }
