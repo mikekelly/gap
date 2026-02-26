@@ -342,7 +342,7 @@ fi
 RESPONSE=$(curl -ks -X DELETE "$GAP_SERVER_URL/plugins/$PLUGIN_ID" \
     -H "Authorization: Bearer $PW_HASH")
 
-if echo "$RESPONSE" | jq -e '.deleted == true' > /dev/null 2>&1; then
+if echo "$RESPONSE" | jq -e '.uninstalled == true' > /dev/null 2>&1; then
     log_pass "Plugin deleted"
 else
     log_fail "Failed to delete plugin: $RESPONSE"

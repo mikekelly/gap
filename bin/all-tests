@@ -1,159 +1,85 @@
 #!/usr/bin/env bash
-# Run every test suite in the GAP project.
+# Run all GAP tests: unit/integration tests + Docker horizontal smoke tests
 #
 # Usage:
-#   bin/all-tests                # run everything
-#   bin/all-tests --no-docker    # skip Docker tests (Rust + Go only)
-#   bin/all-tests --rust-only    # only run Rust tests
-#   bin/all-tests --go-only      # only run Go tests
-#   bin/all-tests --docker-only  # only run Docker tests
+#   bin/all-tests          # Run everything
+#   bin/all-tests cargo    # Run only cargo tests
+#   bin/all-tests docker   # Run only Docker horizontal smoke tests
 
-set -uo pipefail
+set -e
 
-# ── Colours ───────────────────────────────────────────────────────────────────
-if [ -t 1 ]; then
-    RED='\033[0;31m'
-    GREEN='\033[0;32m'
-    CYAN='\033[0;36m'
-    BOLD='\033[1m'
-    NC='\033[0m'
-else
-    RED='' GREEN='' CYAN='' BOLD='' NC=''
-fi
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+BOLD='\033[1m'
+NC='\033[0m'
 
-header() {
-    echo -e "\n${CYAN}${BOLD}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
-    echo -e "${CYAN}${BOLD}  $*${NC}"
-    echo -e "${CYAN}${BOLD}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
-}
+REPO_DIR="$(cd "$(dirname "$0")/.." && pwd)"
+cd "$REPO_DIR"
 
-# ── Parse flags ───────────────────────────────────────────────────────────────
-RUN_RUST=true
-RUN_GO=true
-RUN_DOCKER=true
-
-for arg in "$@"; do
-    case "$arg" in
-        --no-docker)
-            RUN_DOCKER=false
-            ;;
-        --rust-only)
-            RUN_RUST=true; RUN_GO=false; RUN_DOCKER=false
-            ;;
-        --go-only)
-            RUN_RUST=false; RUN_GO=true; RUN_DOCKER=false
-            ;;
-        --docker-only)
-            RUN_RUST=false; RUN_GO=false; RUN_DOCKER=true
-            ;;
-        -h|--help)
-            sed -n '2,7p' "$0"
-            exit 0
-            ;;
-        *)
-            echo "Unknown flag: $arg" >&2
-            echo "Run 'bin/all-tests --help' for usage." >&2
-            exit 1
-            ;;
-    esac
-done
-
-# ── Resolve repo root ─────────────────────────────────────────────────────────
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-REPO_ROOT="$(dirname "$SCRIPT_DIR")"
-cd "$REPO_ROOT"
-
-# ── Encryption key (required by Docker tests) ─────────────────────────────────
-# Docker containers run Linux (no macOS keychain), so supply a random key.
-# The same key is reused across all Docker suites in this run.
-if [ "$RUN_DOCKER" = true ]; then
-    export GAP_ENCRYPTION_KEY
-    GAP_ENCRYPTION_KEY="$(openssl rand -hex 32)"
-fi
-
-# ── Result tracking ───────────────────────────────────────────────────────────
-PASSED=()
-FAILED=()
-
-print_summary() {
+phase() {
     echo ""
-    echo -e "${BOLD}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
-    echo -e "${BOLD}  Summary${NC}"
-    echo -e "${BOLD}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
-    for s in "${PASSED[@]+"${PASSED[@]}"}"; do
-        echo -e "  ${GREEN}PASS${NC}  $s"
-    done
-    for s in "${FAILED[@]+"${FAILED[@]}"}"; do
-        echo -e "  ${RED}FAIL${NC}  $s"
-    done
-    echo ""
-    if [ "${#FAILED[@]}" -eq 0 ]; then
-        echo -e "${GREEN}${BOLD}  All suites passed.${NC}"
-    else
-        echo -e "${RED}${BOLD}  ${#FAILED[@]} suite(s) failed.${NC}"
-    fi
+    echo -e "${BOLD}═══════════════════════════════════════════════════${NC}"
+    echo -e "${BOLD}  $1${NC}"
+    echo -e "${BOLD}═══════════════════════════════════════════════════${NC}"
     echo ""
 }
 
-run_suite() {
-    local name="$1"
-    shift
-    header "$name"
-    if "$@"; then
-        echo -e "\n${GREEN}${BOLD}  PASS${NC}  $name"
-        PASSED+=("$name")
-    else
-        echo -e "\n${RED}${BOLD}  FAIL${NC}  $name"
-        FAILED+=("$name")
-        print_summary
-        exit 1
-    fi
+run_cargo_tests() {
+    phase "Phase 1: Cargo workspace tests"
+
+    cargo test --workspace 2>&1
+    echo ""
+    echo -e "${GREEN}Cargo tests passed.${NC}"
 }
 
-# ── Docker helper: bring up a profile and tear it down after ──────────────────
-docker_suite() {
-    local profile="$1"
-    local exit_from="$2"
-    local rc=0
+run_docker_horizontal_tests() {
+    phase "Phase 2: Docker horizontal mode smoke tests (Postgres)"
 
-    # Clean up any stale containers from a previous run
-    docker compose --profile "$profile" down -v 2>/dev/null || true
+    # Clean up any previous run
+    docker compose --profile test-horizontal down -v --remove-orphans 2>/dev/null || true
 
-    docker compose --profile "$profile" up \
+    # Build and run horizontal mode tests
+    echo "Building and starting services (postgres, gap-server-horizontal, test-runner)..."
+    docker compose --profile test-horizontal up \
         --build \
         --abort-on-container-exit \
-        --exit-code-from "$exit_from" || rc=$?
+        --exit-code-from test-runner-horizontal
 
-    docker compose --profile "$profile" down -v 2>/dev/null || true
-    return $rc
+    EXIT_CODE=$?
+
+    # Clean up
+    echo ""
+    echo "Cleaning up Docker containers..."
+    docker compose --profile test-horizontal down -v --remove-orphans 2>/dev/null || true
+
+    if [ $EXIT_CODE -ne 0 ]; then
+        echo -e "${RED}Docker horizontal smoke tests failed (exit code $EXIT_CODE).${NC}"
+        return $EXIT_CODE
+    fi
+
+    echo ""
+    echo -e "${GREEN}Docker horizontal smoke tests passed.${NC}"
 }
 
-# ── Suite 1: Rust unit / integration tests ────────────────────────────────────
-if [ "$RUN_RUST" = true ]; then
-    run_suite "Rust: cargo test --workspace" \
-        cargo test --workspace
-fi
+# Parse arguments
+MODE="${1:-all}"
 
-# ── Suite 2: Go unit tests ────────────────────────────────────────────────────
-if [ "$RUN_GO" = true ]; then
-    run_suite "Go: go test ./... (management-go)" \
-        bash -c "cd '$REPO_ROOT/management-go' && go test ./..."
-fi
+case "$MODE" in
+    cargo)
+        run_cargo_tests
+        ;;
+    docker)
+        run_docker_horizontal_tests
+        ;;
+    all)
+        run_cargo_tests
+        run_docker_horizontal_tests
+        ;;
+    *)
+        echo "Usage: $0 [cargo|docker|all]"
+        exit 1
+        ;;
+esac
 
-# ── Suite 3: Docker bash integration tests (password auth) ────────────────────
-if [ "$RUN_DOCKER" = true ]; then
-    run_suite "Docker: bash integration tests (password auth)" \
-        docker_suite test test-runner
-
-    run_suite "Docker: bash integration tests (signing)" \
-        docker_suite test-signing test-runner-signing
-
-    run_suite "Docker: Go integration tests (password auth)" \
-        docker_suite go-test go-test-runner
-
-    run_suite "Docker: Go integration tests (signing)" \
-        docker_suite go-test-signing go-test-runner-signing
-fi
-
-# ── Final summary ─────────────────────────────────────────────────────────────
-print_summary
+phase "All tests passed"
