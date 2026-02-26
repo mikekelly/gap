@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 )
@@ -80,11 +81,20 @@ func TestComputeContentDigest(t *testing.T) {
 	})
 }
 
-func TestBuildCanonicalString(t *testing.T) {
-	result := buildCanonicalString("POST", "/plugins", "sha-256=:abc123:", "1709000000", "nonce1")
-	expected := "@method: POST\n@path: /plugins\ncontent-digest: sha-256=:abc123:\nx-gap-timestamp: 1709000000\nx-gap-nonce: nonce1"
+func TestBuildSignatureParams(t *testing.T) {
+	result := buildSignatureParams(1709000000, "nonce1", "6a3b42c10443f618")
+	expected := `("@method" "@path" "content-digest");created=1709000000;nonce="nonce1";keyid="6a3b42c10443f618";alg="ed25519"`
 	if result != expected {
-		t.Errorf("canonical string mismatch:\n  got:  %q\n  want: %q", result, expected)
+		t.Errorf("signature params mismatch:\n  got:  %q\n  want: %q", result, expected)
+	}
+}
+
+func TestBuildSignatureBase(t *testing.T) {
+	params := buildSignatureParams(1709000000, "nonce1", "6a3b42c10443f618")
+	result := buildSignatureBase("POST", "/plugins", "sha-256=:abc123:", params)
+	expected := "\"@method\": POST\n\"@path\": /plugins\n\"content-digest\": sha-256=:abc123:\n\"@signature-params\": " + params
+	if result != expected {
+		t.Errorf("signature base mismatch:\n  got:  %q\n  want: %q", result, expected)
 	}
 }
 
@@ -118,32 +128,31 @@ func TestSignRequest(t *testing.T) {
 		t.Fatalf("signRequest failed: %v", err)
 	}
 
-	// Verify all headers are set
-	ts := req.Header.Get("X-Gap-Timestamp")
-	if ts == "" {
-		t.Error("missing X-Gap-Timestamp header")
+	// Verify Signature-Input is set and starts with sig1=(
+	sigInput := req.Header.Get("Signature-Input")
+	if sigInput == "" {
+		t.Error("missing Signature-Input header")
 	}
-	if _, err := strconv.ParseInt(ts, 10, 64); err != nil {
-		t.Errorf("X-Gap-Timestamp not a valid integer: %s", ts)
-	}
-
-	nonce := req.Header.Get("X-Gap-Nonce")
-	if nonce == "" {
-		t.Error("missing X-Gap-Nonce header")
-	}
-	if len(nonce) != 32 {
-		t.Errorf("nonce length: got %d, want 32", len(nonce))
-	}
-	// Verify nonce is valid hex
-	if _, err := hex.DecodeString(nonce); err != nil {
-		t.Errorf("nonce is not valid hex: %s", nonce)
+	if !strings.HasPrefix(sigInput, "sig1=(") {
+		t.Errorf("Signature-Input should start with sig1=(, got %q", sigInput)
 	}
 
-	sig := req.Header.Get("X-Gap-Signature")
-	if sig == "" {
-		t.Error("missing X-Gap-Signature header")
+	// Verify Signature is set, starts with sig1=: and ends with :
+	sigHeader := req.Header.Get("Signature")
+	if sigHeader == "" {
+		t.Error("missing Signature header")
 	}
-	sigBytes, err := base64.StdEncoding.DecodeString(sig)
+	if !strings.HasPrefix(sigHeader, "sig1=:") {
+		t.Errorf("Signature should start with sig1=:, got %q", sigHeader)
+	}
+	if sigHeader[len(sigHeader)-1] != ':' {
+		t.Errorf("Signature should end with :, got %q", sigHeader)
+	}
+
+	// Extract and decode signature bytes, verify length is 64
+	sigB64 := sigHeader[len("sig1=:"):]
+	sigB64 = sigB64[:len(sigB64)-1]
+	sigBytes, err := base64.StdEncoding.DecodeString(sigB64)
 	if err != nil {
 		t.Errorf("signature not valid base64: %v", err)
 	}
@@ -151,14 +160,7 @@ func TestSignRequest(t *testing.T) {
 		t.Errorf("signature length: got %d bytes, want 64", len(sigBytes))
 	}
 
-	keyID := req.Header.Get("X-Gap-Key-Id")
-	if keyID == "" {
-		t.Error("missing X-Gap-Key-Id header")
-	}
-	if len(keyID) != 16 {
-		t.Errorf("key ID length: got %d, want 16", len(keyID))
-	}
-
+	// Verify Content-Digest is set
 	digest := req.Header.Get("Content-Digest")
 	if digest == "" {
 		t.Error("missing Content-Digest header")
@@ -176,21 +178,27 @@ func TestSignRequestSignatureVerifiable(t *testing.T) {
 		t.Fatalf("signRequest failed: %v", err)
 	}
 
-	// Reconstruct what the Rust server does to verify
-	ts := req.Header.Get("X-Gap-Timestamp")
-	nonce := req.Header.Get("X-Gap-Nonce")
-	sig := req.Header.Get("X-Gap-Signature")
-	contentDigest := req.Header.Get("Content-Digest")
+	// Extract signature from header
+	sigHeader := req.Header.Get("Signature")
+	// Strip "sig1=:" prefix and ":" suffix
+	sigB64 := sigHeader[len("sig1=:"):]
+	sigB64 = sigB64[:len(sigB64)-1]
 
-	canonical := buildCanonicalString("POST", "/test", contentDigest, ts, nonce)
-
-	sigBytes, err := base64.StdEncoding.DecodeString(sig)
+	sigBytes, err := base64.StdEncoding.DecodeString(sigB64)
 	if err != nil {
 		t.Fatalf("decoding signature: %v", err)
 	}
 
+	// Reconstruct what the server does to verify
+	sigInput := req.Header.Get("Signature-Input")
+	// Strip "sig1=" prefix to get params
+	sigParams := sigInput[len("sig1="):]
+
+	contentDigest := req.Header.Get("Content-Digest")
+	sigBase := buildSignatureBase("POST", "/test", contentDigest, sigParams)
+
 	pubKey := key.Public().(ed25519.PublicKey)
-	if !ed25519.Verify(pubKey, []byte(canonical), sigBytes) {
+	if !ed25519.Verify(pubKey, []byte(sigBase), sigBytes) {
 		t.Error("signature should be verifiable with corresponding public key")
 	}
 }
@@ -306,18 +314,12 @@ func TestDoRequestWithSigning(t *testing.T) {
 		t.Errorf("path: got %q, want /plugins", receivedPath)
 	}
 
-	// Verify signing headers were sent
-	if receivedHeaders.Get("X-Gap-Timestamp") == "" {
-		t.Error("missing X-Gap-Timestamp in sent request")
+	// Verify RFC 9421 signing headers were sent
+	if receivedHeaders.Get("Signature-Input") == "" {
+		t.Error("missing Signature-Input in sent request")
 	}
-	if receivedHeaders.Get("X-Gap-Nonce") == "" {
-		t.Error("missing X-Gap-Nonce in sent request")
-	}
-	if receivedHeaders.Get("X-Gap-Signature") == "" {
-		t.Error("missing X-Gap-Signature in sent request")
-	}
-	if receivedHeaders.Get("X-Gap-Key-Id") == "" {
-		t.Error("missing X-Gap-Key-Id in sent request")
+	if receivedHeaders.Get("Signature") == "" {
+		t.Error("missing Signature in sent request")
 	}
 	if receivedHeaders.Get("Content-Digest") == "" {
 		t.Error("missing Content-Digest in sent request")
@@ -329,25 +331,43 @@ func TestDoRequestWithSigningVerifiable(t *testing.T) {
 	pubKey := key.Public().(ed25519.PublicKey)
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// Reconstruct and verify the signature server-side
-		ts := r.Header.Get("X-Gap-Timestamp")
-		nonce := r.Header.Get("X-Gap-Nonce")
-		sig := r.Header.Get("X-Gap-Signature")
+		// Reconstruct and verify the RFC 9421 signature server-side
+		sigInput := r.Header.Get("Signature-Input")
+		sigHeader := r.Header.Get("Signature")
 		contentDigest := r.Header.Get("Content-Digest")
 
-		canonical := buildCanonicalString(r.Method, r.URL.Path, contentDigest, ts, nonce)
-		sigBytes, err := base64.StdEncoding.DecodeString(sig)
+		// Strip "sig1=" prefix from Signature-Input to get params
+		sigParams := sigInput[len("sig1="):]
+
+		// Build signature base
+		sigBase := buildSignatureBase(r.Method, r.URL.Path, contentDigest, sigParams)
+
+		// Strip "sig1=:" prefix and ":" suffix from Signature
+		sigB64 := sigHeader[len("sig1=:") : len(sigHeader)-1]
+		sigBytes, err := base64.StdEncoding.DecodeString(sigB64)
 		if err != nil {
 			http.Error(w, "bad sig encoding", 400)
 			return
 		}
-		if !ed25519.Verify(pubKey, []byte(canonical), sigBytes) {
+		if !ed25519.Verify(pubKey, []byte(sigBase), sigBytes) {
 			http.Error(w, "signature verification failed", 401)
 			return
 		}
 
-		// Also verify timestamp is recent
-		tsInt, _ := strconv.ParseInt(ts, 10, 64)
+		// Parse created from sigParams to check timestamp
+		// Find ";created=" and extract the number
+		createdIdx := strings.Index(sigParams, ";created=")
+		if createdIdx < 0 {
+			http.Error(w, "missing created", 400)
+			return
+		}
+		rest := sigParams[createdIdx+len(";created="):]
+		semicolonIdx := strings.Index(rest, ";")
+		createdStr := rest
+		if semicolonIdx >= 0 {
+			createdStr = rest[:semicolonIdx]
+		}
+		tsInt, _ := strconv.ParseInt(createdStr, 10, 64)
 		now := time.Now().Unix()
 		if abs(now-tsInt) > 300 {
 			http.Error(w, "timestamp expired", 401)
@@ -390,12 +410,12 @@ func TestDoSSEWithSigning(t *testing.T) {
 	}
 	resp.Body.Close()
 
-	// Verify signing headers were sent for SSE requests too
-	if receivedHeaders.Get("X-Gap-Timestamp") == "" {
-		t.Error("missing X-Gap-Timestamp in SSE request")
+	// Verify RFC 9421 signing headers were sent for SSE requests too
+	if receivedHeaders.Get("Signature-Input") == "" {
+		t.Error("missing Signature-Input in SSE request")
 	}
-	if receivedHeaders.Get("X-Gap-Signature") == "" {
-		t.Error("missing X-Gap-Signature in SSE request")
+	if receivedHeaders.Get("Signature") == "" {
+		t.Error("missing Signature in SSE request")
 	}
 }
 
@@ -417,11 +437,11 @@ func TestDoRequestWithoutSigning(t *testing.T) {
 	resp.Body.Close()
 
 	// No signing headers should be present
-	if receivedHeaders.Get("X-Gap-Timestamp") != "" {
-		t.Error("X-Gap-Timestamp should not be set without signing key")
+	if receivedHeaders.Get("Signature-Input") != "" {
+		t.Error("Signature-Input should not be set without signing key")
 	}
-	if receivedHeaders.Get("X-Gap-Signature") != "" {
-		t.Error("X-Gap-Signature should not be set without signing key")
+	if receivedHeaders.Get("Signature") != "" {
+		t.Error("Signature should not be set without signing key")
 	}
 	// But Authorization should be present
 	if receivedHeaders.Get("Authorization") == "" {

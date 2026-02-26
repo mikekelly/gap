@@ -10,7 +10,6 @@ import (
 	"encoding/pem"
 	"fmt"
 	"net/http"
-	"strconv"
 	"time"
 )
 
@@ -51,17 +50,15 @@ func LoadSigningKey(pemBytes []byte) (ed25519.PrivateKey, error) {
 	return edKey, nil
 }
 
-// signRequest adds Ed25519 signature headers to an HTTP request.
+// signRequest adds RFC 9421 HTTP Message Signature headers to an HTTP request.
 // The signature format matches the gap-server's verification in signing.rs.
 //
 // Headers set:
-//   - X-Gap-Timestamp: Unix seconds when the request was signed
-//   - X-Gap-Nonce: random 32-char hex string (16 bytes)
 //   - Content-Digest: sha-256=:BASE64:
-//   - X-Gap-Signature: base64-encoded Ed25519 signature over canonical string
-//   - X-Gap-Key-Id: truncated SHA-256 of raw public key bytes (16 hex chars)
+//   - Signature-Input: sig1=("@method" "@path" "content-digest");created=...;nonce="...";keyid="...";alg="ed25519"
+//   - Signature: sig1=:BASE64SIGNATURE:
 func (c *Client) signRequest(req *http.Request, body []byte) error {
-	timestamp := strconv.FormatInt(time.Now().Unix(), 10)
+	created := time.Now().Unix()
 
 	nonce, err := generateNonce()
 	if err != nil {
@@ -69,35 +66,43 @@ func (c *Client) signRequest(req *http.Request, body []byte) error {
 	}
 
 	contentDigest := computeContentDigest(body)
-	canonical := buildCanonicalString(req.Method, req.URL.Path, contentDigest, timestamp, nonce)
-
-	sig := ed25519.Sign(c.signingKey, []byte(canonical))
-	sigB64 := base64.StdEncoding.EncodeToString(sig)
 
 	pubKey := c.signingKey.Public().(ed25519.PublicKey)
 	keyID := computeKeyID(pubKey)
 
-	req.Header.Set("X-Gap-Timestamp", timestamp)
-	req.Header.Set("X-Gap-Nonce", nonce)
+	sigParams := buildSignatureParams(created, nonce, keyID)
+	sigBase := buildSignatureBase(req.Method, req.URL.Path, contentDigest, sigParams)
+
+	sig := ed25519.Sign(c.signingKey, []byte(sigBase))
+	sigB64 := base64.StdEncoding.EncodeToString(sig)
+
 	req.Header.Set("Content-Digest", contentDigest)
-	req.Header.Set("X-Gap-Signature", sigB64)
-	req.Header.Set("X-Gap-Key-Id", keyID)
+	req.Header.Set("Signature-Input", "sig1="+sigParams)
+	req.Header.Set("Signature", "sig1=:"+sigB64+":")
 
 	return nil
 }
 
-// buildCanonicalString constructs the string that is signed/verified.
+// buildSignatureParams constructs the RFC 9421 signature-params component.
+// Format: ("@method" "@path" "content-digest");created=UNIX;nonce="HEX";keyid="HEX";alg="ed25519"
+func buildSignatureParams(created int64, nonce, keyid string) string {
+	return fmt.Sprintf(
+		`("@method" "@path" "content-digest");created=%d;nonce="%s";keyid="%s";alg="ed25519"`,
+		created, nonce, keyid,
+	)
+}
+
+// buildSignatureBase constructs the RFC 9421 signature base string that is signed/verified.
 // Format must match gap-server/src/signing.rs exactly:
 //
-//	@method: {METHOD}
-//	@path: {PATH}
-//	content-digest: {DIGEST}
-//	x-gap-timestamp: {TIMESTAMP}
-//	x-gap-nonce: {NONCE}
-func buildCanonicalString(method, path, contentDigest, timestamp, nonce string) string {
+//	"@method": METHOD
+//	"@path": PATH
+//	"content-digest": DIGEST
+//	"@signature-params": PARAMS
+func buildSignatureBase(method, path, contentDigest, signatureParams string) string {
 	return fmt.Sprintf(
-		"@method: %s\n@path: %s\ncontent-digest: %s\nx-gap-timestamp: %s\nx-gap-nonce: %s",
-		method, path, contentDigest, timestamp, nonce,
+		"\"@method\": %s\n\"@path\": %s\n\"content-digest\": %s\n\"@signature-params\": %s",
+		method, path, contentDigest, signatureParams,
 	)
 }
 
