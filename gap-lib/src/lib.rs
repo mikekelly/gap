@@ -11,6 +11,7 @@ pub mod paths;
 pub mod plugin_matcher;
 pub mod plugin_runtime;
 pub mod database;
+pub mod database_libsql;
 pub mod database_postgres;
 pub mod proxy;
 pub mod proxy_transforms;
