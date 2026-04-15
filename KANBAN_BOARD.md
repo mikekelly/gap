@@ -7,6 +7,17 @@
 ## Ready
 <!-- Designed + planned, can be picked up -->
 
+### Horizontal mode with shared PostgreSQL (GAP docker-compose first)
+Run GAP as one logical multi-replica service, not as a single-process singleton.
+
+Scope:
+1. Add pluggable state storage so GAP can run on external PostgreSQL (while keeping current embedded libSQL mode for local/single-node use).
+2. Implement replay protection and horizontal correctness directly against PostgreSQL, explicitly disabling single-mode `TokenCache` and in-memory `NonceCache` in phase 0.
+3. Define and enforce horizontal-mode data protection assumptions (Postgres/platform encryption at rest, TLS to DB, and DB-role isolation).
+4. Deliver GAP's own docker-compose profile that proves local operation with external Postgres before broad rollout.
+
+Spec: `docs/horizontal-mode-postgres-spec.md`
+
 ### Rich request/response logging in activity
 Each activity entry should capture three phases with headers (YAML-style) and body (truncated):
 1. **Incoming request** — pre-transform headers + body as received from the client
@@ -31,4 +42,3 @@ CA certs are currently only exported to disk (`~/Library/Application Support/gap
 
 ### Prevent multiple server instances / stale CA conflicts
 On startup, if a CA cert already exists on disk, verify its private key matches the one in the database. If it doesn't match (another instance wrote a different CA), log a clear error and refuse to launch. This catches the multi-instance problem at the source — no lockfile needed, just a crypto check.
-
